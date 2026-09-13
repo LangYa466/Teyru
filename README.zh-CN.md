@@ -421,7 +421,9 @@ sh scripts/bench.sh       # 与 JVM 对照的性能测试（需要 java 才会�
 ```
 
 新增测试只需在 `tests/programs/` 放 `xxx.teyru` 与 `xxx.expected`；
-若程序需要命令行参数，再放 `xxx.args`（每行一个参数）。`go test` 会自动处理。
+若程序需要命令行参数，再放 `xxx.args`（每行一个参数）；程序如果**应该**失败，
+用 `xxx.exit` 写它必须结束时的状态码、`xxx.experr` 写它应该输出到 stderr 的内容。
+`go test` 会自动处理。
 
 贡献前请读 [AGENTS.md](AGENTS.md)。
 

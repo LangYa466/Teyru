@@ -439,7 +439,8 @@ sh scripts/bench.sh       # JVM との比較（java がある場合のみ JVM �
 ```
 
 テストを追加するには `tests/programs/` に `xxx.teyru` と `xxx.expected` を置きます。
-コマンドライン引数が必要なら `xxx.args`（1 行に 1 引数）も追加してください。
+コマンドライン引数が必要なら `xxx.args`（1 行に 1 引数）を、プログラムが**失敗する
+べき**なら `xxx.exit`（終了ステータス）と `xxx.experr`（stderr に出す内容）も追加してください。
 `go test` が残りを処理します。
 
 コントリビュートの前に [AGENTS.md](AGENTS.md) を読んでください。

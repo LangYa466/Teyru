@@ -440,7 +440,9 @@ sh scripts/bench.sh       # 與 JVM 對照的效能測試（需要 java 才會�
 ```
 
 新增測試只要在 `tests/programs/` 放 `xxx.teyru` 與 `xxx.expected`；
-若程式需要命令列參數，再放 `xxx.args`（每行一個參數）。`go test` 會自動處理。
+若程式需要命令列參數，再放 `xxx.args`（每行一個參數）；程式如果**應該**失敗，
+用 `xxx.exit` 寫它必須結束時的狀態碼、`xxx.experr` 寫它應該印到 stderr 的內容。
+`go test` 會自動處理。
 
 貢獻前請讀 [AGENTS.md](AGENTS.md)。
 

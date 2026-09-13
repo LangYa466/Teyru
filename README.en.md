@@ -454,8 +454,9 @@ sh scripts/bench.sh       # JVM comparison (the JVM half runs only if java is in
 ```
 
 To add a test, drop `xxx.teyru` and `xxx.expected` into `tests/programs/`; if the program
-takes command line arguments, add `xxx.args` (one argument per line). `go test` handles
-the rest.
+takes command line arguments, add `xxx.args` (one argument per line); if the program is
+*meant* to fail, add `xxx.exit` with the status it must exit with and `xxx.experr` with
+what it should write to stderr. `go test` handles the rest.
 
 Please read [AGENTS.md](AGENTS.md) before contributing.
 
