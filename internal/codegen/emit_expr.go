@@ -516,6 +516,21 @@ func (e *Emitter) fieldRead(f *ast.Field, recv ast.Expr) string {
 		" if (!" + n + ") ty_npe(); " + n + "->f_" + mangle(f.Name) + "; })"
 }
 
+// fieldStore renders an assignable field through a receiver expression.
+//
+// A store through a null reference has to throw the way a load does. This used
+// to be a bare `((Box*)p)->f_v`, so `Box b = null; b.v = 5` was a segmentation
+// fault instead of a NullPointerException: the check was on the read path only.
+// The statement expression's value is the address of the field, so what comes
+// back is still an lvalue, which both the assignment and lvalueTemp's `&(...)`
+// need.
+func (e *Emitter) fieldStore(f *ast.Field, recv string) string {
+	n := e.tmpName()
+	ct := cname(f.Owner)
+	return "(*({ " + ct + "* " + n + " = (" + ct + "*)" + recv + ";" +
+		" if (!" + n + ") ty_npe(); &" + n + "->f_" + mangle(f.Name) + "; }))"
+}
+
 // fieldAccess renders a field read through a receiver expression.
 func (e *Emitter) fieldAccess(f *ast.Field, recv string) string {
 	if f.Owner == nil {
@@ -815,7 +830,7 @@ func (e *Emitter) lvalue(x ast.Expr) string {
 			if f.Mods.Has(ast.ModStatic) {
 				return "G_" + mangle(f.Owner.Full) + "_" + mangle(f.Name)
 			}
-			return e.fieldAccess(f, e.tmpRef(e.expr(v.X)))
+			return e.fieldStore(f, e.tmpRef(e.expr(v.X)))
 		}
 		return "0"
 	case *ast.Index:
