@@ -31,6 +31,7 @@ Teyru 原始碼 (.teyru)
 - [語言速覽](#語言速覽)
 - [支援的語言特性](#支援的語言特性)
 - [標準程式庫](#標準程式庫)
+- [編輯器與工具](#編輯器與工具)
 - [專案結構](#專案結構)
 - [執行期模型](#執行期模型)
 - [與 Java 的差異](#與-java-的差異)
@@ -327,6 +328,17 @@ teyru build --native impl.c program.teyru            # 一起編譯
 
 ---
 
+## 編輯器與工具
+
+- **VS Code**：`editors/vscode/` 提供 `.teyru` 的 TextMate 語法highlight、語言設定與片段。
+  用 `npx @vscode/vsce package` 打包，再以 `code --install-extension teyru-0.1.0.vsix` 安裝。
+- **tree-sitter**：`editors/tree-sitter-teyru/` 是完整文法，附 highlight query、縮排 query
+  與 corpus 測試，Neovim、Helix、Zed 等可直接使用。
+- GitHub 目前仍把 `.teyru` 顯示成 Java：linguist 還沒有 Teyru 的定義，
+  `.gitattributes` 先對應到最接近的語法。
+
+---
+
 ## 專案結構
 
 | 路徑 | 說明 |
@@ -347,6 +359,7 @@ teyru build --native impl.c program.teyru            # 一起編譯
 | `examples` | 範例程式與 JVM 對照的 benchmark（`bench_*.teyru` 與 `.java`） |
 | `scripts` | 開發腳本：`bench.sh` 效能量測、`pre-commit` 掛勾 |
 | `docs` | 語言參考、診斷碼、架構 |
+| `editors` | 編輯器支援：VS Code 擴充與 tree-sitter 文法 |
 
 ---
 

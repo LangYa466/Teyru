@@ -33,6 +33,7 @@ into `opt`, `llc` or a custom pass; `./teyru emit` prints the generated C.
 - [Language tour](#language-tour)
 - [Language features](#language-features)
 - [Standard library](#standard-library)
+- [Editors and tooling](#editors-and-tooling)
 - [Project layout](#project-layout)
 - [Runtime model](#runtime-model)
 - [Differences from Java](#differences-from-java)
@@ -331,6 +332,20 @@ teyru build --native impl.c program.teyru            # compile them together
 
 ---
 
+## Editors and tooling
+
+- **VS Code**: `editors/vscode/` adds TextMate syntax highlighting, language
+  configuration and snippets for `.teyru` files. Package it with
+  `npx @vscode/vsce package` and install the result with
+  `code --install-extension teyru-0.1.0.vsix`.
+- **tree-sitter**: `editors/tree-sitter-teyru/` is a complete grammar with
+  highlight queries, indentation queries and corpus tests, usable from Neovim,
+  Helix, Zed and anything else that loads tree-sitter parsers.
+- GitHub still labels `.teyru` files as Java. Linguist has no Teyru definition
+  yet; `.gitattributes` maps the extension to the closest grammar until it does.
+
+---
+
 ## Project layout
 
 | Path | Purpose |
@@ -351,6 +366,7 @@ teyru build --native impl.c program.teyru            # compile them together
 | `examples` | Examples and the JVM comparison benchmarks (`bench_*.teyru` and `.java`) |
 | `scripts` | Development scripts: `bench.sh`, the `pre-commit` hook |
 | `docs` | Language reference, diagnostics, architecture |
+| `editors` | Editor support: the VS Code extension and the tree-sitter grammar |
 
 ---
 

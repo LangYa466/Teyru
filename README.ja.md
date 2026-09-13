@@ -33,6 +33,7 @@ Teyru ソース (.teyru)
 - [言語ツアー](#言語ツアー)
 - [対応している言語機能](#対応している言語機能)
 - [標準ライブラリ](#標準ライブラリ)
+- [エディタとツール](#エディタとツール)
 - [プロジェクト構成](#プロジェクト構成)
 - [ランタイムモデル](#ランタイムモデル)
 - [Java との違い](#java-との違い)
@@ -313,6 +314,18 @@ teyru build --native impl.c program.teyru            # 一緒にコンパイル
 
 ---
 
+## エディタとツール
+
+- **VS Code**: `editors/vscode/` が `.teyru` の TextMate 構文ハイライト、言語設定、
+  スニペットを提供します。`npx @vscode/vsce package` でパッケージし、
+  `code --install-extension teyru-0.1.0.vsix` でインストールします。
+- **tree-sitter**: `editors/tree-sitter-teyru/` はハイライトクエリ、インデントクエリ、
+  corpus テストを備えた完全な文法で、Neovim、Helix、Zed などから使えます。
+- GitHub は現在も `.teyru` を Java として表示します。linguist に Teyru の定義が
+  まだ無いためで、`.gitattributes` が最も近い文法に対応づけています。
+
+---
+
 ## プロジェクト構成
 
 | パス | 役割 |
@@ -333,6 +346,7 @@ teyru build --native impl.c program.teyru            # 一緒にコンパイル
 | `examples` | サンプルと JVM 比較用 benchmark（`bench_*.teyru` と `.java`） |
 | `scripts` | 開発スクリプト：`bench.sh`、`pre-commit` フック |
 | `docs` | 言語リファレンス、診断コード、アーキテクチャ |
+| `editors` | エディタ支援：VS Code 拡張と tree-sitter 文法 |
 
 ---
 
