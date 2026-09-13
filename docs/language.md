@@ -476,6 +476,17 @@ for (String n : names) {
 | `com.google.gson` | `lib/10`、`lib/19` | Gson 的樹狀 API，以及由編譯器產生的物件綁定（見 [docs/json.md](json.md)） |
 | 框架 | `lib/17`、`lib/18` | Spring 形狀的容器與 web 層（見 [docs/framework.md](framework.md)） |
 
+### 名稱怎麼找
+
+簡單名稱照 JLS 6.5.5：先看檔案自己的套件，再看單一型別匯入，再看 on-demand
+匯入，最後才看程式整體的名字（預設套件與前綴）。兩個 `import p.*` 都提供同一個
+名字時是 `TY-TYP-0099`，不會照宣告順序挑一個。
+
+前綴的名字是全域的——這正是 `List`、`String` 不加 import 就能用的原因——但
+**具名套件看不到預設套件**（JLS 7.4.2）。所以使用者在預設套件宣告 `class Node`
+不會弄壞標準庫自己講的 `Node`；反過來，在 `package teyru` 裡宣告一個前綴已經有
+的名字是 `TY-TYP-0001` 重複宣告，因為兩者的完整名稱相同。
+
 ### 沒有的東西
 
 反射、執行緒、`Stream`／`Spliterator`、`BigDecimal`／`BigInteger`、
@@ -499,8 +510,13 @@ for (String n : names) {
 10. 同名區域類別：Java 把區域類別限縮在它的區塊（JLS 6.3），所以同一個類別的
     兩個方法可以各宣告一個 `class Local`；Teyru 以簡單名稱透過外圍型別解析，
     這種寫法會回報 `TY-TYP-0001`。
-11. lambda 的型別引數推論不會從主體回推，`f.compose(v -> v * 10)` 這種沒有目標
-    型別的寫法需要寫出型別見證（javac 也拒絕該例，只是訊息不同）。
+11. lambda 的型別引數推論從主體回推，但只在**直接**的位置：目標型別是
+    `Fn<String, ? extends R>` 而主體是 `s -> s.length()` 時，`R` 定為 `Integer`。
+    推論不會穿過第二層（`map(...).collect(...)` 這種接龍要靠目標型別或型別見證），
+    也沒有 JLS 18 的完整約束求解。javac 對同樣的程式常常也不需要這些。
+12. **沒有捕獲轉換**：`List<? extends Number>` 在這裡就是 `List<Number>`。Java 靠捕獲
+    擋下的寫入（對 `? extends` 的容器 `add`）這裡擋不住；反過來說，Java 靠捕獲才
+    能編過的讀取（`list.get(0).doubleValue()`）這裡直接可行。
 
 ## 13. 尚未實作
 
