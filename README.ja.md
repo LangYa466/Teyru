@@ -240,6 +240,10 @@ class Main {
 annotation processor は不要です。
 
 ```teyru
+import lombok.Data
+import lombok.AllArgsConstructor
+import lombok.Builder
+
 @Data
 @AllArgsConstructor
 @Builder
@@ -248,8 +252,13 @@ class Person {
   private int age
 }
 
-Person p = Person.builder().name("ada").age(36).build()
-System.out.println(p.getName() + " " + p.getAge())
+class Main {
+  public static void main(String[] args) {
+    Person p = Person.builder().name("ada").age(36).build()
+    System.out.println(p.getName() + " " + p.getAge())
+    System.out.println(p)
+  }
+}
 ```
 
 完全な一覧と差異は **[docs/lombok.md](docs/lombok.md)** にあります

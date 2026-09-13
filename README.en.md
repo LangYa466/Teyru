@@ -276,9 +276,13 @@ class Person {
   private int age
 }
 
-Person p = Person.builder().name("ada").age(36).build()
-System.out.println(p.getName() + " " + p.getAge())
-System.out.println(p)
+class Main {
+  public static void main(String[] args) {
+    Person p = Person.builder().name("ada").age(36).build()
+    System.out.println(p.getName() + " " + p.getAge())
+    System.out.println(p)
+  }
+}
 ```
 
 The full list and the differences are in **[docs/lombok.md](docs/lombok.md)**:

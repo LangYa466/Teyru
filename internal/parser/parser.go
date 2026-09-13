@@ -170,7 +170,10 @@ func (p *parser) speculate(fn func() bool) bool {
 
 func (p *parser) parseFile() *ast.File {
 	file := &ast.File{Src: p.f}
-	p.skipAnnotations()
+	// Annotations are NOT skipped here. In Java a compilation unit's annotations
+	// belong to the declaration that follows, and a file that starts with one
+	// (`@Data` on the first line, the shape every README uses) was losing it:
+	// the type declaration loop below parses them and attaches them to the type.
 	if p.is("package") {
 		p.next()
 		file.Package = p.qualifiedName()
@@ -274,8 +277,6 @@ func (p *parser) isTypeDeclStart() bool {
 	}
 	return false
 }
-
-func (p *parser) skipAnnotations() { p.parseAnnotations() }
 
 func (p *parser) parseAnnotations() []*ast.Annotation {
 	var out []*ast.Annotation

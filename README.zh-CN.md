@@ -232,6 +232,10 @@ class Main {
 类型检查与代码生成路径，不需要 annotation processor。
 
 ```teyru
+import lombok.Data
+import lombok.AllArgsConstructor
+import lombok.Builder
+
 @Data
 @AllArgsConstructor
 @Builder
@@ -240,8 +244,13 @@ class Person {
   private int age
 }
 
-Person p = Person.builder().name("ada").age(36).build()
-System.out.println(p.getName() + " " + p.getAge())
+class Main {
+  public static void main(String[] args) {
+    Person p = Person.builder().name("ada").age(36).build()
+    System.out.println(p.getName() + " " + p.getAge())
+    System.out.println(p)
+  }
+}
 ```
 
 完整清单与差异见 **[docs/lombok.md](docs/lombok.md)**：`@Getter`／`@Setter`／`@ToString`／
