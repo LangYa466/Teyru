@@ -192,6 +192,13 @@ func (c *Checker) findMain() {
 		var visit func(cl *ast.Class)
 		visit = func(cl *ast.Class) {
 			for _, m := range cl.Methods["main"] {
+				// JEP 512 lets a *compact* file have an instance main; a named
+				// class does not, which javac reports as "main method not found
+				// in class Main". Without this Teyru accepted one and emitted an
+				// entry point that did not compile.
+				if !m.IsStatic() && !isStaticCtx(cl) {
+					continue
+				}
 				if m.Result == ast.TVoid && (len(m.Params) == 0 || len(m.Params) == 1 && isStringArray(m.Params[0])) {
 					cands = append(cands, m)
 				}

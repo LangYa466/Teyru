@@ -421,6 +421,7 @@ try {
 | 類別 | 內容 |
 |---|---|
 | `Object` | `toString`、`hashCode`、`equals`、`getClass` |
+| 陣列 | `length`、元素存取、`clone`；`toString` 印成 `[array]`（Java 是 `[I@<hash>`；Teyru 的陣列不帶元素型別，印不出 `[I` 這種拼法） |
 | `String` | `length`、`charAt`、`isEmpty`、`equals`、`hashCode`、`indexOf`、`substring`、`toUpperCase`、`toLowerCase`、`trim`、`contains`、`startsWith`、`endsWith`、`replace`、`compareTo`、`concat`、`valueOf`（多載） |
 | `StringBuilder` | `append`（String／Object／int／long／char／double／boolean）、`toString`、`length` |
 | `Math` | `PI`、`abs`、`max`、`min`、`sqrt`、`pow`、`floor`、`ceil`、`round`、`random` |
