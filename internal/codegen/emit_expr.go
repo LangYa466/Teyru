@@ -271,9 +271,6 @@ func (e *Emitter) strLit(s string) string {
 	return fmt.Sprintf("((tystr*)&S%d)", id)
 }
 
-// finishStrings rewrites static string globals so their data pointer is valid.
-func (e *Emitter) stringGlobals() string { return "" }
-
 func (e *Emitter) ident(v *ast.Ident) string {
 	switch r := v.Ref.(type) {
 	case *ast.Field:
@@ -403,7 +400,7 @@ func (e *Emitter) selectExpr(v *ast.Select) string {
 	}
 	if s, ok := v.Ref.(string); ok && s == "length" {
 		arr := e.tmpRef(e.expr(v.X))
-		return "(" + arr + " ? " + arr + "->len : (int64_t)ty_aioobe(0, 0))"
+		return "(" + arr + " ? " + arr + "->len : (int64_t)(intptr_t)ty_npe())"
 	}
 	if f, ok := v.Ref.(*ast.Field); ok {
 		if f.Mods.Has(ast.ModStatic) {
@@ -415,23 +412,40 @@ func (e *Emitter) selectExpr(v *ast.Select) string {
 	return "0"
 }
 
-// boundCheck wraps an array access with an inline range test.
-func (e *Emitter) boundCheck(a, i string) string {
+// boundCheck wraps an array access with the two tests Java applies, in Java's
+// order: a null reference throws NullPointerException, and a non-null array has
+// its index tested against the length, throwing ArrayIndexOutOfBoundsException.
+// The index expression is evaluated before either test, as it is in Java.
+//
+// The result is the address of the checked element rather than its index. The
+// tests have to run before the element is formed, which a plain subscript
+// cannot promise: C may load the array's data pointer before it evaluates the
+// subscript, dereferencing a null array instead of throwing.
+func (e *Emitter) boundCheck(a, i, slot string) string {
 	n := e.tmpName()
-	return "({ tyarr* " + n + " = (tyarr*)" + a + "; int64_t _i = (int64_t)(" + i + ");" +
-		" (_i < 0 || _i >= " + n + "->len) ? (int64_t)(intptr_t)ty_aioobe(_i, " + n + "->len), (int64_t)0 : _i; })"
+	k := e.tmpName()
+	return "({ tyarr* " + n + " = (tyarr*)" + a + "; int64_t " + k + " = (int64_t)(" + i + ");" +
+		" if (!" + n + ") ty_npe();" +
+		" if (" + k + " < 0 || " + k + " >= " + n + "->len) ty_aioobe(" + k + ", " + n + "->len);" +
+		" (" + slot + "*)" + n + "->data + " + k + "; })"
+}
+
+// elemSlot is the C type of the slot an array of elem holds: a reference is
+// stored as an untyped pointer, a primitive as its own value.
+func (e *Emitter) elemSlot(elem ast.Type) string {
+	if e.isRef(elem) {
+		return "void*"
+	}
+	return e.ctype(elem)
 }
 
 func (e *Emitter) indexExpr(v *ast.Index) string {
-	a := e.tmpRef(e.expr(v.X))
-	i := e.expr(v.Index)
 	elem := v.GetType()
-	cast := e.ctype(elem)
-	idx := e.boundCheck(a, i)
+	elemPtr := "(*" + e.boundCheck(e.expr(v.X), e.expr(v.Index), e.elemSlot(elem)) + ")"
 	if e.isRef(elem) {
-		return "(((" + cast + ")((void**)((tyarr*)" + a + ")->data)[" + idx + "]))"
+		return "(((" + e.ctype(elem) + ")" + elemPtr + "))"
 	}
-	return "((((" + cast + "*)((tyarr*)" + a + ")->data)[" + idx + "]))"
+	return "(" + elemPtr + ")"
 }
 
 func (e *Emitter) cast(v *ast.Cast) string {
@@ -451,8 +465,7 @@ func (e *Emitter) cast(v *ast.Cast) string {
 	if ct, ok := dst.(*ast.ClassType); ok {
 		return "((" + cname(ct.Class) + "*)ty_checkcast((tyobj*)" + e.refExpr(v.X) + ", &cls_" + mangle(ct.Class.Full) + "))"
 	}
-	if arr, ok := dst.(*ast.ArrayType); ok {
-		_ = arr
+	if _, ok := dst.(*ast.ArrayType); ok {
 		return "((tyarr*)ty_checkcast((tyobj*)" + e.refExpr(v.X) + ", &cls_" + mangle(e.prog.ArrayClass().Full) + "))"
 	}
 	return "(" + e.ctype(dst) + ")(" + inner + ")"
@@ -527,12 +540,25 @@ func (e *Emitter) unaryInner(v *ast.Unary) string {
 		if v.Op == "--" {
 			op = "- 1"
 		}
+		decl, ref := e.lvalueTemp(v.X)
 		if v.Postfix {
-			return "((" + e.lvalue(v.X) + ") += " + op + ", (" + e.lvalue(v.X) + ") - (" + op + "))"
+			// the value of a postfix update is the one the target held before it
+			return "({ " + decl + ref + " += " + op + "; " + ref + " - (" + op + "); })"
 		}
-		return "((" + e.lvalue(v.X) + ") += " + op + ")"
+		return "({ " + decl + ref + " += " + op + "; })"
 	}
 	return x
+}
+
+// lvalueTemp binds an lvalue to a temporary pointer. An update or a compound
+// assignment needs the target twice, and repeating the lvalue would evaluate an
+// index or a receiver with side effects a second time; dereferencing the shared
+// temporary keeps that to one evaluation. The declaration is spliced into a
+// statement expression by the caller.
+func (e *Emitter) lvalueTemp(x ast.Expr) (string, string) {
+	n := e.tmpName()
+	t := e.ctype(x.GetType())
+	return t + "* " + n + " = (" + t + "*)&(" + e.lvalue(x) + "); ", "(*" + n + ")"
 }
 
 // lvalue renders an assignable expression. Static targets are returned without
@@ -557,14 +583,7 @@ func (e *Emitter) lvalue(x ast.Expr) string {
 		}
 		return "0"
 	case *ast.Index:
-		a := e.tmpRef(e.expr(v.X))
-		i := e.expr(v.Index)
-		elem := v.GetType()
-		idx := e.boundCheck(a, i)
-		if e.isRef(elem) {
-			return "((((void**)((tyarr*)" + a + ")->data)[" + idx + "]))"
-		}
-		return "((((" + e.ctype(elem) + "*)((tyarr*)" + a + ")->data)[" + idx + "]))"
+		return "(*" + e.boundCheck(e.expr(v.X), e.expr(v.Index), e.elemSlot(v.GetType())) + ")"
 	}
 	return e.expr(x)
 }
@@ -655,6 +674,63 @@ func (e *Emitter) foldBinary(v *ast.Binary) (string, bool) {
 	return e.literal(&ast.Literal{Kind: kind, Int: uint64(r)}), true
 }
 
+// flatOps are the operators whose left-deep runs are spelled as one flat chain.
+// Each is left-associative in C with the same meaning as in Teyru, so dropping
+// the parentheses cannot change the value. Division and remainder are absent
+// because their grouping matters, and `>>>` has its own unsigned emission.
+var flatOps = map[string]bool{
+	"+": true, "-": true, "*": true, "&": true, "|": true, "^": true,
+	"<<": true, ">>": true, "&&": true, "||": true,
+}
+
+// flattenable reports whether a binary node is a left-deep run of one operator
+// that can be spelled flat. A chain such as `a + b + c + ...` otherwise hands
+// the C compiler one parenthesis level per term, which overflows its parser on
+// a chain of a few thousand terms; the flat spelling compiles.
+func (e *Emitter) flattenable(v *ast.Binary) bool {
+	if !flatOps[v.Op] {
+		return false
+	}
+	// a string `+` concatenates rather than adds, and is emitted as a chain of
+	// runtime calls already
+	if _, ok := v.GetType().(*ast.PrimType); !ok {
+		return false
+	}
+	b, ok := v.X.(*ast.Binary)
+	return ok && e.flatSpine(v, b)
+}
+
+// flatSpine reports whether b continues a left-deep run of v's operator: the
+// same operator, and not a constant that the nested spelling would have folded
+// instead of computing in C.
+func (e *Emitter) flatSpine(v, b *ast.Binary) bool {
+	if b.Op != v.Op {
+		return false
+	}
+	_, folds := e.foldBinary(b)
+	return !folds
+}
+
+// flatChain renders a left-deep run of one operator as a single chain, with the
+// operands in their original order and each rendered as the nested spelling
+// rendered it. Only the left spine is flattened: a run on the right, as in
+// `a - (b - c)`, keeps its parentheses because its grouping differs.
+func (e *Emitter) flatChain(v *ast.Binary) string {
+	if b, ok := v.X.(*ast.Binary); ok && e.flatSpine(v, b) {
+		return e.flatChain(b) + " " + v.Op + " " + e.flatOperand(v.Y, v)
+	}
+	return e.flatOperand(v.X, v) + " " + v.Op + " " + e.flatOperand(v.Y, v)
+}
+
+// flatOperand renders one operand of a chain: a short-circuit operator tests
+// its operands, any other coerces them.
+func (e *Emitter) flatOperand(x ast.Expr, v *ast.Binary) string {
+	if v.Op == "&&" || v.Op == "||" {
+		return e.cond(x)
+	}
+	return e.operand(x, v.OpType)
+}
+
 func (e *Emitter) binary(v *ast.Binary) string {
 	if s, ok := e.foldBinary(v); ok {
 		return s
@@ -669,6 +745,9 @@ func (e *Emitter) binary(v *ast.Binary) string {
 			ut = "uint32_t"
 		}
 		return "(" + e.ctype(v.GetType()) + ")((" + ut + ")(" + e.expr(v.X) + ") >> " + e.expr(v.Y) + ")"
+	}
+	if e.flattenable(v) {
+		return "(" + e.flatChain(v) + ")"
 	}
 	lt, rt := v.X.GetType(), v.Y.GetType()
 	switch v.Op {
@@ -712,8 +791,6 @@ func (e *Emitter) operand(x ast.Expr, op ast.Type) string {
 func (e *Emitter) equality(v *ast.Binary, lt, rt ast.Type) string {
 	ls, lsOk := lt.(*ast.PrimType)
 	rs, rsOk := rt.(*ast.PrimType)
-	_ = ls
-	_ = rs
 	switch {
 	case lsOk && rsOk:
 		return "(" + e.expr(v.X) + " " + v.Op + " " + e.expr(v.Y) + ")"
@@ -766,18 +843,24 @@ func isFloating(t ast.Type) bool {
 
 // concat renders Java string concatenation.
 func (e *Emitter) concat(v *ast.Binary) string {
-	parts := []string{}
+	return e.concatFrom(e.stringOperand(v.X), v.Y)
+}
+
+// concatFrom builds the concatenation of an already-rendered left operand with
+// the string parts of x. It is used when the left operand is a value read
+// through a bound temporary rather than an expression of its own.
+func (e *Emitter) concatFrom(first string, x ast.Expr) string {
+	parts := []string{first}
 	var collect func(ast.Expr)
-	collect = func(x ast.Expr) {
-		if b, ok := x.(*ast.Binary); ok && b.Op == "+" && e.isStringType(b.GetType()) {
+	collect = func(y ast.Expr) {
+		if b, ok := y.(*ast.Binary); ok && b.Op == "+" && e.isStringType(b.GetType()) {
 			collect(b.X)
 			collect(b.Y)
 			return
 		}
-		parts = append(parts, e.stringOperand(x))
+		parts = append(parts, e.stringOperand(y))
 	}
-	collect(v.X)
-	collect(v.Y)
+	collect(x)
 	out := parts[0]
 	for _, p := range parts[1:] {
 		out = "ty_str_concat(" + out + ", " + p + ")"
@@ -824,11 +907,21 @@ func (e *Emitter) targetClinit(x ast.Expr) string {
 
 func (e *Emitter) assign(v *ast.Assign) string {
 	pre := e.targetClinit(v.X)
-	lv := e.lvalue(v.X)
-	if pre != "" {
-		return "(" + pre + e.assignInner(v, lv) + ")"
+	if v.Op == "=" {
+		lv := e.lvalue(v.X)
+		if pre != "" {
+			return "(" + pre + e.assignInner(v, lv) + ")"
+		}
+		return e.assignInner(v, lv)
 	}
-	return e.assignInner(v, lv)
+	// a compound assignment reads the target as well as writing it, so the
+	// target is bound once and both uses go through the temporary
+	decl, ref := e.lvalueTemp(v.X)
+	expr := "({ " + decl + e.assignInner(v, ref) + "; })"
+	if pre != "" {
+		return "(" + pre + expr + ")"
+	}
+	return expr
 }
 
 func (e *Emitter) assignInner(v *ast.Assign, lv string) string {
@@ -836,9 +929,9 @@ func (e *Emitter) assignInner(v *ast.Assign, lv string) string {
 		return "(" + lv + " = " + e.coerce(e.expr(v.Y), v.Y.GetType(), v.X.GetType()) + ")"
 	}
 	if v.Op == "+=" && e.isStringType(v.X.GetType()) {
-		// string += is concatenation
-		return "(" + lv + " = (tystr*)" + e.concat(&ast.Binary{
-			ExprBase: ast.ExprBase{Pos: v.Pos, T: v.X.GetType()}, Op: "+", X: v.X, Y: v.Y}) + ")"
+		// string += is concatenation; the left operand is the value the target
+		// holds before the store
+		return "(" + lv + " = (tystr*)" + e.concatFrom("(tystr*)"+lv, v.Y) + ")"
 	}
 	op := v.Op[:len(v.Op)-1]
 	if op == ">>>" {
@@ -937,9 +1030,21 @@ func (e *Emitter) callExpr(v *ast.Call) string {
 		return name + "(" + a + ")"
 	}
 	if (m.Selector >= 0 || m.VIndex >= 0) && !m.Mods.Has(ast.ModPrivate) {
-		return e.virtCall(m, cname(m.Owner)+"*", recv, v.Args)
+		return e.virtCallTemp(v.Recv, m, v.Args)
 	}
 	return name + "(" + a + ")"
+}
+
+// virtCallTemp dispatches a virtual call whose receiver may be an expression
+// rather than a variable. The receiver is both dereferenced for the vtable
+// lookup and passed as the first argument, so it is evaluated once into a
+// temporary that every use shares; otherwise a receiver such as make() would
+// run again for each use.
+func (e *Emitter) virtCallTemp(recv ast.Expr, m *ast.Method, args []ast.Expr) string {
+	rt := cname(m.Owner) + "*"
+	n := e.tmpName()
+	return "({ " + rt + " " + n + " = (" + rt + ")" + e.expr(recv) + "; " +
+		e.virtCall(m, rt, n, args) + "; })"
 }
 
 // virtCall dispatches through the vtable or, for interface receivers, the itable.
@@ -958,9 +1063,6 @@ func (e *Emitter) virtCall(m *ast.Method, recvT, recv string, args []ast.Expr) s
 // indirect builds a call through a runtime-resolved function pointer.
 func (e *Emitter) indirect(m *ast.Method, fn, recvT, recv string, args []ast.Expr) string {
 	ret := e.ctype(m.Result)
-	if ret == "void" {
-		ret = "void"
-	}
 	var ps []string
 	if !m.IsStatic() {
 		ps = append(ps, recvT)

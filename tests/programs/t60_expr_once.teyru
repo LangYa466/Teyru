@@ -1,0 +1,86 @@
+// The four expression defects: an array access tests the reference and the
+// index, a null reference throws NullPointerException before the index is
+// tested, and a receiver or an lvalue with a side effect is evaluated once.
+class Main {
+  static int calls = 0
+
+  int id = 7
+
+  static Main make() {
+    calls = calls + 1
+    return new Main()
+  }
+
+  static int idx() {
+    calls = calls + 1
+    return 0
+  }
+
+  void greet() {
+    System.out.println("greet " + id)
+  }
+
+  public static void main(String[] args) {
+    try {
+      int[] a = null
+      System.out.println(a[0])
+      System.out.println("unreachable")
+    } catch (NullPointerException e) {
+      System.out.println("index of null")
+    }
+    // the reference is tested first, as in Java: a null array throws npe even
+    // when the index is out of range
+    try {
+      int[] a = null
+      System.out.println(a[5])
+      System.out.println("unreachable")
+    } catch (NullPointerException e) {
+      System.out.println("out of range index of null")
+    }
+    try {
+      int[] a = null
+      System.out.println(a.length)
+      System.out.println("unreachable")
+    } catch (NullPointerException e) {
+      System.out.println("length of null")
+    }
+    try {
+      int[] a = new int[2]
+      System.out.println(a[5])
+      System.out.println("unreachable")
+    } catch (ArrayIndexOutOfBoundsException e) {
+      System.out.println("bounds")
+    }
+
+    calls = 0
+    make().greet()
+    System.out.println("receiver once: " + calls)
+
+    int[] xs = new int[3]
+
+    calls = 0
+    xs[idx()]++
+    System.out.println("postfix once: " + calls + " " + xs[0])
+
+    calls = 0
+    xs[idx()] += 5
+    System.out.println("compound once: " + calls + " " + xs[0])
+
+    calls = 0
+    xs[idx()]--
+    System.out.println("postfix decrement once: " + calls + " " + xs[0])
+
+    Main m = new Main()
+    System.out.println("field postfix: " + m.id++)
+    System.out.println("field after: " + m.id)
+    m.id += 10
+    System.out.println("field compound: " + m.id)
+
+    // the value handed to the store is the one the target held, not a second
+    // evaluation of it
+    int i = 3
+    int[] ys = new int[4]
+    ys[i]++
+    System.out.println("plain index: " + i + " " + ys[3])
+  }
+}
