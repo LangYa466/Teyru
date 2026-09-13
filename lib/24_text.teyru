@@ -1,0 +1,3951 @@
+package teyru
+
+// java.text: number formatting, date formatting and message formatting.
+//
+// Two decisions shape the whole file, and both are visible from the outside.
+//
+// There is no Locale. java.text is the one package in the JDK whose entire
+// surface is parametrised by one, and rather than invent a class that can only
+// ever hold one value, every factory here answers the ROOT locale: the decimal
+// separator is '.', the grouping separator ',', the zero digit '0', the
+// currency USD with the symbol '$', and the month, weekday and era names are
+// English. That is not the same as en_US -- a real ROOT currency format is
+// "¤#,##0.00" with the symbol "¤" and the code "XXX" -- but it is the same as
+// en_US for every number and date this file can print, and it is the shape a
+// program written against Java expects. A program that wants a different
+// separator gets it from DecimalFormatSymbols, which is not locale-dependent
+// here either.
+//
+// There is no java.util.Date, so the date side is spelled in java.time: the
+// SimpleDateFormat overloads take and return an Instant, and a pattern's
+// fields are read out of an Instant in UTC. The zone is therefore fixed: 'z',
+// 'Z' and 'X' print UTC, "+0000" and "Z" and never anything else, and a parse
+// that names a zone ignores the name rather than rejecting it.
+//
+// The rounding DecimalFormat does is the JDK's, not the obvious one. Java
+// rounds the *exact* binary value of the double -- half to even -- at the
+// position the pattern cuts, and then prints the digits the double's shortest
+// representation covers, with zeros beyond them. That is why
+// new DecimalFormat("0.00").format(2.675) is "2.67" while
+// String.format("%.2f", 2.675) is "2.68": 2.675 is really
+// 2.67499999999999982236..., and the shortest representation that round-trips
+// is "2.675". Only a tie in the shortest representation forces the exact value
+// to be consulted, and that tie is decided here with a decimal bignum
+// (NumberDigits.compareExact) rather than approximated, so the answers are the
+// JDK's on the cases where they differ.
+
+// ---------------------------------------------------------------- errors
+
+/* java.text.ParseException. Java makes it checked; Teyru has no checked
+   exceptions, so it is an ordinary Exception that the parse methods throw
+   whether or not a caller is ready for it. */
+class ParseException extends Exception {
+  private int errorOffset
+
+  public ParseException(String message, int errorOffset) {
+    super(message)
+    this.errorOffset = errorOffset
+  }
+
+  public int getErrorOffset() {
+    return errorOffset
+  }
+}
+
+/* ParsePosition is reduced to the two integers a parse actually reports -- where
+   it stopped and, when it failed, where it gave up -- which is all the JDK's
+   also carries. getErrorIndex is -1 when the last parse succeeded, and both
+   parse(String, ParsePosition) overloads leave the index untouched on failure,
+   as Java's do. */
+class ParsePosition {
+  private int index
+  private int errorIndex
+
+  public ParsePosition(int index) {
+    this.index = index
+    this.errorIndex = -1
+  }
+
+  public int getIndex() {
+    return index
+  }
+
+  public void setIndex(int i) {
+    index = i
+  }
+
+  public int getErrorIndex() {
+    return errorIndex
+  }
+
+  public void setErrorIndex(int i) {
+    errorIndex = i
+  }
+
+  public String toString() {
+    return "java.text.ParsePosition[index=" + index + ",errorIndex=" + errorIndex + "]"
+  }
+}
+
+/* Format is the shared supertype of the three families below. Java's is
+   parametrised by FieldPosition, which this file does not have (see the
+   StringBuilder overloads on each concrete formatter), so what is left is the
+   two methods that do not mention it. */
+abstract class Format extends Object {
+  public abstract String format(Object obj)
+
+  public abstract Object parseObject(String source)
+  public abstract Object parseObject(String source, ParsePosition pos)
+}
+
+// ---------------------------------------------------------------- number digits
+
+/* DecimalBig is a non-negative integer in base ten, held as one decimal digit
+   per array slot, least significant first. It exists for exactly one job: to
+   decide, without any floating point left, whether the exact value of a double
+   is above, below or equal to the decimal halfway point that a shortest
+   representation lands on. Doublings of a few hundred digits are the worst case
+   and the numbers are never larger than about 700 digits, so the array is
+   fixed and the arithmetic is the simplest thing that can work. */
+final class DecimalBig {
+  private static final int CAPACITY = 1400
+
+  private int[] digits = new int[CAPACITY]
+  private int count = 0
+
+  public DecimalBig(String decimal) {
+    for (var i = decimal.length() - 1 : i >= 0 : i--) {
+      digits[count] = decimal.charAt(i) - '0'
+      count = count + 1
+    }
+    trim()
+  }
+
+  // timesTwo multiplies in place, one doubling at a time. Only ever called on
+  // the tie path, and there with exponents whose size is set by the double's
+  // own range, so the loop count stays under about 1100.
+  public void timesTwo(int times) {
+    for (var t = 0 : t < times : t++) {
+      int carry = 0
+      for (var i = 0 : i < count : i++) {
+        int v = digits[i] * 2 + carry
+        digits[i] = v % 10
+        carry = v / 10
+      }
+      if (carry > 0) {
+        digits[count] = carry
+        count = count + 1
+      }
+    }
+  }
+
+  // appendZeros multiplies by a power of ten, which in base ten is a shift
+  // towards the more significant slots -- the digits move up and the low slots
+  // become zero, rather than a zero being added on top where it would change
+  // nothing.
+  public void appendZeros(int zeros) {
+    if (zeros <= 0) {
+      return
+    }
+    for (var i = count - 1 : i >= 0 : i--) {
+      digits[i + zeros] = digits[i]
+    }
+    for (var i = 0 : i < zeros : i++) {
+      digits[i] = 0
+    }
+    count = count + zeros
+  }
+
+  private void trim() {
+    while (count > 0 && digits[count - 1] == 0) {
+      count = count - 1
+    }
+  }
+
+  public int compareTo(DecimalBig other) {
+    trim()
+    other.trim()
+    if (count != other.count) {
+      return count < other.count ? -1 : 1
+    }
+    for (var i = count - 1 : i >= 0 : i--) {
+      if (digits[i] != other.digits[i]) {
+        return digits[i] < other.digits[i] ? -1 : 1
+      }
+    }
+    return 0
+  }
+}
+
+/* NumberDigits is one number broken into the two things the formatters need:
+   the significant decimal digits, and where the point goes.
+
+   The digits are the *shortest* ones that identify the double -- the same
+   string Double.toString produces -- because that is what DecimalFormat
+   prints; a formatter built on the exact expansion would print
+   0.10000000000000000555 where Java prints 0.1000000000000000060. The exact
+   value is used only to break a rounding tie, and compareExact is where that
+   happens. */
+final class NumberDigits {
+  // the significant digits, no leading or trailing zeros; "" for zero
+  public String digits = ""
+  // the digit string is read as 0.digits * 10^exp
+  public int exp = 0
+
+  public static NumberDigits ofDouble(double v) {
+    NumberDigits d = new NumberDigits()
+    if (v == 0.0) {
+      return d
+    }
+    // Double.toString is the runtime's Java-shaped conversion and is already
+    // the shortest representation, so the digits are read straight off it
+    // instead of being computed a second time here.
+    String s = Double.toString(v)
+    String mant = s
+    int expPart = 0
+    int e = s.indexOf('E')
+    if (e >= 0) {
+      mant = s.substring(0, e)
+      expPart = Integer.parseInt(s.substring(e + 1))
+    }
+    int dot = mant.indexOf('.')
+    String intPart = mant
+    String fracPart = ""
+    if (dot >= 0) {
+      intPart = mant.substring(0, dot)
+      fracPart = mant.substring(dot + 1)
+    }
+    String all = intPart + fracPart
+    int lead = 0
+    while (lead < all.length() && all.charAt(lead) == '0') {
+      lead = lead + 1
+    }
+    int end = all.length()
+    while (end > lead && all.charAt(end - 1) == '0') {
+      end = end - 1
+    }
+    d.digits = all.substring(lead, end)
+    d.exp = intPart.length() - lead + expPart
+    return d
+  }
+
+  public static NumberDigits ofLong(long v) {
+    NumberDigits d = new NumberDigits()
+    String s = Long.toString(v)
+    if (s.charAt(0) == '-') {
+      s = s.substring(1)
+    }
+    int end = s.length()
+    while (end > 0 && s.charAt(end - 1) == '0') {
+      end = end - 1
+    }
+    d.digits = s.substring(0, end)
+    d.exp = s.length()
+    return d
+  }
+
+  /* scaledInteger rounds |v| at the position 10^-maxF -- the cut DecimalFormat
+     makes -- and answers with the digits of |rounded| * 10^maxF, which is the
+     integer the pattern's fraction digits are read out of. A negative or zero
+     cut means the value is below one, and then the answer is "" for everything
+     that does not round up to 1.
+
+     The rounding is half-to-even on the exact value. The shortest digits say
+     which side of the midpoint the value is on except when the discarded part
+     is exactly "5", and that case is handed to compareExact. */
+  public static String scaledInteger(NumberDigits d, double absValue, int maxF) {
+    int cut = d.exp + maxF
+    int n = d.digits.length()
+    if (cut <= 0) {
+      if (cut < 0 || n == 0) {
+        return ""
+      }
+      char first = d.digits.charAt(0)
+      boolean up = false
+      if (first > '5') {
+        up = true
+      } else if (first == '5') {
+        if (n > 1) {
+          up = true
+        } else {
+          up = compareExact(absValue, "", d.exp) > 0
+        }
+      }
+      return up ? "1" : ""
+    }
+    if (cut >= n) {
+      // Nothing is discarded, so nothing is rounded: the value's own digits
+      // stand, and the positions above them that the window has room for are
+      // zeros -- not the exact expansion of the double.
+      // Nothing is discarded, so nothing is rounded: the value's own digits
+      // stand, and the positions below them that the window has room for are
+      // zeros -- not the exact expansion of the double.
+      StringBuilder b = new StringBuilder(d.digits)
+      while (b.length() < cut) {
+        b.append('0')
+      }
+      return b.toString()
+    }
+    String kept = d.digits.substring(0, cut)
+    char next = d.digits.charAt(cut)
+    boolean up = false
+    if (next > '5') {
+      up = true
+    } else if (next == '5') {
+      if (cut + 1 < n) {
+        up = true
+      } else {
+        int cmp = compareExact(absValue, kept, d.exp - cut)
+        if (cmp > 0) {
+          up = true
+        } else if (cmp == 0) {
+          up = ((kept.charAt(cut - 1) - '0') % 2) == 1
+        }
+      }
+    }
+    return up ? increment(kept) : kept
+  }
+
+  /* roundSignificant rounds to sig significant digits and answers the digits
+     with their trailing zeros dropped, which is what the mantissa of a pattern
+     in exponential notation is read out of. A carry out of the top digit moves
+     the exponent up: 999.9 to three digits is 0.1 * 10^4, not 0.100 * 10^3. */
+  public static NumberDigits roundSignificant(NumberDigits d, double absValue, int sig) {
+    NumberDigits r = new NumberDigits()
+    String k = scaledInteger(d, absValue, sig - d.exp)
+    r.exp = d.exp + (k.length() - sig)
+    int end = k.length()
+    while (end > 0 && k.charAt(end - 1) == '0') {
+      end = end - 1
+    }
+    r.digits = k.substring(0, end)
+    return r
+  }
+
+  private static String increment(String s) {
+    StringBuilder b = new StringBuilder()
+    int carry = 1
+    for (var i = s.length() - 1 : i >= 0 : i--) {
+      int v = (s.charAt(i) - '0') + carry
+      b.append((char) ('0' + (v % 10)))
+      carry = v / 10
+    }
+    if (carry > 0) {
+      b.append('1')
+    }
+    return b.reverse().toString()
+  }
+
+  /* compareExact answers how the exact value of absValue compares with the
+     decimal halfway point (kept + 0.5) * 10^k: 1 if above, -1 if below, 0 if
+     equal.
+
+     absValue is a binary fraction, M * 2^p, with both parts read out of the
+     bits, so both sides of the comparison are integers once each is multiplied
+     by the powers of two and ten that clear the denominators. Multiplying both
+     sides by the same positive integers leaves the comparison alone, and after
+     that it is a digit-string comparison. */
+  private static int compareExact(double absValue, String kept, int k) {
+    long bits = Double.doubleToRawLongBits(absValue)
+    int biased = (int) ((bits >> 52) & 0x7ff)
+    long frac = bits & 0xfffffffffffffL
+    long m = frac
+    int p = -1074
+    if (biased != 0) {
+      m = frac | 0x10000000000000L
+      p = biased - 1075
+    }
+    int a = 0
+    if (p + 1 < 0) {
+      a = -(p + 1)
+    }
+    int b = 0
+    if (k < 0) {
+      b = -k
+    }
+    // 2 * absValue, scaled
+    DecimalBig lhs = new DecimalBig(Long.toString(m))
+    lhs.timesTwo(p + 1 + a)
+    lhs.appendZeros(b)
+    // (2 * kept + 1) * 10^k, scaled
+    long d = 0
+    if (kept.length() > 0) {
+      d = Long.parseLong(kept)
+    }
+    DecimalBig rhs = new DecimalBig(Long.toString(2 * d + 1))
+    rhs.appendZeros(k + b)
+    rhs.timesTwo(a)
+    return lhs.compareTo(rhs)
+  }
+}
+
+// ---------------------------------------------------------------- symbols
+
+/* DecimalFormatSymbols is the set of characters a pattern is written in and a
+   formatted number is printed with. Java's carries a Locale; this one does not,
+   which is the only difference that matters -- the defaults are the ROOT
+   locale's, and every part can be set by hand.
+
+   Two of the Java fields are not chars here: the per-mill sign and infinity are
+   multi-byte in UTF-8 and a Teyru char is a byte, so those two are Strings, and
+   the currency symbol is a String in Java already. */
+class DecimalFormatSymbols {
+  private char zeroDigit = '0'
+  private char groupingSeparator = ','
+  private char decimalSeparator = '.'
+  private String perMill = "‰"
+  private char percent = '%'
+  private char digit = '#'
+  private char patternSeparator = ';'
+  private String infinity = "∞"
+  private String nan = "NaN"
+  private char minusSign = '-'
+  private String currencySymbol = "$"
+  private String internationalCurrencySymbol = "USD"
+  private char monetaryDecimalSeparator = '.'
+  private String exponentSeparator = "E"
+
+  public DecimalFormatSymbols() {
+  }
+
+  public char getZeroDigit() { return zeroDigit }
+  public void setZeroDigit(char c) { zeroDigit = c }
+  public char getGroupingSeparator() { return groupingSeparator }
+  public void setGroupingSeparator(char c) { groupingSeparator = c }
+  public char getDecimalSeparator() { return decimalSeparator }
+  public void setDecimalSeparator(char c) { decimalSeparator = c }
+  public String getPerMill() { return perMill }
+  public void setPerMill(String s) { perMill = s }
+  public char getPercent() { return percent }
+  public void setPercent(char c) { percent = c }
+  public char getDigit() { return digit }
+  public void setDigit(char c) { digit = c }
+  public char getPatternSeparator() { return patternSeparator }
+  public void setPatternSeparator(char c) { patternSeparator = c }
+  public String getInfinity() { return infinity }
+  public void setInfinity(String s) { infinity = s }
+  public String getNaN() { return nan }
+  public void setNaN(String s) { nan = s }
+  public char getMinusSign() { return minusSign }
+  public void setMinusSign(char c) { minusSign = c }
+  public String getCurrencySymbol() { return currencySymbol }
+  public void setCurrencySymbol(String s) { currencySymbol = s }
+  public String getInternationalCurrencySymbol() { return internationalCurrencySymbol }
+  public void setInternationalCurrencySymbol(String s) { internationalCurrencySymbol = s }
+  public char getMonetaryDecimalSeparator() { return monetaryDecimalSeparator }
+  public void setMonetaryDecimalSeparator(char c) { monetaryDecimalSeparator = c }
+  public String getExponentSeparator() { return exponentSeparator }
+  public void setExponentSeparator(String s) { exponentSeparator = s }
+
+  /* copy is Java's clone: getDecimalFormatSymbols hands out one of these, so a
+     program that mutates the result of that call changes nothing, exactly as in
+     Java, where getDecimalFormatSymbols clones too. */
+  public DecimalFormatSymbols copy() {
+    DecimalFormatSymbols s = new DecimalFormatSymbols()
+    s.zeroDigit = zeroDigit
+    s.groupingSeparator = groupingSeparator
+    s.decimalSeparator = decimalSeparator
+    s.perMill = perMill
+    s.percent = percent
+    s.digit = digit
+    s.patternSeparator = patternSeparator
+    s.infinity = infinity
+    s.nan = nan
+    s.minusSign = minusSign
+    s.currencySymbol = currencySymbol
+    s.internationalCurrencySymbol = internationalCurrencySymbol
+    s.monetaryDecimalSeparator = monetaryDecimalSeparator
+    s.exponentSeparator = exponentSeparator
+    return s
+  }
+}
+
+// ---------------------------------------------------------------- number formats
+
+/* NumberFormat is abstract in Java and abstract here, but the two differ in
+   where the work is: in the JDK it is an interface to a counting implementation
+   (DecimalFormat); here it owns the fields, because every field it exposes --
+   the digit limits, the grouping flag, the integer-only flag -- is what
+   DecimalFormat reads when it formats, and splitting them across the two
+   classes would only create a way for them to disagree.
+
+   The factories answer DecimalFormat instances whose patterns are the JDK's
+   for the ROOT locale, which is also en_US's for these four. */
+abstract class NumberFormat extends Format {
+  protected static final int MAX_INTEGER_DIGITS = 2147483647
+
+  protected int maximumIntegerDigits = MAX_INTEGER_DIGITS
+  protected int minimumIntegerDigits = 1
+  protected int maximumFractionDigits = 3
+  protected int minimumFractionDigits = 0
+  protected boolean groupingUsed = true
+  protected boolean parseIntegerOnly = false
+
+  public static NumberFormat getInstance() {
+    return new DecimalFormat()
+  }
+
+  public static NumberFormat getNumberInstance() {
+    return new DecimalFormat()
+  }
+
+  /* getIntegerInstance is a DecimalFormat over "#,##0" with parseIntegerOnly
+     set, which is what the JDK builds: the pattern is what makes it round to a
+     whole number, the flag is what makes parse stop at the point. */
+  public static NumberFormat getIntegerInstance() {
+    DecimalFormat f = new DecimalFormat("#,##0")
+    f.setParseIntegerOnly(true)
+    return f
+  }
+
+  public static NumberFormat getPercentInstance() {
+    return new DecimalFormat("#,##0%")
+  }
+
+  public static NumberFormat getCurrencyInstance() {
+    return new DecimalFormat("¤#,##0.00")
+  }
+
+  public abstract String format(double number)
+  public abstract String format(long number)
+
+  /* format(Object) is Java's dispatch: a Long or an Integer formats exactly, a
+     Double or a Float formats as a double, anything else is not a number.
+     Java's NumberFormat also accepts a BigInteger or a BigDecimal; Teyru has
+     neither. */
+  public String format(Object obj) {
+    if (obj == null) {
+      throw new IllegalArgumentException("Cannot format given Object as a Number")
+    }
+    if (obj instanceof Long) {
+      return format(((Long) obj).longValue())
+    }
+    if (obj instanceof Integer) {
+      return format(((Integer) obj).longValue())
+    }
+    if (obj instanceof Short) {
+      return format(((Short) obj).longValue())
+    }
+    if (obj instanceof Byte) {
+      return format(((Byte) obj).longValue())
+    }
+    if (obj instanceof Number) {
+      return format(((Number) obj).doubleValue())
+    }
+    throw new IllegalArgumentException("Cannot format given Object as a Number")
+  }
+
+  public abstract Number parse(String source)
+  public abstract Number parse(String source, ParsePosition pos)
+
+  /* parseObject is Format's one inherited method that has an answer here: in
+     Java it is parse(String), told apart only by its return type. */
+  public Object parseObject(String source) {
+    return parse(source)
+  }
+
+  public Object parseObject(String source, ParsePosition pos) {
+    return parse(source, pos)
+  }
+
+  public boolean isParseIntegerOnly() { return parseIntegerOnly }
+  public void setParseIntegerOnly(boolean v) { parseIntegerOnly = v }
+
+  public boolean isGroupingUsed() { return groupingUsed }
+  public void setGroupingUsed(boolean v) { groupingUsed = v }
+
+  public int getMaximumIntegerDigits() { return maximumIntegerDigits }
+  public int getMinimumIntegerDigits() { return minimumIntegerDigits }
+  public int getMaximumFractionDigits() { return maximumFractionDigits }
+  public int getMinimumFractionDigits() { return minimumFractionDigits }
+
+  /* Java clamps the four digit limits against each other rather than letting
+     them cross: setting a minimum above the maximum raises the maximum, setting
+     a maximum below the minimum lowers the minimum. Worth keeping, because a
+     pattern sets the same four fields. */
+  public void setMaximumIntegerDigits(int n) {
+    maximumIntegerDigits = n < 0 ? 0 : n
+    if (minimumIntegerDigits > maximumIntegerDigits) {
+      minimumIntegerDigits = maximumIntegerDigits
+    }
+  }
+
+  public void setMinimumIntegerDigits(int n) {
+    minimumIntegerDigits = n < 0 ? 0 : n
+    if (maximumIntegerDigits < minimumIntegerDigits) {
+      maximumIntegerDigits = minimumIntegerDigits
+    }
+  }
+
+  public void setMaximumFractionDigits(int n) {
+    maximumFractionDigits = n < 0 ? 0 : n
+    if (minimumFractionDigits > maximumFractionDigits) {
+      minimumFractionDigits = maximumFractionDigits
+    }
+  }
+
+  public void setMinimumFractionDigits(int n) {
+    minimumFractionDigits = n < 0 ? 0 : n
+    if (maximumFractionDigits < minimumFractionDigits) {
+      maximumFractionDigits = minimumFractionDigits
+    }
+  }
+}
+
+/* DecimalFormat is the whole number-formatting engine: the pattern language,
+   the affixes, the multiplier, the exponential notation, and the parse.
+
+   The fields it reads are NumberFormat's (the four digit limits, the grouping
+   flag, the integer-only flag) plus the ones below, and applyPattern is what
+   fills them in -- toPattern is the inverse and is computed from the fields,
+   not remembered from the pattern string, so a program that sets a limit by
+   hand and then asks for the pattern gets the pattern those limits describe,
+   which is what the JDK does too. */
+class DecimalFormat extends NumberFormat {
+  public static final int INTEGER_FIELD = 0
+  public static final int FRACTION_FIELD = 1
+
+  private DecimalFormatSymbols symbols = new DecimalFormatSymbols()
+
+  private boolean useExponentialNotation = false
+  private int minExponentDigits = 0
+  private int multiplier = 1
+  private int groupingSize = 0
+  private boolean decimalSeparatorAlwaysShown = false
+
+  /* The affixes are kept as the pattern wrote them -- quotes and all -- and
+     expanded on the way out, so that changing a symbol changes what a '¤' or a
+     '%' in the pattern prints without re-parsing anything. */
+  private String positivePrefixPattern = ""
+  private String positiveSuffixPattern = ""
+  private String negativePrefixPattern = ""
+  private String negativeSuffixPattern = ""
+
+  public DecimalFormat() {
+    applyPattern("#,##0.###")
+  }
+
+  public DecimalFormat(String pattern) {
+    applyPattern(pattern)
+  }
+
+  public DecimalFormat(String pattern, DecimalFormatSymbols symbols) {
+    this.symbols = symbols.copy()
+    applyPattern(pattern)
+  }
+
+  public DecimalFormatSymbols getDecimalFormatSymbols() {
+    return symbols.copy()
+  }
+
+  public void setDecimalFormatSymbols(DecimalFormatSymbols s) {
+    if (s == null) {
+      throw new NullPointerException()
+    }
+    symbols = s.copy()
+  }
+
+  public boolean isDecimalSeparatorAlwaysShown() { return decimalSeparatorAlwaysShown }
+  public void setDecimalSeparatorAlwaysShown(boolean v) { decimalSeparatorAlwaysShown = v }
+
+  public int getMultiplier() { return multiplier }
+  public void setMultiplier(int m) { multiplier = m }
+
+  public int getGroupingSize() { return groupingSize }
+
+  public String getPositivePrefix() { return expandAffix(positivePrefixPattern) }
+  public String getPositiveSuffix() { return expandAffix(positiveSuffixPattern) }
+  public String getNegativePrefix() { return expandAffix(negativePrefixPattern) }
+  public String getNegativeSuffix() { return expandAffix(negativeSuffixPattern) }
+
+  public void setPositivePrefix(String s) { positivePrefixPattern = s }
+  public void setPositiveSuffix(String s) { positiveSuffixPattern = s }
+  public void setNegativePrefix(String s) { negativePrefixPattern = s }
+  public void setNegativeSuffix(String s) { negativeSuffixPattern = s }
+
+  // ------------------------------------------------------------ pattern
+
+  /* applyPattern is the JDK's parser, phase for phase: a subpattern is read as
+     prefix, integer part, fraction part, exponent and suffix, and the phases
+     are what make "E0" a literal while "0E0" is exponential and "#.#E" is an
+     error. Two of the JDK's quirks are reproduced because a program can see
+     them: a pattern that has a decimal separator but no '0' anywhere gets a
+     minimum of one integer digit ("###.##" prints 0.4 as "0.4", not ".4"), and
+     a '0' after a '#' in the fraction is malformed. */
+  public void applyPattern(String pattern) {
+    if (pattern == null) {
+      throw new NullPointerException()
+    }
+    String[] parts = splitSubpatterns(pattern)
+    if (parts[1] != null && !hasDigitPlace(parts[0])) {
+      // "x;0" and ";0" are Java's "Unquoted special character ';'": a
+      // subpattern separator only separates two subpatterns, and the first
+      // one is not a subpattern until it has a digit place.
+      throw new IllegalArgumentException("Unquoted special character '" + symbols.getPatternSeparator() + "' in pattern \"" + pattern + "\"")
+    }
+    applySubpattern(parts[0], true)
+    if (parts[1] != null) {
+      applySubpattern(parts[1], false)
+      if (negativePrefixPattern.length() == 0 && negativeSuffixPattern.length() == 0) {
+        // "0;0" and "0;" say what the default already says
+        negativePrefixPattern = "-" + positivePrefixPattern
+        negativeSuffixPattern = positiveSuffixPattern
+      }
+    } else {
+      negativePrefixPattern = "-" + positivePrefixPattern
+      negativeSuffixPattern = positiveSuffixPattern
+    }
+  }
+
+  private static boolean hasDigitPlace(String sub) {
+    boolean quoted = false
+    for (var i = 0 : i < sub.length() : i++) {
+      char c = sub.charAt(i)
+      if (quoted) {
+        if (c == '\'') {
+          quoted = false
+        }
+      } else if (c == '\'') {
+        quoted = true
+      } else if (c == '0' || c == '#') {
+        return true
+      }
+    }
+    return false
+  }
+
+  private String[] splitSubpatterns(String pattern) {
+    String[] out = new String[2]
+    int semi = -1
+    for (var i = 0 : i < pattern.length() : i++) {
+      char c = pattern.charAt(i)
+      if (c == '\'') {
+        // '' is a literal quote and does not open a quoted run
+        if (i + 1 < pattern.length() && pattern.charAt(i + 1) == '\'') {
+          i = i + 1
+        } else {
+          i = skipQuoted(pattern, i + 1)
+        }
+      } else if (c == symbols.getPatternSeparator()) {
+        if (semi >= 0) {
+          throw new IllegalArgumentException("Unquoted special character '" + c + "' in pattern \"" + pattern + "\"")
+        }
+        semi = i
+      }
+    }
+    if (semi >= 0) {
+      out[0] = pattern.substring(0, semi)
+      out[1] = pattern.substring(semi + 1)
+    } else {
+      out[0] = pattern
+    }
+    return out
+  }
+
+  private static int skipQuoted(String s, int from) {
+    int i = from
+    while (i < s.length()) {
+      if (s.charAt(i) == '\'') {
+        // '' inside a quoted run is the quote itself, not its end
+        if (i + 1 < s.length() && s.charAt(i + 1) == '\'') {
+          i = i + 2
+          continue
+        }
+        return i
+      }
+      i = i + 1
+    }
+    return i
+  }
+
+  /* A pattern is written in the pattern language, whose characters are the
+     same whatever the symbols are: applyPattern reads '.', ',' and ';' even
+     when the symbols say the decimal separator is ','. It is
+     applyLocalizedPattern that first rewrites the symbols' characters into
+     these. Only the affixes are read through the symbols, and only when they
+     are expanded -- a "%" in a pattern is the percent sign of whatever symbol
+     set the format carries, which is why changing the symbols changes what an
+     already parsed pattern prints. */
+  private void applySubpattern(String pattern, boolean positive) {
+    char zero = '0'
+    char digit = '#'
+    char decimal = '.'
+    char grouping = ','
+
+    String prefix = ""
+    String suffix = ""
+    int minInt = 0
+    int maxInt = 0
+    int minFrac = 0
+    int maxFrac = 0
+    int minExp = 0
+    int lastSep = 0
+    boolean sawGroup = false
+    int phase = 0
+    boolean exp = false
+    boolean sawDot = false
+    boolean sawFractionHash = false
+    boolean sawZero = false
+    int multChars = 0
+
+    for (var i = 0 : i < pattern.length() : i++) {
+      char c = pattern.charAt(i)
+      // A quote means something in an affix and nothing in the number part: Java
+      // reads "0'x'" as the pattern 0 with the suffix "x", because the quote is
+      // simply the first character that cannot be a digit place. The affix keeps
+      // the quotes -- toPattern has to be able to write the pattern back, and
+      // "0'%'" has to come back with the quotes that stop the percent from
+      // multiplying -- so the expansion happens in expandAffix instead.
+      if (c == '\'' && (phase == 0 || phase == 4)) {
+        if (i + 1 < pattern.length() && pattern.charAt(i + 1) == '\'') {
+          if (phase == 0) {
+            prefix = prefix + "''"
+          } else {
+            suffix = suffix + "''"
+          }
+          i = i + 1
+        } else {
+          int close = skipQuoted(pattern, i + 1)
+          if (close >= pattern.length()) {
+            throw new IllegalArgumentException("Malformed pattern \"" + pattern + "\"")
+          }
+          String content = pattern.substring(i + 1, close).replace("''", "'")
+          if (phase == 0) {
+            prefix = prefix + quoteIfNeeded(content)
+          } else {
+            suffix = suffix + quoteIfNeeded(content)
+          }
+          i = close
+        }
+        continue
+      }
+      if (phase == 0) {
+        // prefix: everything up to the first placeholder, with the three
+        // characters that mean something more than themselves expanded later
+        if (c == zero || c == digit) {
+          phase = 1
+          i = i - 1
+        } else if (c == decimal) {
+          phase = 2
+          sawDot = true
+        } else if (c == '%') {
+          prefix = prefix + "%"
+          multChars = multChars + 1
+        } else if (pattern.startsWith("‰", i)) {
+          // a char is one byte here, so the two signs that are not ASCII are
+          // matched and stepped over as the multi-byte sequences they are
+          prefix = prefix + "‰"
+          multChars = multChars + 1
+          i = i + 2
+        } else if (pattern.startsWith("¤", i)) {
+          prefix = prefix + "¤"
+          i = i + 1
+        } else {
+          prefix = prefix + c
+        }
+        continue
+      }
+      if (phase == 1) {
+        if (c == zero) {
+          minInt = minInt + 1
+          maxInt = maxInt + 1
+          sawZero = true
+        } else if (c == digit) {
+          if (minInt > 0) {
+            // the integer part is '#'s and then '0's; "0#" is Java's error
+            throw new IllegalArgumentException("Malformed pattern \"" + pattern + "\"")
+          }
+          maxInt = maxInt + 1
+        } else if (c == grouping) {
+          // the separator's position is only remembered; the size is the gap
+          // between the *last* one and the end of the integer part, which is
+          // what makes "#,##,##0" group by three like "#,##0"
+          lastSep = maxInt
+          sawGroup = true
+        } else if (c == decimal) {
+          phase = 2
+          sawDot = true
+        } else if (c == 'E') {
+          exp = true
+          phase = 3
+        } else {
+          phase = 4
+          i = i - 1
+        }
+        continue
+      }
+      if (phase == 2) {
+        if (c == digit) {
+          maxFrac = maxFrac + 1
+          sawFractionHash = true
+        } else if (c == zero) {
+          if (sawFractionHash) {
+            throw new IllegalArgumentException("Unexpected '0' in pattern \"" + pattern + "\"")
+          }
+          minFrac = minFrac + 1
+          maxFrac = maxFrac + 1
+          sawZero = true
+        } else if (c == 'E') {
+          exp = true
+          phase = 3
+        } else {
+          phase = 4
+          i = i - 1
+        }
+        continue
+      }
+      if (phase == 3) {
+        if (c == zero) {
+          minExp = minExp + 1
+        } else {
+          phase = 4
+          i = i - 1
+        }
+        continue
+      }
+      // suffix. A digit place here still counts as one -- Java reads "0%0" as
+      // two integer digits and the suffix "%" -- but a separator does not:
+      // "0.00," is malformed. Nothing after the number part can go back to
+      // being part of it except the places themselves.
+      if (c == zero) {
+        minInt = minInt + 1
+        maxInt = maxInt + 1
+        sawZero = true
+        continue
+      }
+      if (c == digit) {
+        if (minInt > 0) {
+          throw new IllegalArgumentException("Malformed pattern \"" + pattern + "\"")
+        }
+        maxInt = maxInt + 1
+        continue
+      }
+      if (c == grouping) {
+        throw new IllegalArgumentException("Malformed pattern \"" + pattern + "\"")
+      }
+      if (c == decimal) {
+        throw new IllegalArgumentException("Multiple decimal separators in pattern \"" + pattern + "\"")
+      }
+      if (c == '%') {
+        suffix = suffix + "%"
+        multChars = multChars + 1
+      } else if (pattern.startsWith("‰", i)) {
+        suffix = suffix + "‰"
+        multChars = multChars + 1
+        i = i + 2
+      } else if (pattern.startsWith("¤", i)) {
+        suffix = suffix + "¤"
+        i = i + 1
+      } else {
+        suffix = suffix + c
+      }
+    }
+
+    if (exp && minExp == 0) {
+      throw new IllegalArgumentException("Malformed exponential pattern \"" + pattern + "\"")
+    }
+    if (sawGroup && maxInt == lastSep) {
+      // a separator with no digit place after it is what "#," and "#,##0," are
+      throw new IllegalArgumentException("Malformed pattern \"" + pattern + "\"")
+    }
+    // A pattern whose integer part has no '0' of its own and which has a
+    // fraction shows a leading zero -- "###.##" prints 0.4 as "0.4" -- even
+    // though "#" alone prints 0.4 as ".4". Java models that as a minimum of one
+    // integer digit, and a '0' anywhere in the number part ("#.0") is what
+    // stops it; a '0' in the exponent ("#.##E0") is not the pattern's own
+    // digit place and does not count.
+    if (minInt == 0 && maxInt > 0 && !sawZero && sawDot) {
+      minInt = 1
+    }
+    if (multChars > 1) {
+      throw new IllegalArgumentException("Too many percent/per mille characters in pattern \"" + pattern + "\"")
+    }
+    // the gap between the last separator and the end, and nothing else: this is
+    // why "#,##,##0" groups by three like "#,##0" and "#,#0" by two. No
+    // separator in the pattern means no grouping size at all, which is why
+    // turning grouping on for such a pattern changes nothing.
+    // A negative subpattern that names no digits of its own -- "0;x" -- only
+    // contributes affixes; the digits stay the positive subpattern's.
+    if (positive || maxInt > 0 || sawDot || exp) {
+      groupingSize = sawGroup ? maxInt - lastSep : 0
+      groupingUsed = sawGroup
+      maximumIntegerDigits = exp ? maxInt : MAX_INTEGER_DIGITS
+      minimumIntegerDigits = minInt
+      useExponentialNotation = exp
+      maximumFractionDigits = maxFrac
+      minimumFractionDigits = minFrac
+      minExponentDigits = minExp
+      // A decimal separator with no digit place after it is shown even when
+      // the number has no fraction: "0." prints 5.0 as "5.". One with digit
+      // places is only shown when there is something to show.
+      decimalSeparatorAlwaysShown = sawDot && maxFrac == 0
+      multiplier = 1
+      int prefixMultiplier = multiplierOf(prefix)
+      if (prefixMultiplier != 1) {
+        multiplier = prefixMultiplier
+      }
+      int suffixMultiplier = multiplierOf(suffix)
+      if (suffixMultiplier != 1) {
+        multiplier = suffixMultiplier
+      }
+    }
+
+    if (positive) {
+      positivePrefixPattern = prefix
+      positiveSuffixPattern = suffix
+    } else {
+      negativePrefixPattern = prefix
+      negativeSuffixPattern = suffix
+    }
+  }
+
+  /* The multiplier a finished affix asks for: a percent or per-mille sign
+     anywhere outside quotes. It cannot be read while the pattern is being
+     scanned, because whether the sign multiplies depends on whether it is
+     inside a quoted run -- "0'%'" prints a percent sign, "0%" multiplies -- and
+     the quotes are only known once the affix is complete. */
+  /* Whether an affix has to be quoted to be written back as a pattern. A
+     quoted run that holds nothing special loses its quotes, which is why
+     "0'x'" comes back as "#0x" while "0'%'" keeps them: the second would
+     multiply the number if the quotes were dropped. */
+  private static boolean isPatternSpecial(char c) {
+    if (c == '#' || c == '0' || c == '.' || c == ',' || c == '%' || c == 'E' || c == '-' || c == ';' || c == '\'') {
+      return true
+    }
+    return false
+  }
+
+  private static String quoteIfNeeded(String s) {
+    if (s.length() == 0) {
+      return "''"
+    }
+    boolean special = false
+    for (var i = 0 : i < s.length() : i++) {
+      char c = s.charAt(i)
+      if (isPatternSpecial(c) || s.startsWith("‰", i) || s.startsWith("¤", i)) {
+        special = true
+      }
+    }
+    if (!special) {
+      return s
+    }
+    return "'" + s.replace("'", "''") + "'"
+  }
+
+  private static int multiplierOf(String affix) {
+    boolean quoted = false
+    for (var i = 0 : i < affix.length() : i++) {
+      char c = affix.charAt(i)
+      if (quoted) {
+        if (c == '\'') {
+          quoted = false
+        }
+      } else if (c == '\'') {
+        quoted = true
+      } else if (c == '%') {
+        return 100
+      } else if (affix.startsWith("‰", i)) {
+        return 1000
+      }
+    }
+    return 1
+  }
+
+  /* toPattern rebuilds a pattern from the fields. The integer part is where the
+     JDK's rules are least obvious: the placeholders number one more than the
+     larger of the minimum digits and the group size, the rightmost
+     minimum-digit places are '0' and the rest '#', and separators go in every
+     group size from the right -- which is what turns minimumIntegerDigits 1
+     with a group size of 3 into "#,##0" and minimumIntegerDigits 4 into
+     "#0,000". */
+  public String toPattern() {
+    return buildPattern(false)
+  }
+
+  /* toLocalizedPattern is the same pattern written in the symbols' characters;
+     applyLocalizedPattern is the inverse and reads its input the same way. */
+  public String toLocalizedPattern() {
+    return buildPattern(true)
+  }
+
+  private String buildPattern(boolean localized) {
+    StringBuilder b = new StringBuilder()
+    b.append(positivePrefixPattern)
+    b.append(useExponentialNotation ? exponentialBody() : fixedBody())
+    b.append(positiveSuffixPattern)
+    if (!negativePrefixPattern.equals("-" + positivePrefixPattern) || !negativeSuffixPattern.equals(positiveSuffixPattern)) {
+      b.append(symbols.getPatternSeparator())
+      b.append(negativePrefixPattern)
+      b.append(useExponentialNotation ? exponentialBody() : fixedBody())
+      b.append(negativeSuffixPattern)
+    }
+    String s = b.toString()
+    if (localized) {
+      s = localize(s)
+    }
+    return s
+  }
+
+  /* One digit place per position, '0' for the first minDigits from the right
+     and '#' for the rest, with a grouping separator before every place that
+     ends a group. Both halves of a fixed pattern and the mantissa of an
+     exponential one are written this way; only the number of places differs.
+     The separator goes in before the place itself, at every multiple of the
+     group size counting from the right. */
+  private String digitBody(int places, int minDigits) {
+    StringBuilder b = new StringBuilder()
+    int gs = groupingUsed ? groupingSize : 0
+    for (var i = 0 : i < places : i++) {
+      int fromRight = places - 1 - i
+      b.append(fromRight < minDigits ? '0' : '#')
+      if (gs > 0 && fromRight > 0 && fromRight % gs == 0) {
+        b.append(',')
+      }
+    }
+    return b.toString()
+  }
+
+  private String fractionBody() {
+    StringBuilder b = new StringBuilder()
+    if (maximumFractionDigits > 0 || decimalSeparatorAlwaysShown) {
+      b.append('.')
+      for (var i = 0 : i < minimumFractionDigits : i++) {
+        b.append('0')
+      }
+      for (var i = 0 : i < maximumFractionDigits - minimumFractionDigits : i++) {
+        b.append('#')
+      }
+    }
+    return b.toString()
+  }
+
+  private String exponentialBody() {
+    StringBuilder b = new StringBuilder()
+    b.append(digitBody(maximumIntegerDigits, minimumIntegerDigits))
+    b.append(fractionBody())
+    b.append('E')
+    for (var i = 0 : i < minExponentDigits : i++) {
+      b.append('0')
+    }
+    return b.toString()
+  }
+
+  /* The integer part of a fixed-notation pattern, separators included. Both
+     halves of a toPattern use it, which is what makes "#,##0.00;(#,##0.00)"
+     round-trip its separators into the negative half as well. */
+  private String fixedBody() {
+    int gs = groupingUsed ? groupingSize : 0
+    int places = 1 + (minimumIntegerDigits > gs ? minimumIntegerDigits : gs)
+    return digitBody(places, minimumIntegerDigits) + fractionBody()
+  }
+
+  private String localize(String pattern) {
+    StringBuilder b = new StringBuilder()
+    for (var i = 0 : i < pattern.length() : i++) {
+      char c = pattern.charAt(i)
+      if (c == '0') {
+        b.append(symbols.getZeroDigit())
+      } else if (c == '#') {
+        b.append(symbols.getDigit())
+      } else if (c == ',') {
+        b.append(symbols.getGroupingSeparator())
+      } else if (c == '.') {
+        b.append(symbols.getDecimalSeparator())
+      } else if (c == '-') {
+        b.append(symbols.getMinusSign())
+      } else if (c == ';') {
+        b.append(symbols.getPatternSeparator())
+      } else if (c == 'E') {
+        b.append(symbols.getExponentSeparator())
+      } else if (c == '%') {
+        b.append(symbols.getPercent())
+      } else if (pattern.startsWith("‰", i)) {
+        b.append(symbols.getPerMill())
+        i = i + 2
+      } else if (pattern.startsWith("¤", i)) {
+        b.append(symbols.getCurrencySymbol())
+        i = i + 1
+      } else {
+        b.append(pattern.substring(i, i + 1))
+      }
+    }
+    return b.toString()
+  }
+
+  public void applyLocalizedPattern(String pattern) {
+    if (pattern == null) {
+      throw new NullPointerException()
+    }
+    applyPattern(delocalize(pattern))
+  }
+
+  /* delocalize maps the symbols back to the pattern characters the parser
+     knows. The three multi-byte ones are matched as strings, since a char
+     cannot hold them. */
+  private String delocalize(String pattern) {
+    StringBuilder b = new StringBuilder()
+    String expSep = symbols.getExponentSeparator()
+    String currencySep = symbols.getCurrencySymbol()
+    String perMillSep = symbols.getPerMill()
+    for (var i = 0 : i < pattern.length() : i++) {
+      char c = pattern.charAt(i)
+      if (expSep.length() > 1 && pattern.startsWith(expSep, i)) {
+        b.append('E')
+        i = i + expSep.length() - 1
+      } else if (c == symbols.getZeroDigit()) {
+        b.append('0')
+      } else if (c == symbols.getDigit()) {
+        b.append('#')
+      } else if (c == symbols.getGroupingSeparator()) {
+        b.append(',')
+      } else if (c == symbols.getDecimalSeparator()) {
+        b.append('.')
+      } else if (c == symbols.getMinusSign()) {
+        b.append('-')
+      } else if (c == symbols.getPatternSeparator()) {
+        b.append(';')
+      } else if (c == symbols.getPercent()) {
+        b.append('%')
+      } else if (perMillSep.length() > 0 && pattern.startsWith(perMillSep, i)) {
+        b.append("‰")
+        i = i + perMillSep.length() - 1
+      } else if (currencySep.length() > 0 && pattern.startsWith(symbols.getCurrencySymbol(), i)) {
+        b.append("¤")
+        i = i + symbols.getCurrencySymbol().length() - 1
+      } else {
+        b.append(pattern.substring(i, i + 1))
+      }
+    }
+    return b.toString()
+  }
+
+  /* expandAffix turns the stored affix into what is printed: quoted runs are
+     literal, and an unquoted percent, per-mill or currency sign stands for the
+     symbol, which is why changing the symbol changes the output of an already
+     parsed pattern. */
+  private String expandAffix(String affix) {
+    StringBuilder b = new StringBuilder()
+    int i = 0
+    while (i < affix.length()) {
+      char c = affix.charAt(i)
+      if (c == '\'') {
+        if (i + 1 < affix.length() && affix.charAt(i + 1) == '\'') {
+          // a doubled quote is the quote itself -- "0''0" prints 12346'
+          b.append('\'')
+          i = i + 2
+        } else {
+          int close = skipQuoted(affix, i + 1)
+          b.append(affix.substring(i + 1, close).replace("''", "'"))
+          i = close + 1
+        }
+      } else if (c == '%') {
+        b.append(symbols.getPercent())
+        i = i + 1
+      } else if (affix.startsWith("‰", i)) {
+        b.append(symbols.getPerMill())
+        i = i + 3
+      } else if (affix.startsWith("¤", i)) {
+        b.append(symbols.getCurrencySymbol())
+        i = i + 2
+      } else {
+        b.append(affix.substring(i, i + 1))
+        i = i + 1
+      }
+    }
+    return b.toString()
+  }
+
+  // ------------------------------------------------------------ format
+
+  public String format(double number) {
+    return format(number, new StringBuilder()).toString()
+  }
+
+  public String format(long number) {
+    return format(number, new StringBuilder()).toString()
+  }
+
+  /* The two-argument forms take a StringBuilder where the JDK takes a
+     StringBuffer and a FieldPosition. Teyru has no FieldPosition, and
+     StringBuilder is what the rest of the standard library builds strings
+     with, so the third parameter is simply gone. */
+  public StringBuilder format(double number, StringBuilder result) {
+    String nan = symbols.getNaN()
+    if (Double.isNaN(number)) {
+      // Java never applies affixes to a NaN: the symbol stands alone
+      result.append(nan)
+      return result
+    }
+    boolean negative = Double.doubleToRawLongBits(number) < 0
+    double value = negative ? -number : number
+    if (multiplier != 1) {
+      value = value * multiplier
+    }
+    String prefix = expandAffix(negative ? negativePrefixPattern : positivePrefixPattern)
+    String suffix = expandAffix(negative ? negativeSuffixPattern : positiveSuffixPattern)
+    result.append(prefix)
+    if (Double.isInfinite(value)) {
+      result.append(symbols.getInfinity())
+      result.append(suffix)
+      return result
+    }
+    NumberDigits d = NumberDigits.ofDouble(value)
+    if (useExponentialNotation) {
+      appendExponential(d, value, result)
+    } else {
+      appendFixed(d, value, result)
+    }
+    result.append(suffix)
+    return result
+  }
+
+  public StringBuilder format(long number, StringBuilder result) {
+    boolean negative = number < 0
+    // Java multiplies a long by the multiplier exactly, which only a percent
+    // pattern can reach, and only through format(Object).
+    long value = negative ? -number : number
+    String prefix = expandAffix(negative ? negativePrefixPattern : positivePrefixPattern)
+    String suffix = expandAffix(negative ? negativeSuffixPattern : positiveSuffixPattern)
+    result.append(prefix)
+    NumberDigits d = NumberDigits.ofLong(value * multiplier)
+    if (useExponentialNotation) {
+      appendExponential(d, (double) (value * multiplier), result)
+    } else {
+      appendFixed(d, 0.0, result)
+    }
+    result.append(suffix)
+    return result
+  }
+
+  /* appendFixed writes the number in positional notation. The digits all come
+     from one rounded integer: NumberDigits.scaledInteger has already applied
+     the pattern's fraction cut, so the digits below the cut are gone and the
+     ones the window shows are final. What is left is deciding which of them are
+     visible (the maximum integer digits drop the ones above the window, the
+     minimum ones pad with zeros), where the separators go, and how many
+     fraction digits to keep. */
+  private void appendFixed(NumberDigits d, double absValue, StringBuilder out) {
+    int maxF = maximumFractionDigits
+    String k = NumberDigits.scaledInteger(d, absValue, maxF)
+    String intDigits = ""
+    String fracDigits = ""
+    if (k.length() > maxF) {
+      intDigits = k.substring(0, k.length() - maxF)
+      fracDigits = k.substring(k.length() - maxF)
+    } else {
+      // k counts units of 10^-maxF, so a short one is a small fraction and
+      // needs the leading zeros that put it back at the right place value:
+      // "5" with two fraction digits is 0.05, not 0.5
+      fracDigits = k
+      while (fracDigits.length() < maxF) {
+        fracDigits = "0" + fracDigits
+      }
+    }
+    // the visible window keeps the low maximumIntegerDigits digits and pads the
+    // ones above it with zeros rather than dropping the number
+    if (intDigits.length() > maximumIntegerDigits) {
+      intDigits = intDigits.substring(intDigits.length() - maximumIntegerDigits)
+    } else {
+      while (intDigits.length() < minimumIntegerDigits) {
+        intDigits = "0" + intDigits
+      }
+    }
+    if (intDigits.length() == 0 && fracDigits.length() == 0 && !decimalSeparatorAlwaysShown) {
+      // an empty integer part is only legal when a fraction follows it
+      intDigits = "0"
+    }
+    if (groupingUsed && groupingSize > 0) {
+      intDigits = group(intDigits)
+    }
+    out.append(intDigits)
+    int end = fracDigits.length()
+    while (end > minimumFractionDigits && fracDigits.charAt(end - 1) == '0') {
+      end = end - 1
+    }
+    fracDigits = fracDigits.substring(0, end)
+    if (fracDigits.length() > 0 || decimalSeparatorAlwaysShown) {
+      out.append(symbols.getDecimalSeparator())
+      out.append(fracDigits)
+    }
+  }
+
+  private String group(String digits) {
+    StringBuilder b = new StringBuilder()
+    for (var i = 0 : i < digits.length() : i++) {
+      if (i > 0 && (digits.length() - i) % groupingSize == 0) {
+        b.append(symbols.getGroupingSeparator())
+      }
+      b.append(digits.substring(i, i + 1))
+    }
+    return b.toString()
+  }
+
+  /* appendExponential writes the mantissa-and-exponent form. The exponent is
+     the largest multiple of the pattern's maximum integer digits that is not
+     above the value's own exponent, which is what keeps the mantissa's integer
+     part at most that wide; the minimum integer digits then pull it down
+     further, one at a time, until the mantissa is wide enough. Java does
+     something else again when the pattern has exactly one integer placeholder
+     and no required digit ("#E0"), and the exponent there is simply the value's
+     own -- that is reproduced below, and it is the only place the rule is not
+     the general one.
+
+     The mantissa's digits are placed by position, not by count: the first one
+     lands on 10^(expOfValue - exp - 1) and the rest follow it down, so a
+     mantissa whose first digit lands left of the point can spill past the
+     pattern's own fraction width, which is exactly what Java prints for
+     "#.0E0" and 12345 (".12E5"). */
+  private void appendExponential(NumberDigits d, double absValue, StringBuilder out) {
+    int maxI = maximumIntegerDigits
+    if (absValue == 0.0) {
+      // Zero is the one value whose mantissa Java writes with no exponent at
+      // all: "0.00E0", never "0.00E-1". The '#' places go too, so "##0E0"
+      // prints a single zero while "00E0" prints two.
+      for (var i = 0 : i < minimumIntegerDigits : i++) {
+        out.append('0')
+      }
+      if (minimumFractionDigits > 0) {
+        out.append(symbols.getDecimalSeparator())
+        for (var i = 0 : i < minimumFractionDigits : i++) {
+          out.append('0')
+        }
+      }
+      appendExponent(0, out)
+      return
+    }
+    NumberDigits m = NumberDigits.roundSignificant(d, absValue, maxI + maximumFractionDigits)
+    /* Java's exponent, in full. The mantissa is as wide as the pattern's own
+       integer part -- four places for "#,##0" -- and the exponent is brought
+       down to the largest multiple of that width at or below the value's own
+       exponent; one value whose own exponent is already 0 lands there too.
+       Minimum integer digits wider than the width then come off the exponent
+       one at a time, and with a one-place integer part, or one that is not
+       narrower than the minimum, the exponent is simply the value's own less
+       the minimum integer digits. */
+    int minI = minimumIntegerDigits
+    int exp = m.exp
+    if (maxI > 1 && maxI > minI) {
+      exp = exp > 0 ? ((exp - 1) / maxI) * maxI : ((exp - maxI) / maxI) * maxI
+      minI = 1
+    } else {
+      exp = exp - minI
+    }
+    int intCount = m.exp - exp
+    /* The mantissa is written position by position from the first digit down,
+       and how far it goes is the wider of the digits there are and the digits
+       the pattern requires -- but required digits are counted from the pattern,
+       not from the point: a mantissa whose integer part already fills the
+       pattern's width has no room left for a fraction, which is why
+       "#,##0.0E0" writes 0.5 as 5000E-4 and not 5000.0E-4. */
+    int minimumDigits = minimumIntegerDigits + minimumFractionDigits
+    if (minimumDigits < 0) {
+      minimumDigits = Integer.MAX_VALUE
+    }
+    if (minimumDigits < intCount) {
+      minimumDigits = intCount
+    }
+    int totalDigits = m.digits.length()
+    if (minimumDigits > totalDigits) {
+      totalDigits = minimumDigits
+    }
+    StringBuilder mantissa = new StringBuilder()
+    for (var i = 0 : i < totalDigits : i++) {
+      if (i == intCount) {
+        mantissa.append(symbols.getDecimalSeparator())
+      }
+      mantissa.append(i < m.digits.length() ? m.digits.substring(i, i + 1) : "0")
+    }
+    if (decimalSeparatorAlwaysShown && totalDigits == intCount) {
+      mantissa.append(symbols.getDecimalSeparator())
+    }
+    out.append(mantissa.toString())
+    appendExponent(exp, out)
+  }
+
+  private void appendExponent(int exp, StringBuilder out) {
+    out.append(symbols.getExponentSeparator())
+    if (exp < 0) {
+      out.append(symbols.getMinusSign())
+      exp = -exp
+    }
+    String digits = Long.toString(exp)
+    while (digits.length() < minExponentDigits) {
+      digits = "0" + digits
+    }
+    out.append(digits)
+  }
+
+  // ------------------------------------------------------------ parse
+
+  public Number parse(String source) {
+    ParsePosition pos = new ParsePosition(0)
+    Number n = parse(source, pos)
+    if (pos.getIndex() == 0) {
+      throw new ParseException("Unparseable number: \"" + source + "\"", pos.getErrorIndex())
+    }
+    return n
+  }
+
+  /* parse is the JDK's loop: optional minus, digits with grouping separators
+     that are only eaten when a digit follows them, at most one decimal
+     separator, no exponent, and neither leading whitespace nor a plus sign.
+     Anything left over is left over -- the caller gets the index and the rest
+     of the string is not looked at -- but the affixes are not optional: a
+     percent pattern does not parse "12", and a currency pattern does not parse
+     "5.00". */
+  public Number parse(String source, ParsePosition pos) {
+    pos.setErrorIndex(-1)
+    if (source == null) {
+      throw new NullPointerException()
+    }
+    int start = pos.getIndex()
+    String positivePre = expandAffix(positivePrefixPattern)
+    String negativePre = expandAffix(negativePrefixPattern)
+    String positiveSuf = expandAffix(positiveSuffixPattern)
+    String negativeSuf = expandAffix(negativeSuffixPattern)
+
+    int i = start
+    boolean negative = false
+    int body = -1
+    if (source.startsWith(negativePre, i)) {
+      negative = true
+      body = i + negativePre.length()
+    } else if (source.startsWith(positivePre, i)) {
+      body = i + positivePre.length()
+    } else {
+      pos.setErrorIndex(i)
+      return null
+    }
+    int digitsStart = body
+    String digits = ""
+    String frac = ""
+    boolean hasDot = false
+    boolean any = false
+    int j = body
+    while (j < source.length()) {
+      char c = source.charAt(j)
+      if (c >= '0' && c <= '9') {
+        if (hasDot) {
+          frac = frac + c
+        } else {
+          digits = digits + c
+        }
+        any = true
+        j = j + 1
+        continue
+      }
+      if (c == symbols.getGroupingSeparator() && !hasDot) {
+        if (j + 1 < source.length() && isAsciiDigit(source.charAt(j + 1))) {
+          j = j + 1
+          continue
+        }
+        break
+      }
+      if (c == symbols.getDecimalSeparator() && !hasDot) {
+        hasDot = true
+        any = true
+        j = j + 1
+        if (parseIntegerOnly) {
+          // Java stops in front of the point rather than past it
+          j = j - 1
+          hasDot = false
+          break
+        }
+        continue
+      }
+      break
+    }
+    if (!any) {
+      pos.setErrorIndex(digitsStart)
+      return null
+    }
+    String suffix = negative ? negativeSuf : positiveSuf
+    if (!source.startsWith(suffix, j)) {
+      pos.setErrorIndex(j)
+      return null
+    }
+    j = j + suffix.length()
+    pos.setIndex(j)
+    // "12." is a Long and ".5" is a Double: what decides the answer's type is
+    // whether any digit was actually consumed past the point, not whether the
+    // point itself was there
+    return buildNumber(negative, digits, frac, frac.length() > 0)
+  }
+
+  /* buildNumber turns the digits the loop collected into the Number Java would
+     answer: a Long when no decimal point was seen, a Double when one was. The
+     two flags that complicate it are the multiplier, which divides the result
+     back down (a percent pattern parses "50%" as 0.5), and a negative zero,
+     which has to be a Double because a long has no way to keep the sign. */
+  private Number buildNumber(boolean negative, String digits, String frac, boolean sawPoint) {
+    if (!sawPoint) {
+      if (negative && isAllZero(digits)) {
+        return (Number) Double.valueOf(-0.0)
+      }
+      long v = 0
+      for (var i = 0 : i < digits.length() : i++) {
+        v = v * 10 + (digits.charAt(i) - '0')
+      }
+      if (multiplier == 1) {
+        return (Number) Long.valueOf(negative ? -v : v)
+      }
+      double d = (double) v / multiplier
+      return (Number) Double.valueOf(negative ? -d : d)
+    }
+    // assembled as a string and handed to parseDouble, so the result is the
+    // same double a program would get from Double.parseDouble of the text
+    String text = (negative ? "-" : "") + (digits.length() == 0 ? "0" : digits) + "." + frac
+    double d = Double.parseDouble(text)
+    if (multiplier != 1) {
+      d = d / multiplier
+    }
+    return (Number) Double.valueOf(d)
+  }
+
+  private static boolean isAsciiDigit(char c) {
+    return c >= '0' && c <= '9'
+  }
+
+  private static boolean isAllZero(String s) {
+    for (var i = 0 : i < s.length() : i++) {
+      if (s.charAt(i) != '0') {
+        return false
+      }
+    }
+    return true
+  }
+}
+
+// ---------------------------------------------------------------- date symbols
+
+/* DateFormatSymbols is the names a date pattern prints: the months, the
+   weekdays, the AM/PM markers and the eras. Java's carries a Locale and falls
+   back to the locale's resource bundle; this one is fixed at the ROOT bundle's
+   English, which is what en_US resolves to as well.
+
+   The array shapes follow the JDK rather than the obvious reading, because a
+   program can index them: getMonths() has thirteen entries, the last empty, and
+   getWeekdays() has eight, with index 0 empty so that Sunday is 1. */
+class DateFormatSymbols {
+  private String[] months = {
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December", ""
+  }
+  private String[] shortMonths = {
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", ""
+  }
+  private String[] weekdays = {
+    "", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
+  }
+  private String[] shortWeekdays = {
+    "", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
+  }
+  private String[] amPmStrings = { "AM", "PM" }
+  private String[] eras = { "BC", "AD" }
+
+  public DateFormatSymbols() {
+  }
+
+  public String[] getMonths() { return months }
+  public void setMonths(String[] v) { months = v }
+  public String[] getShortMonths() { return shortMonths }
+  public void setShortMonths(String[] v) { shortMonths = v }
+  public String[] getWeekdays() { return weekdays }
+  public void setWeekdays(String[] v) { weekdays = v }
+  public String[] getShortWeekdays() { return shortWeekdays }
+  public void setShortWeekdays(String[] v) { shortWeekdays = v }
+  public String[] getAmPmStrings() { return amPmStrings }
+  public void setAmPmStrings(String[] v) { amPmStrings = v }
+  public String[] getEras() { return eras }
+  public void setEras(String[] v) { eras = v }
+
+  public DateFormatSymbols copy() {
+    DateFormatSymbols s = new DateFormatSymbols()
+    s.months = months
+    s.shortMonths = shortMonths
+    s.weekdays = weekdays
+    s.shortWeekdays = shortWeekdays
+    s.amPmStrings = amPmStrings
+    s.eras = eras
+    return s
+  }
+}
+
+// ---------------------------------------------------------------- date formats
+
+/* DateFormat is java.text's date supertype. Two things about it are different
+   here, and both follow from the standard library rather than from taste.
+
+   There is no java.util.Date, so a date is an Instant, and every format and
+   parse below is written in those terms. The style constants are kept because
+   a program uses them, and the patterns they stand for are the en_US ones
+   (SHORT date is "M/d/yy"), because that is what a program with the default
+   locale sees.
+
+   The zone is fixed at UTC. There is no zone database in the standard library,
+   so a pattern's 'z', 'Z' and 'X' fields print "UTC", "+0000" and "Z" and
+   nothing else. On the way in a numeric offset is honoured -- "+0500" shifts
+   the parsed instant by five hours, as it should -- but a named zone is
+   accepted and ignored. */
+abstract class DateFormat extends Format {
+  public static final int ERA_FIELD = 0
+  public static final int YEAR_FIELD = 1
+  public static final int MONTH_FIELD = 2
+  public static final int DAY_OF_MONTH_FIELD = 3
+  public static final int HOUR_OF_DAY1_FIELD = 4
+  public static final int HOUR_OF_DAY0_FIELD = 5
+  public static final int MINUTE_FIELD = 6
+  public static final int SECOND_FIELD = 7
+  public static final int MILLISECOND_FIELD = 8
+  public static final int DAY_OF_WEEK_FIELD = 9
+  public static final int DAY_OF_YEAR_FIELD = 10
+  public static final int DAY_OF_WEEK_IN_MONTH_FIELD = 11
+  public static final int WEEK_OF_YEAR_FIELD = 12
+  public static final int WEEK_OF_MONTH_FIELD = 13
+  public static final int AM_PM_FIELD = 14
+  public static final int HOUR1_FIELD = 15
+  public static final int HOUR0_FIELD = 16
+  public static final int TIMEZONE_FIELD = 17
+
+  public static final int FULL = 0
+  public static final int LONG = 1
+  public static final int MEDIUM = 2
+  public static final int SHORT = 3
+  public static final int DEFAULT = 2
+
+  protected boolean lenientFlag = true
+
+  public static DateFormat getInstance() {
+    return new SimpleDateFormat("M/d/yy, h:mm" + "\u202Fa")
+  }
+
+  public static DateFormat getDateInstance() {
+    return getDateInstance(DEFAULT)
+  }
+
+  public static DateFormat getTimeInstance() {
+    return getTimeInstance(DEFAULT)
+  }
+
+  public static DateFormat getDateTimeInstance() {
+    return getDateTimeInstance(DEFAULT, DEFAULT)
+  }
+
+  public static DateFormat getDateInstance(int style) {
+    return new SimpleDateFormat(dateStylePattern(style))
+  }
+
+  public static DateFormat getTimeInstance(int style) {
+    return new SimpleDateFormat(timeStylePattern(style))
+  }
+
+  public static DateFormat getDateTimeInstance(int dateStyle, int timeStyle) {
+    return new SimpleDateFormat(dateStylePattern(dateStyle) + ", " + timeStylePattern(timeStyle))
+  }
+
+  public static String dateStylePattern(int style) {
+    if (style == FULL) {
+      return "EEEE, MMMM d, y"
+    }
+    if (style == LONG) {
+      return "MMMM d, y"
+    }
+    if (style == MEDIUM) {
+      return "MMM d, y"
+    }
+    if (style == SHORT) {
+      return "M/d/yy"
+    }
+    throw new IllegalArgumentException("Illegal date style: " + style)
+  }
+
+  /* The space in front of the AM/PM marker of these four patterns is U+202F
+     NARROW NO-BREAK SPACE and not an ASCII space: Java 20 and later take the
+     en-US patterns from CLDR, which puts a narrow no-break space there, and
+     these four strings are meant to be the patterns Java prints for the time
+     styles. A pattern a program writes itself keeps whatever space it has --
+     "h:mm a" is five ASCII characters and formats with one. */
+  public static String timeStylePattern(int style) {
+    if (style == FULL) {
+      return "h:mm:ss\u202Fa zzzz"
+    }
+    if (style == LONG) {
+      return "h:mm:ss\u202Fa z"
+    }
+    if (style == MEDIUM) {
+      return "h:mm:ss\u202Fa"
+    }
+    if (style == SHORT) {
+      return "h:mm\u202Fa"
+    }
+    throw new IllegalArgumentException("Illegal time style: " + style)
+  }
+
+  /* isDateStylePattern and isTimeStylePattern answer whether a pattern is one
+     of the eight the style constants stand for. MessageFormat needs them to
+     decide which word to write for a format it built from a pattern text: Java
+     prints "{1,time,short}" but "{0,date,HH:mm}", and what tells the two apart
+     is whether the pattern is one a time style stands for. */
+  public static boolean isDateStylePattern(String p) {
+    return p.equals(dateStylePattern(FULL)) || p.equals(dateStylePattern(LONG)) || p.equals(dateStylePattern(MEDIUM)) || p.equals(dateStylePattern(SHORT))
+  }
+
+  public static boolean isTimeStylePattern(String p) {
+    return p.equals(timeStylePattern(FULL)) || p.equals(timeStylePattern(LONG)) || p.equals(timeStylePattern(MEDIUM)) || p.equals(timeStylePattern(SHORT))
+  }
+
+  public abstract String format(Instant instant)
+  public abstract String format(Instant instant, StringBuilder result)
+  public abstract Instant parse(String source)
+  public abstract Instant parse(String source, ParsePosition pos)
+
+  public String format(Object obj) {
+    if (obj instanceof Instant) {
+      return format((Instant) obj)
+    }
+    if (obj instanceof Long) {
+      return format(Instant.ofEpochMilli(((Long) obj).longValue()))
+    }
+    if (obj instanceof Integer) {
+      return format(Instant.ofEpochMilli(((Integer) obj).longValue()))
+    }
+    throw new IllegalArgumentException("Cannot format given Object as a Date")
+  }
+
+  public Object parseObject(String source) {
+    return parse(source)
+  }
+
+  public Object parseObject(String source, ParsePosition pos) {
+    return parse(source, pos)
+  }
+
+  public boolean isLenient() { return lenientFlag }
+  public void setLenient(boolean v) { lenientFlag = v }
+}
+
+/* DateFields is the accumulator a parse writes into and the normaliser then
+   reads. It starts at the epoch -- 1970-01-01 00:00:00 UTC -- because that is
+   what Java's SimpleDateFormat starts from, so a pattern that names only a
+   month produces a date in 1970, and the fields a pattern leaves out keep their
+   epoch value with no error. `has...` flags are only needed where a zero is a
+   legitimate value and "not seen" has to be told apart from it. */
+class DateFields {
+  public long year = 1970
+  public int month = 1
+  public int day = 1
+  public int hour = 0
+  public int minute = 0
+  public int second = 0
+  public int milli = 0
+  // the zone offset the parse saw, in seconds east of UTC
+  public int offsetSeconds = 0
+
+  public boolean sawHourOfDay = false
+  public boolean sawHour12 = false
+  public boolean sawHour0To11 = false
+  public boolean sawHour1To24 = false
+  public boolean pm = false
+  public boolean bc = false
+  public boolean sawEra = false
+  public boolean sawYear = false
+}
+
+/* SimpleDateFormat is the whole date engine: the pattern language on the way
+   out, the same pattern language read backwards on the way in, and a calendar
+   normaliser in between that is lenient by default.
+
+   The letters are the JDK's, and so is which of them are legal: 'Q', 'n', 'b',
+   'B', 'e' and 'c' are not fields here either and raise the JDK's
+   IllegalArgumentException when a pattern is applied. 'Y' is the week-based
+   year and 'u' the day-of-week number, both of which the JDK has had since 7.
+   Anything that is not a letter is a literal. */
+class SimpleDateFormat extends DateFormat {
+  private String pattern = ""
+  private DateFormatSymbols symbols = new DateFormatSymbols()
+
+  public SimpleDateFormat() {
+    applyPattern("M/d/yy, h:mm" + "\u202Fa")
+  }
+
+  public SimpleDateFormat(String pattern) {
+    applyPattern(pattern)
+  }
+
+  public SimpleDateFormat(String pattern, DateFormatSymbols symbols) {
+    this.symbols = symbols.copy()
+    applyPattern(pattern)
+  }
+
+  public DateFormatSymbols getDateFormatSymbols() { return symbols.copy() }
+  public void setDateFormatSymbols(DateFormatSymbols s) {
+    if (s == null) {
+      throw new NullPointerException()
+    }
+    symbols = s.copy()
+  }
+
+  public String toPattern() { return pattern }
+  public String toLocalizedPattern() { return pattern }
+  public void applyLocalizedPattern(String p) { applyPattern(p) }
+
+  /* applyPattern checks the letters before it stores anything, so a pattern
+     with an illegal one leaves the formatter as it was -- the JDK checks as it
+     goes and leaves a half-built formatter, which is not worth reproducing. */
+  public void applyPattern(String p) {
+    if (p == null) {
+      throw new NullPointerException()
+    }
+    checkPattern(p)
+    pattern = p
+  }
+
+  private static void checkPattern(String p) {
+    int i = 0
+    while (i < p.length()) {
+      char c = p.charAt(i)
+      if (c == '\'') {
+        if (i + 1 < p.length() && p.charAt(i + 1) == '\'') {
+          i = i + 2
+        } else {
+          i = skipQuoted(p, i + 1) + 1
+        }
+        continue
+      }
+      if (isAsciiLetter(c) && !isPatternLetter(c)) {
+        throw new IllegalArgumentException("Illegal pattern character '" + c + "'")
+      }
+      i = i + 1
+    }
+  }
+
+  private static boolean isAsciiLetter(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+  }
+
+  /* The JDK's set of fields, exactly: D E F G H K L M S W X Y Z and a d h k m s
+     u w y z. Everything else in the alphabet is rejected. */
+  private static boolean isPatternLetter(char c) {
+    return c == 'D' || c == 'E' || c == 'F' || c == 'G' || c == 'H' || c == 'K'
+        || c == 'L' || c == 'M' || c == 'S' || c == 'W' || c == 'X' || c == 'Y'
+        || c == 'Z' || c == 'a' || c == 'd' || c == 'h' || c == 'k' || c == 'm'
+        || c == 's' || c == 'u' || c == 'w' || c == 'y' || c == 'z'
+  }
+
+  /* spaceSeparatorLength answers how many bytes of a Zs character start at s[i]
+     -- the Unicode "space separator" characters, which are the ones Java lets
+     stand in for one another when it matches a literal of a date pattern -- and
+     0 when s[i] starts no such character. A char here is one byte of UTF-8, so
+     the multi-byte members are spelled out byte by byte: U+00A0, U+1680,
+     U+2000..U+200A, U+202F, U+205F and U+3000. U+180E, the Mongolian vowel
+     separator, used to be one of them and is not one any more. */
+  private static int spaceSeparatorLength(String s, int i) {
+    if (i >= s.length()) {
+      return 0
+    }
+    char c = s.charAt(i)
+    if (c == ' ') {
+      return 1
+    }
+    if (c == 'Â') {
+      return i + 1 < s.length() && s.charAt(i + 1) == ' ' ? 2 : 0
+    }
+    if (c == 'á') {
+      return i + 2 < s.length() && s.charAt(i + 1) == '' && s.charAt(i + 2) == '' ? 3 : 0
+    }
+    if (c == 'â') {
+      if (i + 2 >= s.length()) {
+        return 0
+      }
+      char second = s.charAt(i + 1)
+      char third = s.charAt(i + 2)
+      if (second == '' && ((third >= '' && third <= '') || third == '¯')) {
+        return 3
+      }
+      return second == '' && third == '' ? 3 : 0
+    }
+    if (c == 'ã') {
+      return i + 2 < s.length() && s.charAt(i + 1) == '' && s.charAt(i + 2) == '' ? 3 : 0
+    }
+    return 0
+  }
+
+  private static int skipQuoted(String s, int from) {
+    int i = from
+    while (i < s.length()) {
+      if (s.charAt(i) == '\'') {
+        // '' inside a quoted run is the quote itself, not its end
+        if (i + 1 < s.length() && s.charAt(i + 1) == '\'') {
+          i = i + 2
+          continue
+        }
+        return i
+      }
+      i = i + 1
+    }
+    return i
+  }
+
+  // ------------------------------------------------------------ format
+
+  public String format(Instant instant) {
+    return format(instant, new StringBuilder()).toString()
+  }
+
+  public String format(Instant instant, StringBuilder result) {
+    if (instant == null) {
+      throw new NullPointerException()
+    }
+    render(instant.toEpochMilli(), result)
+    return result.toString()
+  }
+
+  /* render walks the pattern once, emitting each field from the instant's UTC
+     calendar fields. The fields are recomputed for every pattern letter rather
+     than cached, which keeps the whole formatter a single method with no state
+     to get out of step -- the work is a handful of divisions per letter. */
+  private void render(long ms, StringBuilder out) {
+    long epochDay = Math.floorDiv(ms, 86400000L)
+    int msOfDay = (int) Math.floorMod(ms, 86400000L)
+    long[] ymd = TimeMath.civilFromDays(epochDay)
+    int year = (int) ymd[0]
+    int month = (int) ymd[1]
+    int day = (int) ymd[2]
+    int hour = msOfDay / 3600000
+    int minute = (msOfDay / 60000) % 60
+    int second = (msOfDay / 1000) % 60
+    int milli = msOfDay % 1000
+    int ampm = hour < 12 ? 0 : 1
+
+    int i = 0
+    while (i < pattern.length()) {
+      char c = pattern.charAt(i)
+      if (c == '\'') {
+        if (i + 1 < pattern.length() && pattern.charAt(i + 1) == '\'') {
+          out.append('\'')
+          i = i + 2
+        } else {
+          int close = skipQuoted(pattern, i + 1)
+          out.append(pattern.substring(i + 1, close).replace("''", "'"))
+          i = close + 1
+        }
+        continue
+      }
+      int count = 1
+      while (i + count < pattern.length() && pattern.charAt(i + count) == c) {
+        count = count + 1
+      }
+      if (!isAsciiLetter(c) || !isPatternLetter(c)) {
+        // the run is appended as text and not byte by byte: a literal that is
+        // not ASCII -- the narrow no-break space of the CLDR time patterns, a
+        // currency sign -- is several bytes, and each of them is already a
+        // byte of the string. Appending them one char at a time would encode
+        // every one of them again.
+        out.append(pattern.substring(i, i + count))
+        i = i + count
+        continue
+      }
+      if (c == 'y' || c == 'Y') {
+        int display = c == 'Y' ? weekBasedYear(epochDay, year) : year
+        boolean bc = display <= 0
+        int value = bc ? 1 - display : display
+        if (count == 2) {
+          appendPadded(out, Math.floorMod(value, 100), 2)
+        } else {
+          appendPadded(out, value, count)
+        }
+      } else if (c == 'M' || c == 'L') {
+        appendMonth(out, month, count)
+      } else if (c == 'G') {
+        out.append(symbols.getEras()[year <= 0 ? 0 : 1])
+      } else if (c == 'd') {
+        appendPadded(out, day, count)
+      } else if (c == 'D') {
+        appendPadded(out, dayOfYear(epochDay, year), count)
+      } else if (c == 'F') {
+        appendPadded(out, Math.floorDiv(day - 1, 7) + 1, count)
+      } else if (c == 'E') {
+        int dow = dayOfWeekIndex(epochDay)
+        out.append(count >= 4 ? symbols.getWeekdays()[dow + 1] : symbols.getShortWeekdays()[dow + 1])
+      } else if (c == 'u') {
+        appendPadded(out, mondayBasedDow(epochDay), count)
+      } else if (c == 'a') {
+        out.append(symbols.getAmPmStrings()[ampm])
+      } else if (c == 'H') {
+        appendPadded(out, hour, count)
+      } else if (c == 'k') {
+        appendPadded(out, hour == 0 ? 24 : hour, count)
+      } else if (c == 'K') {
+        appendPadded(out, hour % 12, count)
+      } else if (c == 'h') {
+        int h = hour % 12
+        appendPadded(out, h == 0 ? 12 : h, count)
+      } else if (c == 'm') {
+        appendPadded(out, minute, count)
+      } else if (c == 's') {
+        appendPadded(out, second, count)
+      } else if (c == 'S') {
+        appendPadded(out, milli, count)
+      } else if (c == 'w') {
+        appendPadded(out, weekOfYear(epochDay, year), count)
+      } else if (c == 'W') {
+        appendPadded(out, weekOfMonth(epochDay, year, month, day), count)
+      } else if (c == 'z') {
+        out.append(count >= 4 ? "Coordinated Universal Time" : "UTC")
+      } else if (c == 'Z') {
+        out.append("+0000")
+      } else if (c == 'X') {
+        out.append("Z")
+      }
+      i = i + count
+    }
+  }
+
+  private void appendMonth(StringBuilder out, int month, int count) {
+    if (count <= 2) {
+      appendPadded(out, month, count)
+    } else if (count == 3) {
+      out.append(symbols.getShortMonths()[month - 1])
+    } else {
+      out.append(symbols.getMonths()[month - 1])
+    }
+  }
+
+  private static void appendPadded(StringBuilder out, int value, int width) {
+    String s = Integer.toString(value)
+    for (var k = 0 : k < width - s.length() : k++) {
+      out.append('0')
+    }
+    out.append(s)
+  }
+
+  // ------------------------------------------------------------ calendar helpers
+
+  /* dayOfWeekIndex counts from Sunday, which is what the weekday name arrays
+     and the week-of-year rules are indexed by; the epoch day 0 was a Thursday,
+     which is why the four is there. */
+  static int dayOfWeekIndex(long epochDay) {
+    return (int) Math.floorMod(epochDay + 4, 7)
+  }
+
+  static int mondayBasedDow(long epochDay) {
+    int i = dayOfWeekIndex(epochDay)
+    return i == 0 ? 7 : i
+  }
+
+  static int dayOfYear(long epochDay, int year) {
+    return (int) (epochDay - TimeMath.daysFromCivil(year, 1, 1)) + 1
+  }
+
+  /* weekOfYear is the JDK's, with the en_US rules: weeks begin on Sunday and
+     the first week is the one containing January 1. The last thing it does is
+     the part that is easy to miss -- when the week the date falls in runs past
+     the end of the year and contains January 1 of the next one, the date is in
+     week 1 of *that* year, not in week 53 of this one, which is why
+     2026-12-31 reports week 1. */
+  static int weekOfYear(long epochDay, int year) {
+    long jan1 = TimeMath.daysFromCivil(year, 1, 1)
+    long nextJan1 = TimeMath.daysFromCivil(year + 1, 1, 1)
+    int off = dayOfWeekIndex(jan1)
+    long doy0 = epochDay - jan1
+    long k = Math.floorDiv(doy0 + off, 7)
+    long start0 = 7 * k - off
+    long length = nextJan1 - jan1
+    if (start0 <= length && length <= start0 + 6) {
+      return 1
+    }
+    return (int) k + 1
+  }
+
+  static int weekOfMonth(long epochDay, int year, int month, int day) {
+    long first = TimeMath.daysFromCivil(year, month, 1)
+    int off = dayOfWeekIndex(first)
+    return (int) Math.floorDiv(day - 1 + off, 7) + 1
+  }
+
+  /* weekBasedYear is the year the ISO-style week belongs to: normally this one,
+     but the week that straddles New Year belongs to whichever year holds its
+     first day. */
+  static int weekBasedYear(long epochDay, int year) {
+    long jan1 = TimeMath.daysFromCivil(year, 1, 1)
+    long nextJan1 = TimeMath.daysFromCivil(year + 1, 1, 1)
+    int off = dayOfWeekIndex(jan1)
+    long k = Math.floorDiv(epochDay - jan1 + off, 7)
+    long start0 = 7 * k - off
+    long length = nextJan1 - jan1
+    if (start0 <= length && length <= start0 + 6) {
+      return year + 1
+    }
+    return year
+  }
+
+  // ------------------------------------------------------------ parse
+
+  public Instant parse(String source) {
+    ParsePosition pos = new ParsePosition(0)
+    Instant result = parse(source, pos)
+    if (result == null) {
+      throw new ParseException("Unparseable date: \"" + source + "\"", pos.getErrorIndex())
+    }
+    return result
+  }
+
+  /* parse reads the pattern and the text together, one field at a time. It is
+     deliberately half-lenient -- missing fields keep their epoch values and a
+     numeric field takes as many digits as it finds, which is why "yy" accepts
+     "2026" -- and it defers the range checks to normalise, because in the JDK
+     they happen after the whole pattern has been read and the error offset they
+     report is the end of the text, not the field that was out of range. */
+  public Instant parse(String source, ParsePosition pos) {
+    if (source == null) {
+      throw new NullPointerException()
+    }
+    pos.setErrorIndex(-1)
+    DateFields f = new DateFields()
+    int start = pos.getIndex()
+    int i = start
+    int p = 0
+    while (p < pattern.length()) {
+      char c = pattern.charAt(p)
+      if (c == '\'') {
+        String literal = ""
+        if (p + 1 < pattern.length() && pattern.charAt(p + 1) == '\'') {
+          literal = "'"
+          p = p + 2
+        } else {
+          int close = skipQuoted(pattern, p + 1)
+          literal = pattern.substring(p + 1, close).replace("''", "'")
+          p = close + 1
+        }
+        if (!source.startsWith(literal, i)) {
+          pos.setErrorIndex(i)
+          return null
+        }
+        i = i + literal.length()
+        continue
+      }
+      int count = 1
+      while (p + count < pattern.length() && pattern.charAt(p + count) == c) {
+        count = count + 1
+      }
+      if (!isAsciiLetter(c) || !isPatternLetter(c)) {
+        // A literal character has to appear in the text, with one exception:
+        // any character of Unicode category Zs matches any other, so a pattern
+        // with the narrow no-break space the CLDR styles use parses text typed
+        // with a plain space, and the other way round. Java does the same, and
+        // it is what makes "h:mm a" read "2:05 PM".
+        int at = i
+        int pp = p
+        for (var k = 0 : k < count : k++) {
+          int plen = spaceSeparatorLength(pattern, pp)
+          if (plen > 0) {
+            int tlen = at < source.length() ? spaceSeparatorLength(source, at) : 0
+            if (tlen == 0) {
+              pos.setErrorIndex(at)
+              return null
+            }
+            at = at + tlen
+            pp = pp + plen
+            continue
+          }
+          if (at >= source.length() || source.charAt(at) != pattern.charAt(pp)) {
+            pos.setErrorIndex(at)
+            return null
+          }
+          at = at + 1
+          pp = pp + 1
+        }
+        i = at
+        p = pp
+        continue
+      }
+      // A numeric field followed by another numeric field takes exactly as
+      // many digits as its pattern letter says, which is what lets "yyyyMMdd"
+      // read "20260914" as three fields and not as one eight-digit year. A
+      // field followed by anything else -- a separator, a name, the end of the
+      // pattern -- takes the whole digit run.
+      int width = 0
+      if (nextIsNumeric(pattern, p + count)) {
+        width = fieldWidth(c, count)
+      }
+      int next = readField(f, source, i, c, count, width)
+      if (next < 0) {
+        pos.setErrorIndex(i)
+        return null
+      }
+      i = next
+      p = p + count
+    }
+    pos.setIndex(i)
+    return normalise(f, pos, start, i)
+  }
+
+  /* The number of digits a numeric field takes when the field after it is also
+     numeric, and 0 for the fields that are read as names or not as digits at
+     all. It is the JDK's compiled field width: a four-letter year is four
+     digits, a one-letter month is two. */
+  private static int fieldWidth(char c, int count) {
+    if (c == 'y' || c == 'Y') {
+      return count >= 4 ? count : 2
+    }
+    if (c == 'M' || c == 'L') {
+      return count <= 2 ? 2 : 0
+    }
+    if (c == 'd' || c == 'H' || c == 'h' || c == 'm' || c == 's' || c == 'k' || c == 'K') {
+      return 2
+    }
+    if (c == 'D') {
+      return 3
+    }
+    if (c == 'F' || c == 'u' || c == 'w' || c == 'W') {
+      return 2
+    }
+    if (c == 'S') {
+      return count
+    }
+    return 0
+  }
+
+  private static boolean nextIsNumeric(String pattern, int at) {
+    if (at >= pattern.length()) {
+      return false
+    }
+    char c = pattern.charAt(at)
+    if (!isAsciiLetter(c)) {
+      return false
+    }
+    int n = 1
+    while (at + n < pattern.length() && pattern.charAt(at + n) == c) {
+      n = n + 1
+    }
+    return fieldWidth(c, n) > 0
+  }
+
+  /* readField consumes one field and answers the new index, or -1 if the text
+     does not have one there. width is the number of digits the field must take
+     when another numeric field follows it, or 0 for the whole run. */
+  private int readField(DateFields f, String s, int at, char c, int count, int width) {
+    int i = at
+    if (c == 'y' || c == 'Y') {
+      int n = digitRun(s, i)
+      if (n == 0) {
+        return -1
+      }
+      if (width > 0) {
+        if (n < width) {
+          return -1
+        }
+        n = width
+      }
+      long v = Long.parseLong(s.substring(i, i + n))
+      // A two-letter year is a year within the current century, in the JDK's
+      // eighty-years-back window: with the clock in 2026, "26" is 2026 and
+      // "50" is 1950. A value that came from more than two digits is taken
+      // literally, which is what the JDK does with "yy" and "2026".
+      if (count == 2 && n <= 2 && v < 100) {
+        long now = TimeMath.civilFromDays(Math.floorDiv(System.currentTimeMillis(), 86400000L))[0]
+        v = now - Math.floorMod(now, 100) + v
+        if (v > now + 20) {
+          v = v - 100
+        }
+      }
+      f.year = v
+      f.sawYear = true
+      return i + n
+    }
+    if (c == 'M' || c == 'L') {
+      if (count <= 2) {
+        int n = digitRun(s, i)
+        if (n == 0) {
+          return -1
+        }
+        if (width > 0) {
+          if (n < width) {
+            return -1
+          }
+          n = width
+        }
+        f.month = Integer.parseInt(s.substring(i, i + n))
+        return i + n
+      }
+      String[] names = count == 3 ? symbols.getShortMonths() : symbols.getMonths()
+      int m = matchName(s, i, names, 12)
+      if (m < 0) {
+        return -1
+      }
+      f.month = m + 1
+      return i + names[m].length()
+    }
+    if (c == 'G') {
+      int e = matchName(s, i, symbols.getEras(), 2)
+      if (e < 0) {
+        return -1
+      }
+      f.bc = e == 0
+      f.sawEra = true
+      return i + symbols.getEras()[e].length()
+    }
+    if (c == 'd') { return readInt(f, s, i, 1, width) }
+    if (c == 'D') { return readInt(f, s, i, 10, width) }
+    if (c == 'F') { return readInt(f, s, i, 11, width) }
+    if (c == 'E') {
+      // Four letters or more is the full name and three or fewer the
+      // abbreviation, the same split the formatter uses; a name of the other
+      // length is still accepted, which is what the JDK's matcher does.
+      String[] first = count >= 4 ? symbols.getWeekdays() : symbols.getShortWeekdays()
+      String[] second = count >= 4 ? symbols.getShortWeekdays() : symbols.getWeekdays()
+      int d = matchName(s, i, first, 8)
+      if (d < 0) {
+        d = matchName(s, i, second, 8)
+        if (d < 0) {
+          return -1
+        }
+        return i + second[d].length()
+      }
+      return i + first[d].length()
+    }
+    if (c == 'u') { return readInt(f, s, i, 9, width) }
+    if (c == 'a') {
+      int n = matchName(s, i, symbols.getAmPmStrings(), 2)
+      if (n < 0) {
+        return -1
+      }
+      f.pm = n == 1
+      return i + symbols.getAmPmStrings()[n].length()
+    }
+    if (c == 'H') {
+      int r = readInt(f, s, i, 5, width)
+      if (r >= 0) { f.sawHourOfDay = true }
+      return r
+    }
+    if (c == 'k') {
+      int r = readInt(f, s, i, 4, width)
+      if (r >= 0) { f.sawHour1To24 = true }
+      return r
+    }
+    if (c == 'K') {
+      int r = readInt(f, s, i, 16, width)
+      if (r >= 0) { f.sawHour0To11 = true }
+      return r
+    }
+    if (c == 'h') {
+      int r = readInt(f, s, i, 15, width)
+      if (r >= 0) { f.sawHour12 = true }
+      return r
+    }
+    if (c == 'm') { return readInt(f, s, i, 6, width) }
+    if (c == 's') { return readInt(f, s, i, 7, width) }
+    if (c == 'S') { return readInt(f, s, i, 8, width) }
+    if (c == 'w') { return readInt(f, s, i, 12, width) }
+    if (c == 'W') { return readInt(f, s, i, 13, width) }
+    if (c == 'z') {
+      // a zone name: consumed and ignored, since the calendar here is UTC and
+      // the JDK's own zone database is not something this file has
+      int n = letterRun(s, i)
+      if (n == 0) {
+        return -1
+      }
+      return i + n
+    }
+    if (c == 'Z') {
+      return readZone(f, s, i, true)
+    }
+    if (c == 'X') {
+      return readZone(f, s, i, false)
+    }
+    return -1
+  }
+
+  private static int readInt(DateFields f, String s, int at, int which, int width) {
+    int n = digitRun(s, at)
+    if (n == 0) {
+      return -1
+    }
+    if (width > 0) {
+      if (n < width) {
+        return -1
+      }
+      n = width
+    }
+    int v = Integer.parseInt(s.substring(at, at + n))
+    if (which == 1) { f.day = v }
+    else if (which == 4) { f.hour = (v == 24 ? 0 : v) }
+    else if (which == 5) { f.hour = v }
+    else if (which == 6) { f.minute = v }
+    else if (which == 7) { f.second = v }
+    else if (which == 8) { f.milli = v }
+    else if (which == 15 || which == 16) { f.hour = v }
+    // 9, 10, 11, 12 and 13 are the derived fields, and the JDK lets a pattern
+    // name them; they are consumed here so the pattern still matches, but the
+    // date is built from the primitive ones, as Java's Calendar does too.
+    return at + n
+  }
+
+  /* readZone reads the numeric offsets: 'Z' takes +HHMM, 'X' takes the ISO
+     forms (+HH, +HHMM, +HH:MM) and both take "Z". The offset is remembered in
+     seconds east and subtracted from the result, so "+0500" really does move
+     the instant back five hours, which is what the JDK does with the default
+     zone set to UTC. */
+  private static int readZone(DateFields f, String s, int at, boolean basic) {
+    if (at >= s.length()) {
+      return -1
+    }
+    char c = s.charAt(at)
+    if (c == 'Z') {
+      return at + 1
+    }
+    if (c != '+' && c != '-') {
+      return -1
+    }
+    int n = digitRun(s, at + 1)
+    if (!basic && (n == 1 || n == 2)) {
+      // "+5" and "+05" both mean five hours; the JDK is generous here
+      if (n == 1) {
+        return -1
+      }
+    }
+    if (n < 2) {
+      return -1
+    }
+    int hours = Integer.parseInt(s.substring(at + 1, at + 3))
+    int j = at + 3
+    int minutes = 0
+    if (!basic && j < s.length() && s.charAt(j) == ':') {
+      j = j + 1
+    }
+    if (j + 1 < s.length() && isAsciiDigitAt(s, j) && isAsciiDigitAt(s, j + 1)) {
+      minutes = Integer.parseInt(s.substring(j, j + 2))
+      j = j + 2
+    } else if (basic && n != 4) {
+      return -1
+    }
+    int total = hours * 3600 + minutes * 60
+    f.offsetSeconds = c == '-' ? -total : total
+    return j
+  }
+
+  private static boolean isAsciiDigitAt(String s, int at) {
+    return at < s.length() && s.charAt(at) >= '0' && s.charAt(at) <= '9'
+  }
+
+  private static int digitRun(String s, int from) {
+    int n = 0
+    while (from + n < s.length() && s.charAt(from + n) >= '0' && s.charAt(from + n) <= '9') {
+      n = n + 1
+    }
+    return n
+  }
+
+  private static int letterRun(String s, int from) {
+    int n = 0
+    while (from + n < s.length() && isAsciiLetter(s.charAt(from + n))) {
+      n = n + 1
+    }
+    return n
+  }
+
+  /* matchName finds the entry of `limit` names that the text starts with,
+     longest first, ignoring case the way the JDK's own matcher does. */
+  private static int matchName(String s, int at, String[] names, int limit) {
+    int best = -1
+    int bestLen = 0
+    for (var k = 0 : k < limit : k++) {
+      String name = names[k]
+      if (name.length() > bestLen && startsWithIgnoreCase(s, at, name)) {
+        best = k
+        bestLen = name.length()
+      }
+    }
+    return best
+  }
+
+  private static boolean startsWithIgnoreCase(String s, int at, String name) {
+    if (at + name.length() > s.length()) {
+      return false
+    }
+    for (var k = 0 : k < name.length() : k++) {
+      if (lower(s.charAt(at + k)) != lower(name.charAt(k))) {
+        return false
+      }
+    }
+    return true
+  }
+
+  private static char lower(char c) {
+    if (c >= 'A' && c <= 'Z') {
+      return (char) (c + 32)
+    }
+    return c
+  }
+
+  /* normalise turns the fields into an instant. Three things happen here that
+     are not obvious: the hour is resolved from whichever of the four hour
+     letters the pattern used, together with the AM/PM marker; the range checks
+     only run when the formatter is not lenient, and they report the end of the
+     text as their offset and put the position back where the parse began,
+     which is what the JDK's do (a failed parse leaves pos where it started --
+     it is the error index that says how far it got). */
+  private Instant normalise(DateFields f, ParsePosition pos, int start, int endIndex) {
+    int year = (int) f.year
+    if (f.sawEra && f.bc) {
+      year = 1 - year
+    }
+    if (!lenientFlag) {
+      if (f.month < 1 || f.month > 12) {
+        pos.setErrorIndex(endIndex)
+        pos.setIndex(start)
+        return null
+      }
+      if (f.day < 1 || f.day > TimeMath.daysInMonth(year, f.month)) {
+        pos.setErrorIndex(endIndex)
+        pos.setIndex(start)
+        return null
+      }
+      if (f.hour > 23 || f.minute > 59 || f.second > 59 || f.milli > 999) {
+        pos.setErrorIndex(endIndex)
+        pos.setIndex(start)
+        return null
+      }
+    }
+    int hour = f.hour
+    if (f.sawHour12) {
+      hour = (f.hour % 12) + (f.pm ? 12 : 0)
+    } else if (f.sawHour0To11) {
+      hour = f.hour + (f.pm ? 12 : 0)
+    } else if (f.sawHour1To24) {
+      hour = f.hour % 24
+    }
+    long y = year + Math.floorDiv(f.month - 1, 12)
+    int m = (int) Math.floorMod(f.month - 1, 12) + 1
+    long epochDay = TimeMath.daysFromCivil(y, m, 1) + (f.day - 1)
+    long ms = epochDay * 86400000L + hour * 3600000L + f.minute * 60000L + f.second * 1000L + f.milli
+    ms = ms - (long) f.offsetSeconds * 1000L
+    return Instant.ofEpochMilli(ms)
+  }
+}
+
+// ---------------------------------------------------------------- date time formatter
+
+/* FormatStyle is the java.time half's version of the DateFormat style
+   constants: an enum rather than four ints, because that is how java.time
+   spells it. */
+enum FormatStyle {
+  FULL, LONG, MEDIUM, SHORT
+}
+
+/* ResolverStyle is what a parse does with a date that does not exist.
+   SOFT and STRICT reject it, SMART clamps the day to the end of the month,
+   LENIENT rolls the excess into the next month -- which is also what
+   SimpleDateFormat does, so LENIENT and a lenient SimpleDateFormat agree.
+
+   The JDK's ISO_LOCAL_DATE uses a pattern whose year field is "year of era",
+   and its STRICT resolver then refuses the text because no era was named; that
+   is a wart of that combination and not of strictness, so it is not
+   reproduced: STRICT here rejects a date that does not exist, which is what
+   the name says. */
+enum ResolverStyle {
+  STRICT, SMART, LENIENT
+}
+
+/* DateTimeFormatter is java.time's formatter, and the one thing a program
+   notices is that it belongs to the date type rather than to the string: the
+   format and parse methods are per type, so a formatter that names an hour
+   cannot be pointed at a LocalDate by accident, and the four ISO constants
+   below are constants rather than patterns a program has to spell out.
+
+   ofPattern accepts the java.time letters that this standard library can
+   honour -- G u y M L d D E H h m s S a and quoting -- and rejects the rest
+   with an IllegalArgumentException rather than silently printing nothing.
+   The zone letters (z Z X x V O) are among the rejected, because there is no
+   zone database here; the offset is always UTC. */
+class DateTimeFormatter {
+  /* The five ISO forms resolve STRICTLY, as java.time's do: a parse of
+     "2026-02-30" fails rather than clamping to the 28th. A formatter built by
+     ofPattern is SMART, which is java.time's default for those. */
+  public static final DateTimeFormatter ISO_LOCAL_DATE = new DateTimeFormatter("iso-date", null, ResolverStyle.STRICT)
+  public static final DateTimeFormatter ISO_LOCAL_TIME = new DateTimeFormatter("iso-time", null, ResolverStyle.STRICT)
+  public static final DateTimeFormatter ISO_LOCAL_DATE_TIME = new DateTimeFormatter("iso-datetime", null, ResolverStyle.STRICT)
+  public static final DateTimeFormatter ISO_INSTANT = new DateTimeFormatter("iso-instant", null, ResolverStyle.STRICT)
+  public static final DateTimeFormatter BASIC_ISO_DATE = new DateTimeFormatter("basic-date", null, ResolverStyle.STRICT)
+
+  // "" for a hand-written ISO form, otherwise the translated SimpleDateFormat
+  // pattern the pattern-based forms run on
+  private String kind = ""
+  private String pattern = ""
+  private SimpleDateFormat delegate = null
+  private ResolverStyle resolver = ResolverStyle.SMART
+
+  private DateTimeFormatter(String kind, String pattern, ResolverStyle resolver) {
+    this.kind = kind
+    this.pattern = pattern
+    this.resolver = resolver
+  }
+
+  public static DateTimeFormatter ofPattern(String pattern) {
+    DateTimeFormatter f = new DateTimeFormatter("", pattern, ResolverStyle.SMART)
+    f.delegate = new SimpleDateFormat(translate(pattern))
+    return f
+  }
+
+  public static DateTimeFormatter ofLocalizedDate(FormatStyle style) {
+    return ofPattern(DateFormat.dateStylePattern(styleOrdinal(style)))
+  }
+
+  public static DateTimeFormatter ofLocalizedTime(FormatStyle style) {
+    return ofPattern(DateFormat.timeStylePattern(styleOrdinal(style)))
+  }
+
+  public static DateTimeFormatter ofLocalizedDateTime(FormatStyle style) {
+    return ofPattern(DateFormat.dateStylePattern(styleOrdinal(style)) + ", " + DateFormat.timeStylePattern(styleOrdinal(style)))
+  }
+
+  private static int styleOrdinal(FormatStyle style) {
+    if (style == FormatStyle.FULL) { return DateFormat.FULL }
+    if (style == FormatStyle.LONG) { return DateFormat.LONG }
+    if (style == FormatStyle.MEDIUM) { return DateFormat.MEDIUM }
+    return DateFormat.SHORT
+  }
+
+  /* The copy gets a SimpleDateFormat of its own: the delegate carries the
+     leniency flag the resolver sets, so sharing one object would let a
+     withResolverStyle(STRICT) copy change how the original parses. */
+  public DateTimeFormatter withResolverStyle(ResolverStyle style) {
+    DateTimeFormatter f = new DateTimeFormatter(kind, pattern, style)
+    if (delegate != null) {
+      f.delegate = new SimpleDateFormat(delegate.toPattern())
+      if (style == ResolverStyle.STRICT) {
+        f.delegate.setLenient(false)
+      }
+    }
+    return f
+  }
+
+  public ResolverStyle getResolverStyle() { return resolver }
+
+  /* translate rewrites a java.time pattern as a SimpleDateFormat one. Only two
+     letters actually move: 'u' is the proleptic year here and the plain year
+     there, and DateTimeFormatter has no 'Y'. Everything else keeps its meaning,
+     which is why the two classes can share one engine. */
+  static String translate(String p) {
+    StringBuilder b = new StringBuilder()
+    int i = 0
+    while (i < p.length()) {
+      char c = p.charAt(i)
+      if (c == '\'') {
+        int close = scanQuote(p, i + 1)
+        b.append(p.substring(i, close + 1))
+        i = close + 1
+        continue
+      }
+      if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+        if (c != 'G' && c != 'u' && c != 'y' && c != 'M' && c != 'L' && c != 'd' && c != 'D'
+            && c != 'E' && c != 'H' && c != 'h' && c != 'm' && c != 's' && c != 'S' && c != 'a') {
+          throw new IllegalArgumentException("Unknown pattern letter: " + c)
+        }
+        if (c == 'u' || c == 'G' || c == 'D') {
+          // 'D' is day-of-year in both; 'u' becomes SimpleDateFormat's year and
+          // 'G' its era, unchanged in meaning
+          b.append(c == 'u' ? "y" : p.substring(i, i + 1))
+        } else {
+          b.append(p.substring(i, i + 1))
+        }
+        i = i + 1
+        continue
+      }
+      b.append(p.substring(i, i + 1))
+      i = i + 1
+    }
+    return b.toString()
+  }
+
+  private static int scanQuote(String s, int from) {
+    int i = from
+    while (i < s.length()) {
+      if (s.charAt(i) == '\'') {
+        if (i + 1 < s.length() && s.charAt(i + 1) == '\'') {
+          i = i + 2
+          continue
+        }
+        return i
+      }
+      i = i + 1
+    }
+    return i
+  }
+
+  // ------------------------------------------------------------ format
+
+  public String format(LocalDate date) {
+    if (isIso()) {
+      checkFields(fieldPattern(), true, false)
+      return isoDate(date.getYear(), date.getMonthValue(), date.getDayOfMonth())
+    }
+    checkFields(pattern, true, false)
+    return delegate.format(Instant.ofEpochMilli(date.toEpochDay() * 86400000L))
+  }
+
+  public String format(LocalTime time) {
+    if (isIso()) {
+      checkFields(fieldPattern(), false, true)
+      return isoTime(time.getHour(), time.getMinute(), time.getSecond(), time.getNano())
+    }
+    checkFields(pattern, false, true)
+    return delegate.format(Instant.ofEpochMilli((long) time.toSecondOfDay() * 1000L + time.getNano() / 1000000))
+  }
+
+  public String format(LocalDateTime dateTime) {
+    if (kind.equals("iso-instant")) {
+      throw new UnsupportedTemporalTypeException("Unsupported field: InstantSeconds")
+    }
+    if (isIso()) {
+      LocalDate d = dateTime.toLocalDate()
+      LocalTime t = dateTime.toLocalTime()
+      return isoDate(d.getYear(), d.getMonthValue(), d.getDayOfMonth()) + "T" + isoTime(t.getHour(), t.getMinute(), t.getSecond(), t.getNano())
+    }
+    return delegate.format(Instant.ofEpochMilli(dateTime.toLocalDate().toEpochDay() * 86400000L + dateTime.toLocalTime().toSecondOfDay() * 1000L + dateTime.toLocalTime().getNano() / 1000000))
+  }
+
+  public String format(Instant instant) {
+    if (kind.equals("iso-instant")) {
+      return isoInstant(instant)
+    }
+    if (isIso()) {
+      return isoDate(isoYear(instant), isoMonth(instant), isoDay(instant)) + "T" + isoTimeOf(instant)
+    }
+    return delegate.format(instant)
+  }
+
+  public String format(Instant instant, StringBuilder result) {
+    result.append(format(instant))
+    return result.toString()
+  }
+
+  private boolean isIso() {
+    return kind.equals("iso-date") || kind.equals("iso-time") || kind.equals("iso-datetime")
+        || kind.equals("iso-instant") || kind.equals("basic-date")
+  }
+
+  /* Java refuses to format a value with a pattern that names a field the value
+     does not have, and so does this one: format(LocalDate) with "HH:mm" is a
+     mistake, and printing 00:00 for the hour it does not have would hide it.
+     Instant is the exception, and the one place this class is kinder than the
+     JDK: a pattern formatter here has no zone to resolve an instant in, so
+     rather than fail it uses the only zone the library has, UTC. See format
+     below. The name in the message is java.time's ChronoField name, which is
+     what the JDK's UnsupportedTemporalTypeException carries. */
+  private static String fieldOf(char c) {
+    if (c == 'G') { return "Era" }
+    if (c == 'u') { return "Year" }
+    if (c == 'y') { return "YearOfEra" }
+    if (c == 'M' || c == 'L') { return "MonthOfYear" }
+    if (c == 'd') { return "DayOfMonth" }
+    if (c == 'D') { return "DayOfYear" }
+    if (c == 'E') { return "DayOfWeek" }
+    if (c == 'a') { return "AmPmOfDay" }
+    if (c == 'h') { return "ClockHourOfAmPm" }
+    if (c == 'H') { return "HourOfDay" }
+    if (c == 'k') { return "ClockHourOfDay" }
+    if (c == 'K') { return "HourOfAmPm" }
+    if (c == 'm') { return "MinuteOfHour" }
+    if (c == 's') { return "SecondOfMinute" }
+    if (c == 'S') { return "NanoOfSecond" }
+    return null
+  }
+
+  private static boolean isTimeLetter(char c) {
+    return c == 'a' || c == 'h' || c == 'H' || c == 'k' || c == 'K' || c == 'm' || c == 's' || c == 'S'
+  }
+
+  /* checkFields walks a pattern the way format does -- left to right, quoted
+     runs skipped -- and refuses the first letter whose field the value has no
+     answer for: a time letter on a LocalDate, a date letter on a LocalTime. */
+  private void checkFields(String pat, boolean dateOk, boolean timeOk) {
+    int i = 0
+    while (i < pat.length()) {
+      char c = pat.charAt(i)
+      if (c == '\'') {
+        i = scanQuote(pat, i + 1) + 1
+        continue
+      }
+      if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+        boolean time = isTimeLetter(c)
+        if (time && !timeOk) {
+          throw new UnsupportedTemporalTypeException("Unsupported field: " + fieldOf(c))
+        }
+        if (!time && !dateOk) {
+          throw new UnsupportedTemporalTypeException("Unsupported field: " + fieldOf(c))
+        }
+      }
+      i = i + 1
+    }
+  }
+
+  /* The ISO forms hold no pattern text, but they do name fields, so the check
+     above runs on the letters each of them reads. ISO_INSTANT has no such
+     pattern: it reads InstantSeconds, which no value but an Instant has, and
+     the three format methods above refuse it by name. */
+  private String fieldPattern() {
+    if (kind.equals("iso-time")) {
+      return "HH:mm:ss"
+    }
+    if (kind.equals("iso-date") || kind.equals("basic-date")) {
+      return "uuuu-MM-dd"
+    }
+    if (kind.equals("iso-datetime")) {
+      return "uuuu-MM-dd'T'HH:mm:ss"
+    }
+    return pattern
+  }
+
+  private static long[] ymd(long epochDay) {
+    return TimeMath.civilFromDays(epochDay)
+  }
+
+  private static int isoYear(Instant i) {
+    return (int) ymd(Math.floorDiv(i.toEpochMilli(), 86400000L))[0]
+  }
+
+  private static int isoMonth(Instant i) {
+    return (int) ymd(Math.floorDiv(i.toEpochMilli(), 86400000L))[1]
+  }
+
+  private static int isoDay(Instant i) {
+    return (int) ymd(Math.floorDiv(i.toEpochMilli(), 86400000L))[2]
+  }
+
+  private String isoTimeOf(Instant i) {
+    long msOfDay = Math.floorMod(i.toEpochMilli(), 86400000L)
+    return isoTime((int) (msOfDay / 3600000), (int) ((msOfDay / 60000) % 60), (int) ((msOfDay / 1000) % 60), (int) (msOfDay % 1000) * 1000000)
+  }
+
+  /* BASIC_ISO_DATE is "20260914": the year is padded to four and the month and
+     day to two, with no separators. The ISO forms pad the year to four too and
+     prefix a '+' beyond 9999, which is the one place the JDK's date formats
+     disagree with SimpleDateFormat's zero padding. */
+  private String isoDate(int year, int month, int day) {
+    if (kind.equals("basic-date")) {
+      return isoYearField(year, 4, false) + pad(month, 2) + pad(day, 2)
+    }
+    return isoYearField(year, 4, true) + "-" + pad(month, 2) + "-" + pad(day, 2)
+  }
+
+  private static String isoYearField(int year, int width, boolean signForBig) {
+    if (signForBig && year > 9999) {
+      return "+" + Integer.toString(year)
+    }
+    return pad(year, width)
+  }
+
+  /* The fraction is printed only when it is not zero, and then at three, six or
+     nine digits -- the shortest of those that does not lose information. An
+     Instant here carries milliseconds, so ISO_INSTANT never prints more than
+     three, which is the one visible difference from the JDK's nanosecond
+     instants. */
+  private static String isoTime(int hour, int minute, int second, int nano) {
+    StringBuilder b = new StringBuilder()
+    b.append(pad(hour, 2))
+    b.append(':')
+    b.append(pad(minute, 2))
+    b.append(':')
+    b.append(pad(second, 2))
+    if (nano != 0) {
+      b.append('.')
+      String f = pad(nano, 9)
+      if (nano % 1000000 == 0) {
+        f = f.substring(0, 3)
+      } else if (nano % 1000 == 0) {
+        f = f.substring(0, 6)
+      }
+      b.append(f)
+    }
+    return b.toString()
+  }
+
+  private String isoInstant(Instant instant) {
+    return isoDate(isoYear(instant), isoMonth(instant), isoDay(instant)) + "T" + isoTimeOf(instant) + "Z"
+  }
+
+  private static String pad(int value, int width) {
+    String s = Integer.toString(value)
+    StringBuilder b = new StringBuilder()
+    for (var i = 0 : i < width - s.length() : i++) {
+      b.append('0')
+    }
+    return b.append(s).toString()
+  }
+
+  // ------------------------------------------------------------ parse
+
+  public LocalDate parseDate(String text) {
+    if (kind.equals("basic-date")) {
+      int[] f = readBasicIsoDate(text)
+      return resolveDate(f[0], f[1], f[2], text)
+    }
+    if (isIso()) {
+      int[] f = readIsoDate(text)
+      return resolveDate(f[0], f[1], f[2], text)
+    }
+    Iterate it = fields(text)
+    return resolveDate(it.year, it.month, it.day, text)
+  }
+
+  public LocalTime parseTime(String text) {
+    int[] f = readIsoTime(text)
+    return LocalTime.of(f[0], f[1], f[2], f[3])
+  }
+
+  public LocalDateTime parseDateTime(String text) {
+    if (isIso()) {
+      int t = text.indexOf('T')
+      if (t < 0) {
+        throw new DateTimeParseException("Text '" + text + "' could not be parsed", text, 0)
+      }
+      int[] d = readIsoDate(text.substring(0, t))
+      int[] u = readIsoTime(text.substring(t + 1))
+      return LocalDateTime.of(resolveDate(d[0], d[1], d[2], text), LocalTime.of(u[0], u[1], u[2], u[3]))
+    }
+    Instant i = parseViaSdf(text)
+    long day = Math.floorDiv(i.toEpochMilli(), 86400000L)
+    long[] ymd = TimeMath.civilFromDays(day)
+    return LocalDateTime.of(LocalDate.ofEpochDay(day), LocalTime.ofSecondOfDay(Math.floorMod(i.toEpochMilli(), 86400000L) / 1000))
+  }
+
+  public Instant parseInstant(String text) {
+    if (!kind.equals("iso-instant")) {
+      return parseViaSdf(text)
+    }
+    String body = text
+    if (body.endsWith("Z")) {
+      body = body.substring(0, body.length() - 1)
+    }
+    int t = body.indexOf('T')
+    if (t < 0) {
+      throw new DateTimeParseException("Text '" + text + "' could not be parsed", text, 0)
+    }
+    int[] d = readIsoDate(body.substring(0, t))
+    int[] u = readIsoTime(body.substring(t + 1))
+    long epochDay = TimeMath.daysFromCivil(d[0], d[1], d[2])
+    long ms = epochDay * 86400000L + u[0] * 3600000L + u[1] * 60000L + u[2] * 1000L + u[3] / 1000000
+    return Instant.ofEpochMilli(ms)
+  }
+
+  /* Iterate is the little carrier parseDate uses to read whatever fields the
+     pattern named out of a SimpleDateFormat parse. */
+  private Iterate fields(String text) {
+    Instant i = parseViaSdf(text)
+    long day = Math.floorDiv(i.toEpochMilli(), 86400000L)
+    long[] ymd = TimeMath.civilFromDays(day)
+    Iterate it = new Iterate()
+    it.year = (int) ymd[0]
+    it.month = (int) ymd[1]
+    it.day = (int) ymd[2]
+    return it
+  }
+
+  private Instant parseViaSdf(String text) {
+    ParsePosition pos = new ParsePosition(0)
+    Instant i = delegate.parse(text, pos)
+    if (i == null) {
+      throw new DateTimeParseException("Text '" + text + "' could not be parsed", text, pos.getErrorIndex())
+    }
+    return i
+  }
+
+  /* The resolver is where SMART earns its name: a day past the end of the month
+     is clamped to the last day, where STRICT refuses it and LENIENT rolls over.
+     A month outside 1..12 is refused by all three, which is what java.time does
+     -- only the day is softened. */
+  private LocalDate resolveDate(int year, int month, int day, String text) {
+    if (month < 1 || month > 12) {
+      throw new DateTimeParseException("Text '" + text + "' could not be parsed: Invalid value for MonthOfYear (valid values 1 - 12): " + month, text, 0)
+    }
+    int length = TimeMath.daysInMonth(year, month)
+    if (day < 1 || day > length) {
+      if (resolver == ResolverStyle.LENIENT) {
+        return LocalDate.ofEpochDay(TimeMath.daysFromCivil(year, month, 1) + day - 1)
+      }
+      if (resolver == ResolverStyle.STRICT) {
+        throw new DateTimeParseException("Text '" + text + "' could not be parsed: Invalid date '" + monthName(month) + " " + day + "'", text, 0)
+      }
+      return LocalDate.of(year, month, length)
+    }
+    return LocalDate.of(year, month, day)
+  }
+
+  /* The month name in "Invalid date 'FEBRUARY 30'" is the large one, which is
+     what LocalDate.of uses when it refuses the day. */
+  private static String monthName(int month) {
+    return new DateFormatSymbols().getMonths()[month - 1].toUpperCase()
+  }
+
+  /* BASIC_ISO_DATE is "20260914": four digits of year, two of month, two of
+     day, and nothing else. The separators are the whole difference from the
+     extended form, so the reader is readIsoDate with the dashes taken out. */
+  private static int[] readBasicIsoDate(String s) {
+    int[] out = new int[3]
+    if (s.length() != 8) {
+      throw new DateTimeParseException("Text '" + s + "' could not be parsed at index 0", s, 0)
+    }
+    int i = 0
+    while (i < 8) {
+      if (!isDigit(s.charAt(i))) {
+        throw new DateTimeParseException("Text '" + s + "' could not be parsed at index " + i, s, i)
+      }
+      i = i + 1
+    }
+    out[0] = readDigits(s, 0, 4)
+    out[1] = readDigits(s, 4, 2)
+    out[2] = readDigits(s, 6, 2)
+    return out
+  }
+
+  private static int readDigits(String s, int at, int count) {
+    int v = 0
+    for (var i = 0 : i < count : i++) {
+      v = v * 10 + (s.charAt(at + i) - '0')
+    }
+    return v
+  }
+
+  private static int[] readIsoDate(String s) {
+    int[] out = new int[3]
+    int i = 0
+    int sign = 1
+    if (i < s.length() && s.charAt(i) == '+') {
+      i = i + 1
+    } else if (i < s.length() && s.charAt(i) == '-') {
+      sign = -1
+      i = i + 1
+    }
+    int year = 0
+    int digits = 0
+    while (i < s.length() && s.charAt(i) >= '0' && s.charAt(i) <= '9') {
+      year = year * 10 + (s.charAt(i) - '0')
+      i = i + 1
+      digits = digits + 1
+    }
+    if (digits < 4 || i >= s.length() || s.charAt(i) != '-') {
+      throw new DateTimeParseException("Text '" + s + "' could not be parsed at index " + i, s, i)
+    }
+    out[0] = sign * year
+    i = i + 1
+    out[1] = readTwo(s, i, out, 1)
+    i = i + 3
+    out[2] = readTwo(s, i, out, 2)
+    return out
+  }
+
+  private static int readTwo(String s, int at, int[] out, int slot) {
+    if (at + 1 >= s.length() || !isDigit(s.charAt(at)) || !isDigit(s.charAt(at + 1))) {
+      throw new DateTimeParseException("Text '" + s + "' could not be parsed at index " + at, s, at)
+    }
+    out[slot] = (s.charAt(at) - '0') * 10 + (s.charAt(at + 1) - '0')
+    return out[slot]
+  }
+
+  private static int[] readIsoTime(String s) {
+    int[] out = new int[4]
+    if (s.length() < 5 || s.charAt(2) != ':') {
+      throw new DateTimeParseException("Text '" + s + "' could not be parsed at index 0", s, 0)
+    }
+    readTwo(s, 0, out, 0)
+    readTwo(s, 3, out, 1)
+    int i = 5
+    if (i < s.length() && s.charAt(i) == ':') {
+      readTwo(s, i + 1, out, 2)
+      i = i + 3
+    }
+    if (i < s.length() && s.charAt(i) == '.') {
+      i = i + 1
+      int n = 0
+      int value = 0
+      while (i < s.length() && isDigit(s.charAt(i))) {
+        value = value * 10 + (s.charAt(i) - '0')
+        n = n + 1
+        i = i + 1
+      }
+      for (var k = 0 : k < 9 - n : k++) {
+        value = value * 10
+      }
+      out[3] = value
+    }
+    return out
+  }
+
+  private static boolean isDigit(char c) {
+    return c >= '0' && c <= '9'
+  }
+}
+
+/* The four values parseDate carries out of the text. */
+class Iterate {
+  public int year = 1970
+  public int month = 1
+  public int day = 1
+}
+
+/* DateTimeException is java.time's unchecked base class, and the two below are
+   the two java.time throws on paths this library reaches. Keeping the parse
+   failure a subclass of it is what Java does, so a program that catches
+   DateTimeException catches a parse failure too. */
+class DateTimeException extends RuntimeException {
+  public DateTimeException(String message) {
+    super(message)
+  }
+}
+
+/* UnsupportedTemporalTypeException is what java.time throws when a pattern
+   asks a value for a field it has no answer for: format(LocalDate) with
+   "HH:mm". DateTimeFormatter's checkFields raises it by name below. */
+class UnsupportedTemporalTypeException extends DateTimeException {
+  public UnsupportedTemporalTypeException(String message) {
+    super(message)
+  }
+}
+
+/* DateTimeParseException is java.time.format's parse failure. It is separate
+   from java.text.ParseException because it is unchecked in Java too -- the
+   date-time parse methods are the ones that throw without a signature. */
+class DateTimeParseException extends DateTimeException {
+  private String parsedString
+  private int errorIndex
+
+  public DateTimeParseException(String message, String parsedString, int errorIndex) {
+    super(message)
+    this.parsedString = parsedString
+    this.errorIndex = errorIndex
+  }
+
+  public String getParsedString() { return parsedString }
+  public int getErrorIndex() { return errorIndex }
+}
+
+// ---------------------------------------------------------------- choice and messages
+
+/* ChoiceFormat turns a number into one of a list of strings: each entry is a
+   limit and a format, written "limit#format" when the entry covers the numbers
+   from the limit up, or "limit<format" when it covers the numbers strictly
+   above the limit -- the second is stored as the next double after the limit,
+   which is how Java stores it too.
+
+   Two details of Java's are worth naming because they are easy to get wrong.
+   A number below the first limit and a NaN both take the *first* format, since
+   the lookup is "the last entry whose limit the number reaches, never before
+   the first". And toPattern does not print the limits it holds: an entry whose
+   limit is a whole number prints as "limit#", one whose limit is fractional
+   prints as "previousDouble(limit)<", which is the pattern that reads back as
+   the same thing. */
+class ChoiceFormat extends NumberFormat {
+  private double[] choiceLimits = new double[0]
+  private String[] choiceFormats = new String[0]
+
+  public ChoiceFormat(String newPattern) {
+    applyPattern(newPattern)
+  }
+
+  public ChoiceFormat(double[] limits, String[] formats) {
+    setChoices(limits, formats)
+  }
+
+  public void setChoices(double[] limits, String[] formats) {
+    if (limits == null || formats == null) {
+      throw new NullPointerException()
+    }
+    if (limits.length != formats.length) {
+      throw new IllegalArgumentException("Array and limit arrays must be of the same length.")
+    }
+    choiceLimits = new double[limits.length]
+    choiceFormats = new String[formats.length]
+    for (var i = 0 : i < limits.length : i++) {
+      choiceLimits[i] = limits[i]
+      choiceFormats[i] = formats[i]
+    }
+  }
+
+  public double[] getLimits() {
+    double[] copy = new double[choiceLimits.length]
+    for (var i = 0 : i < choiceLimits.length : i++) {
+      copy[i] = choiceLimits[i]
+    }
+    return copy
+  }
+
+  public Object[] getFormats() {
+    Object[] copy = new Object[choiceFormats.length]
+    for (var i = 0 : i < choiceFormats.length : i++) {
+      copy[i] = choiceFormats[i]
+    }
+    return copy
+  }
+
+  public void applyPattern(String newPattern) {
+    if (newPattern == null) {
+      throw new NullPointerException()
+    }
+    int n = 1
+    for (var i = 0 : i < newPattern.length() : i++) {
+      if (newPattern.charAt(i) == '|') {
+        n = n + 1
+      }
+    }
+    double[] limits = new double[n]
+    String[] formats = new String[n]
+    int count = 0
+    int start = 0
+    while (start <= newPattern.length()) {
+      int bar = newPattern.indexOf('|', start)
+      String segment = bar < 0 ? newPattern.substring(start) : newPattern.substring(start, bar)
+      int sep = separatorAt(segment)
+      if (sep >= 0) {
+        // the segment is "limit#format" or "limit<format"; the separator is one
+        // byte for '#' and '<', three for the "<=" spelling, whose character is
+        // U+2264 and so three bytes of UTF-8
+        boolean strict = segment.charAt(sep) != '#'
+        int after = strict && segment.charAt(sep) == '<' ? sep + 1 : (strict ? sep + 3 : sep + 1)
+        String limitText = segment.substring(0, sep).trim()
+        double value = parseLimit(limitText)
+        // "<" means "strictly above", so the entry starts at the next double
+        // after the one written -- and the order check below runs on that, not
+        // on the number in the pattern, which is why "1#one|1<many" is legal
+        // where "0#a|0#b" is not.
+        double stored = strict ? nextDouble(value) : value
+        if (count > 0 && stored <= limits[count - 1]) {
+          throw new IllegalArgumentException("Incorrect order of intervals, must be in ascending order")
+        }
+        limits[count] = stored
+        formats[count] = segment.substring(after)
+        count = count + 1
+      }
+      if (bar < 0) {
+        break
+      }
+      start = bar + 1
+    }
+    choiceLimits = new double[count]
+    choiceFormats = new String[count]
+    for (var i = 0 : i < count : i++) {
+      choiceLimits[i] = limits[i]
+      choiceFormats[i] = formats[i]
+    }
+  }
+
+  /* separatorAt answers the index of the limit's separator, or -1 when the
+     segment has none. Java quietly drops such a segment rather than refusing
+     the pattern, and a "0#a|1" really does parse as a one-entry format. */
+  private static int separatorAt(String segment) {
+    int i = 0
+    while (i < segment.length()) {
+      char c = segment.charAt(i)
+      if (c == '#' || c == '<') {
+        return i
+      }
+      if (segment.startsWith("≤", i)) {
+        return i
+      }
+      i = i + 1
+    }
+    return -1
+  }
+
+  private static double parseLimit(String text) {
+    try {
+      return Double.parseDouble(text)
+    } catch (Exception e) {
+      throw new NumberFormatException("For input string: \"" + text + "\"")
+    }
+  }
+
+  public String toPattern() {
+    StringBuilder b = new StringBuilder()
+    for (var i = 0 : i < choiceLimits.length : i++) {
+      if (i > 0) {
+        b.append('|')
+      }
+      if (distanceToWhole(choiceLimits[i]) < distanceToWhole(previousDouble(choiceLimits[i]))) {
+        b.append(Double.toString(choiceLimits[i]))
+        b.append('#')
+      } else {
+        if (choiceLimits[i] == Double.POSITIVE_INFINITY) {
+          b.append("\u221E")
+        } else if (choiceLimits[i] == Double.NEGATIVE_INFINITY) {
+          b.append("-\u221E")
+        } else {
+          b.append(Double.toString(previousDouble(choiceLimits[i])))
+        }
+        b.append('<')
+      }
+      b.append(quoteIfNeeded(choiceFormats[i]))
+    }
+    return b.toString()
+  }
+
+  /* Java decides between "limit#" and "previousDouble(limit)<" by asking which
+     of the two numbers sits nearer a whole number -- the remainder modulo 1 is
+     that distance, and the limit wins the '#' when it is the nearer one. The
+     rule only shows at the last bit, but it shows plainly there: the limit of
+     "0#none" is nearer 0 than -4.9E-324 is, so it prints as itself, while a
+     limit that is the next double above 1 is further from a whole number than
+     1 is, so it prints as 1<. The remainder is IEEE's, not "frac - floor":
+     -4.9E-324 has a floor of -1 and a difference of 1 in double arithmetic,
+     which would make it look exactly as near an integer as 0 is. */
+  private static double distanceToWhole(double d) {
+    if (Double.isInfinite(d)) {
+      return 0.0
+    }
+    return Math.abs(Math.IEEEremainder(d, 1.0))
+  }
+
+  private static String quoteIfNeeded(String s) {
+    boolean needs = s.length() == 0
+    for (var i = 0 : i < s.length() : i++) {
+      char c = s.charAt(i)
+      if (c == '|' || c == '#' || c == '<' || c == '\'') {
+        needs = true
+      }
+    }
+    if (!needs) {
+      return s
+    }
+    StringBuilder b = new StringBuilder()
+    b.append('\'')
+    for (var i = 0 : i < s.length() : i++) {
+      char c = s.charAt(i)
+      if (c == '\'') {
+        b.append('\'')
+      }
+      b.append(s.substring(i, i + 1))
+    }
+    b.append('\'')
+    return b.toString()
+  }
+
+  /* nextDouble and previousDouble are the neighbouring doubles, which is what
+     makes "1<" mean "every number above 1" without any arithmetic: the stored
+     limit is the first double after 1. */
+  public static double nextDouble(double d) {
+    if (Double.isNaN(d) || Double.isInfinite(d)) {
+      return d
+    }
+    if (d == 0.0) {
+      return 4.9E-324
+    }
+    long bits = Double.doubleToLongBits(d)
+    return Double.longBitsToDouble(d > 0.0 ? bits + 1L : bits - 1L)
+  }
+
+  public static double previousDouble(double d) {
+    if (Double.isNaN(d) || Double.isInfinite(d)) {
+      return d
+    }
+    if (d == 0.0) {
+      return -4.9E-324
+    }
+    long bits = Double.doubleToLongBits(d)
+    return Double.longBitsToDouble(d > 0.0 ? bits - 1L : bits + 1L)
+  }
+
+  /* format is Java's scan: the last entry whose limit the number reaches. The
+     negation in the test is what makes NaN take the first entry, because every
+     comparison with NaN is false and the scan stops immediately. */
+  public String format(double number) {
+    int i = 0
+    while (i < choiceLimits.length) {
+      if (!(number >= choiceLimits[i])) {
+        break
+      }
+      i = i + 1
+    }
+    i = i - 1
+    if (i < 0) {
+      i = 0
+    }
+    return choiceFormats[i]
+  }
+
+  public String format(long number) {
+    return format((double) number)
+  }
+
+  public String format(double number, StringBuilder result) {
+    result.append(format(number))
+    return result.toString()
+  }
+
+  /* parse answers the limit, not the format: Java's ChoiceFormat is a number
+     format, so what a matched piece of text parses to is the number that would
+     have produced it. The longest matching format wins, so that a format that
+     begins with another one can still be recognised. */
+  public Number parse(String source, ParsePosition pos) {
+    if (source == null) {
+      throw new NullPointerException()
+    }
+    int start = pos.getIndex()
+    int best = -1
+    int bestLength = -1
+    for (var i = 0 : i < choiceFormats.length : i++) {
+      if (source.startsWith(choiceFormats[i], start) && choiceFormats[i].length() > bestLength) {
+        best = i
+        bestLength = choiceFormats[i].length()
+      }
+    }
+    if (best < 0) {
+      pos.setErrorIndex(start)
+      return null
+    }
+    pos.setIndex(start + bestLength)
+    return (Number) Double.valueOf(choiceLimits[best])
+  }
+
+  public Number parse(String source) {
+    ParsePosition pos = new ParsePosition(0)
+    Number n = parse(source, pos)
+    if (pos.getIndex() == 0) {
+      throw new ParseException("Unparseable number: \"" + source + "\"", pos.getErrorIndex())
+    }
+    return n
+  }
+
+  public String toString() {
+    return "ChoiceFormat [pattern: \"" + toPattern() + "\"]"
+  }
+}
+
+/* MessageElement is one placeholder of a MessageFormat pattern, together with
+   the literal text that runs up to it. `raw` is the text of the placeholder as
+   it was written, which is what format prints for an argument the caller did
+   not supply -- Java prints the placeholder back rather than "null". */
+class MessageElement {
+  public String text = ""
+  public int number = -1
+  public Format sub = null
+  public String typeWord = ""
+  public String styleWord = ""
+  public String raw = ""
+}
+
+/* MessageFormat fills a pattern's placeholders from an array of arguments:
+   "{0}" for a plain argument, "{1,number}" or "{1,number,#.##}" for a number,
+   "{2,date,short}" for a date, "{3,choice,...}" for a choice. A single quote
+   quotes the text it encloses, so "'{0}'" is the literal text "{0}", and a
+   doubled quote is one quote.
+
+   There is no Locale here, so every subformat is the ROOT/en-US one. There is
+   also no java.util.Date, so a date or time argument is an Instant -- which is
+   what DateFormat already formats and parses -- and a parse whose pattern names
+   a date answers an Instant in that slot. */
+class MessageFormat extends Format {
+  private String source = ""
+  private MessageElement[] elements = new MessageElement[8]
+  private int count = 0
+  private int maxArg = -1
+
+  public MessageFormat(String pattern) {
+    applyPattern(pattern)
+  }
+
+  public void applyPattern(String pattern) {
+    if (pattern == null) {
+      throw new NullPointerException()
+    }
+    source = pattern
+    count = 0
+    maxArg = -1
+    StringBuilder literal = new StringBuilder()
+    int i = 0
+    while (i < pattern.length()) {
+      char c = pattern.charAt(i)
+      if (c == '\'') {
+        if (i + 1 < pattern.length() && pattern.charAt(i + 1) == '\'') {
+          literal.append('\'')
+          i = i + 2
+          continue
+        }
+        i = readQuote(pattern, i + 1, literal)
+        continue
+      }
+      if (c == '{') {
+        int close = findClose(pattern, i)
+        if (close < 0) {
+          throw new IllegalArgumentException("Unmatched braces in the pattern.")
+        }
+        add(literal.toString(), pattern.substring(i, close + 1), pattern.substring(i + 1, close))
+        literal = new StringBuilder()
+        i = close + 1
+        continue
+      }
+      literal.append(pattern.substring(i, i + 1))
+      i = i + 1
+    }
+    add(literal.toString(), "", "")
+    resolve()
+  }
+
+  public String toPattern() {
+    StringBuilder b = new StringBuilder()
+    for (var i = 0 : i < count : i++) {
+      MessageElement e = elements[i]
+      appendLiteral(b, e.text)
+      if (e.number < 0) {
+        continue
+      }
+      b.append('{')
+      b.append(e.number)
+      if (!e.typeWord.equals("")) {
+        b.append(',')
+        b.append(e.typeWord)
+        if (!e.styleWord.equals("")) {
+          b.append(',')
+          b.append(e.styleWord)
+        }
+      }
+      b.append('}')
+    }
+    return b.toString()
+  }
+
+  /* A literal brace only needs escaping where it would start a placeholder; a
+     closing brace is harmless and Java leaves it alone. */
+  private static void appendLiteral(StringBuilder b, String text) {
+    for (var i = 0 : i < text.length() : i++) {
+      char c = text.charAt(i)
+      if (c == '\'') {
+        b.append("''")
+      } else if (c == '{') {
+        b.append("'{'")
+      } else {
+        b.append(text.substring(i, i + 1))
+      }
+    }
+  }
+
+  /* readQuote copies a quoted run into the literal being built and answers
+     where the pattern resumes. A doubled quote inside the run is one quote, and
+     a run that is never closed runs to the end of the pattern -- Java's
+     behaviour, and the reason "it's {0}" has no argument in it. */
+  private static int readQuote(String pattern, int from, StringBuilder literal) {
+    int i = from
+    while (i < pattern.length()) {
+      if (pattern.charAt(i) == '\'') {
+        if (i + 1 < pattern.length() && pattern.charAt(i + 1) == '\'') {
+          literal.append('\'')
+          i = i + 2
+          continue
+        }
+        return i + 1
+      }
+      literal.append(pattern.substring(i, i + 1))
+      i = i + 1
+    }
+    return i
+  }
+
+  /* findClose answers the brace that ends a placeholder, counting the nested
+     braces a choice format's sub-patterns may contain. Quotes are not special
+     inside a placeholder: a DecimalFormat pattern quotes with the same
+     character, and Java stops the style at the brace either way. */
+  private static int findClose(String pattern, int open) {
+    int depth = 0
+    int i = open
+    while (i < pattern.length()) {
+      char c = pattern.charAt(i)
+      if (c == '{') {
+        depth = depth + 1
+      } else if (c == '}') {
+        depth = depth - 1
+        if (depth == 0) {
+          return i
+        }
+      }
+      i = i + 1
+    }
+    return -1
+  }
+
+  private void add(String text, String raw, String inner) {
+    if (count == elements.length) {
+      MessageElement[] grown = new MessageElement[elements.length * 2]
+      for (var i = 0 : i < count : i++) {
+        grown[i] = elements[i]
+      }
+      elements = grown
+    }
+    MessageElement e = new MessageElement()
+    e.text = text
+    e.raw = raw
+    if (!inner.equals("")) {
+      String[] parts = splitParts(inner)
+      String numberText = parts[0].trim()
+      int num = -1
+      try {
+        num = Integer.parseInt(numberText)
+      } catch (Exception ex) {
+        throw new IllegalArgumentException("can't parse argument number: " + numberText)
+      }
+      if (num < 0) {
+        throw new IllegalArgumentException("negative argument number: " + num)
+      }
+      e.number = num
+      if (num > maxArg) {
+        maxArg = num
+      }
+      e.typeWord = parts[1].trim()
+      e.styleWord = parts[2]
+    }
+    elements[count] = e
+    count = count + 1
+  }
+
+  /* splitParts breaks "1,number,#.##" at the first two commas that are not
+     inside a nested placeholder, so a choice style may itself contain one. */
+  private static String[] splitParts(String inner) {
+    String[] parts = new String[3]
+    parts[0] = ""
+    parts[1] = ""
+    parts[2] = ""
+    int depth = 0
+    int part = 0
+    StringBuilder cur = new StringBuilder()
+    for (var i = 0 : i < inner.length() : i++) {
+      char c = inner.charAt(i)
+      if (c == '{') {
+        depth = depth + 1
+      } else if (c == '}') {
+        depth = depth - 1
+      } else if (c == ',' && depth == 0 && part < 2) {
+        parts[part] = cur.toString()
+        cur = new StringBuilder()
+        part = part + 1
+        continue
+      }
+      cur.append(inner.substring(i, i + 1))
+    }
+    parts[part] = cur.toString()
+    return parts
+  }
+
+  /* resolve turns each placeholder's type and style into a subformat, and
+     remembers the two words toPattern prints for it. The words are not the ones
+     that were written: Java works them out from the format it built, which is
+     why "{0,time,HH:mm}" comes back as "{0,date,HH:mm}" and why a style that is
+     the same as the default is dropped. */
+  private void resolve() {
+    for (var i = 0 : i < count : i++) {
+      MessageElement e = elements[i]
+      if (e.number < 0 || e.typeWord.equals("")) {
+        continue
+      }
+      String type = e.typeWord
+      String style = e.styleWord
+      if (type.equals("number")) {
+        if (style.equals("")) {
+          e.sub = NumberFormat.getInstance()
+          e.styleWord = ""
+        } else if (style.equals("integer")) {
+          e.sub = NumberFormat.getIntegerInstance()
+        } else if (style.equals("currency")) {
+          e.sub = NumberFormat.getCurrencyInstance()
+        } else if (style.equals("percent")) {
+          e.sub = NumberFormat.getPercentInstance()
+        } else {
+          DecimalFormat df = new DecimalFormat(style)
+          e.sub = df
+          e.styleWord = df.toPattern()
+        }
+        e.typeWord = "number"
+      } else if (type.equals("date") || type.equals("time")) {
+        SimpleDateFormat sdf = makeDateFormat(type, style)
+        e.sub = sdf
+        String p = sdf.toPattern()
+        String word = "date"
+        if (DateFormat.isDateStylePattern(p)) {
+          word = "date"
+        } else if (DateFormat.isTimeStylePattern(p)) {
+          word = "time"
+        }
+        e.typeWord = word
+        String normal = word.equals("date") ? DateFormat.dateStylePattern(DateFormat.MEDIUM) : DateFormat.timeStylePattern(DateFormat.MEDIUM)
+        if (p.equals(normal)) {
+          e.styleWord = ""
+        } else if (style.equals("")) {
+          e.styleWord = p
+        }
+      } else if (type.equals("choice")) {
+        ChoiceFormat cf = new ChoiceFormat(style)
+        e.sub = cf
+        e.typeWord = "choice"
+        e.styleWord = cf.toPattern()
+      } else {
+        throw new IllegalArgumentException("unknown format type: " + type)
+      }
+    }
+  }
+
+  private static SimpleDateFormat makeDateFormat(String type, String style) {
+    int dateStyle = styleOrdinal(style)
+    if (type.equals("date")) {
+      return dateStyle < 0 ? new SimpleDateFormat(style) : new SimpleDateFormat(DateFormat.dateStylePattern(dateStyle))
+    }
+    return dateStyle < 0 ? new SimpleDateFormat(style) : new SimpleDateFormat(DateFormat.timeStylePattern(dateStyle))
+  }
+
+  private static int styleOrdinal(String style) {
+    if (style.equals("") || style.equals("medium")) {
+      return DateFormat.MEDIUM
+    }
+    if (style.equals("short")) {
+      return DateFormat.SHORT
+    }
+    if (style.equals("long")) {
+      return DateFormat.LONG
+    }
+    if (style.equals("full")) {
+      return DateFormat.FULL
+    }
+    return -1
+  }
+
+  // ------------------------------------------------------------ format
+
+  public String format(Object[] arguments) {
+    if (arguments == null) {
+      arguments = new Object[0]
+    }
+    StringBuilder b = new StringBuilder()
+    for (var i = 0 : i < count : i++) {
+      MessageElement e = elements[i]
+      b.append(e.text)
+      if (e.number < 0) {
+        continue
+      }
+      if (e.number >= arguments.length) {
+        b.append(e.raw)
+        continue
+      }
+      Object arg = arguments[e.number]
+      if (e.sub == null) {
+        Format auto = autoFormat(arg)
+        b.append(auto == null ? String.valueOf(arg) : auto.format(arg))
+      } else {
+        b.append(e.sub.format(arg))
+      }
+    }
+    return b.toString()
+  }
+
+  /* A placeholder with no type at all -- "{0}" -- is formatted by the argument
+     itself: a number with NumberFormat.getInstance and a date with
+     DateFormat.getInstance, which is the SHORT date and the SHORT time joined
+     by ", ". Anything else goes through toString. Java builds that format per
+     argument at format time and does not keep it, which is why "{0}" prints as
+     "{0}" from toPattern after being formatted. */
+  private static Format autoFormat(Object arg) {
+    if (arg instanceof Number) {
+      return NumberFormat.getInstance()
+    }
+    if (arg instanceof Instant) {
+      return DateFormat.getInstance()
+    }
+    return null
+  }
+
+  public String format(Object arguments) {
+    if (arguments == null) {
+      throw new IllegalArgumentException("format argument is null")
+    }
+    if (arguments instanceof Object[]) {
+      return format((Object[]) arguments)
+    }
+    Object[] one = new Object[1]
+    one[0] = arguments
+    return format(one)
+  }
+
+  public static String format(String pattern, Object... arguments) {
+    return new MessageFormat(pattern).format(arguments)
+  }
+
+  // ------------------------------------------------------------ parse
+
+  public Object[] parse(String source) throws ParseException {
+    ParsePosition pos = new ParsePosition(0)
+    Object[] result = parse(source, pos)
+    if (pos.getIndex() == 0) {
+      throw new ParseException("MessageFormat parse error!", pos.getErrorIndex())
+    }
+    return result
+  }
+
+  /* parse is Java's: the literal text has to appear exactly, a placeholder with
+     a subformat is parsed by that subformat, and a plain placeholder takes
+     everything up to the next piece of literal text -- or to the end of the
+     input when there is none. Adding a literal is what stops a plain
+     placeholder from swallowing the rest, so "{0}!" and "{0}" behave
+     differently on the same input. Every failure answers null with the position
+     reset, which is also what makes parse(String) throw. */
+  public Object[] parse(String source, ParsePosition pos) {
+    if (source == null) {
+      throw new NullPointerException()
+    }
+    Object[] result = new Object[maxArg + 1]
+    int start = pos.getIndex()
+    int cursor = start
+    for (var i = 0 : i < count : i++) {
+      MessageElement e = elements[i]
+      if (!source.startsWith(e.text, cursor)) {
+        return parseFailed(pos, start, cursor)
+      }
+      cursor = cursor + e.text.length()
+      if (e.number < 0) {
+        continue
+      }
+      if (e.sub == null) {
+        String next = i + 1 < count ? elements[i + 1].text : ""
+        if (next.equals("")) {
+          result[e.number] = source.substring(cursor)
+          cursor = source.length()
+        } else {
+          int at = source.indexOf(next, cursor)
+          if (at < 0) {
+            return parseFailed(pos, start, cursor)
+          }
+          result[e.number] = source.substring(cursor, at)
+          cursor = at
+        }
+      } else {
+        ParsePosition sub = new ParsePosition(cursor)
+        Object value = e.sub.parseObject(source, sub)
+        if (value == null) {
+          return parseFailed(pos, start, cursor)
+        }
+        result[e.number] = value
+        cursor = sub.getIndex()
+      }
+    }
+    pos.setIndex(cursor)
+    pos.setErrorIndex(-1)
+    return result
+  }
+
+  /* A failed parse leaves the position where the caller put it and records how
+     far it got in the error index, which is the JDK's split too: the index is
+     only ever moved on success, so parse(String) below can tell a parse that
+     consumed nothing from one that did. */
+  private static Object[] parseFailed(ParsePosition pos, int start, int errorAt) {
+    pos.setIndex(start)
+    pos.setErrorIndex(errorAt)
+    return null
+  }
+
+  public Object parseObject(String source, ParsePosition pos) {
+    return parse(source, pos)
+  }
+
+  public Object parseObject(String source) {
+    return parse(source)
+  }
+
+  public int getArgumentCount() {
+    return maxArg + 1
+  }
+}
