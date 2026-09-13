@@ -701,7 +701,10 @@ func (e *Emitter) entry() string {
 	}
 	recv := ""
 	if !main.IsStatic() {
-		fmt.Fprintf(&b, "  %s _main_obj = (%s)ty_alloc(sizeof(%s));\n", cname(main.Owner), cname(main.Owner), cname(main.Owner))
+		// the class is a C struct, so the instance the instance main runs on is
+		// its pointer; spelling these without the `*` emitted C that does not
+		// compile for a compact file with `void main(String[] args)`
+		fmt.Fprintf(&b, "  %s* _main_obj = (%s*)ty_alloc(sizeof(%s));\n", cname(main.Owner), cname(main.Owner), cname(main.Owner))
 		fmt.Fprintf(&b, "  _main_obj->obj.cls = &cls_%s;\n", mangle(main.Owner.Full))
 		recv = "_main_obj, "
 	}
