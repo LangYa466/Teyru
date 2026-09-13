@@ -1,6 +1,7 @@
 package teyru_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,12 @@ import (
 
 // TestPrograms compiles and runs every program in tests/programs and compares
 // its output with the matching .expected file.
+//
+// A program that is supposed to fail says so with a `name.exit` file holding
+// the status it must exit with: without one, a non-zero status is a test
+// failure, so no uncaught exception, assert or System.exit could be tested.
+// The output comparison is over stdout and stderr together, so a program whose
+// message goes to stderr is checked the same way as one whose output does.
 func TestPrograms(t *testing.T) {
 	if _, err := exec.LookPath("clang"); err != nil {
 		if _, err2 := exec.LookPath("gcc"); err2 != nil {
@@ -45,14 +52,37 @@ func TestPrograms(t *testing.T) {
 					cmd.Args = append(cmd.Args, a)
 				}
 			}
-			got, err := cmd.CombinedOutput()
-			if err != nil {
-				if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 0 {
-					t.Fatalf("run failed: %v\n%s", err, got)
+			wantExit := 0
+			if raw, err := os.ReadFile(filepath.Join(dir, name+".exit")); err == nil {
+				if _, err := fmt.Sscanf(strings.TrimSpace(string(raw)), "%d", &wantExit); err != nil {
+					t.Fatalf("%s.exit is not a number: %v", name, err)
 				}
 			}
-			if string(got) != string(want) {
+			// the two streams are compared separately: merging them would make
+			// the result depend on when the buffered stdout happens to flush
+			var outBuf, errBuf strings.Builder
+			cmd.Stdout, cmd.Stderr = &outBuf, &errBuf
+			err = cmd.Run()
+			code := 0
+			if err != nil {
+				ee, ok := err.(*exec.ExitError)
+				if !ok {
+					t.Fatalf("could not run %s: %v", name, err)
+				}
+				code = ee.ExitCode()
+			}
+			if code != wantExit {
+				t.Fatalf("exit status %d, want %d\nstderr:\n%s", code, wantExit, errBuf.String())
+			}
+			if got := outBuf.String(); got != string(want) {
 				t.Errorf("output mismatch\n--- want ---\n%s\n--- got ---\n%s", want, got)
+			}
+			if errWant, err := os.ReadFile(filepath.Join(dir, name+".experr")); err == nil {
+				if got := errBuf.String(); got != string(errWant) {
+					t.Errorf("stderr mismatch\n--- want ---\n%s\n--- got ---\n%s", errWant, got)
+				}
+			} else if errBuf.Len() > 0 {
+				t.Errorf("unexpected stderr:\n%s", errBuf.String())
 			}
 		})
 	}

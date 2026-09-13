@@ -1,0 +1,8 @@
+// An exception that reaches the top of main is reported and exits 1, the same
+// status javac's launcher uses.
+class Main {
+  public static void main(String[] args) {
+    System.out.println("start")
+    throw new IllegalStateException("boom")
+  }
+}

@@ -1,0 +1,9 @@
+// System.exit ends the process with the status it is given; the harness reads
+// the expected status from the .exit file next to this one.
+class Main {
+  public static void main(String[] args) {
+    System.out.println("before exit")
+    System.exit(3)
+    System.out.println("never printed")
+  }
+}
