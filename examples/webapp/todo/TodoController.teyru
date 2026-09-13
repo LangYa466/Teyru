@@ -32,8 +32,11 @@ class TodoController {
   @GetMapping("/count")
   String count() { return "count=" + store.count() }
 
+  // The body is a JSON object, and the record it binds to is the same kind of
+  // type the response is written from: the compiler generated both directions
+  // for Todo and NewTodo, so neither call needs a cast or a parser here.
   @PostMapping("")
-  Todo add(@RequestBody String text) { return store.add(text) }
+  Todo add(@RequestBody NewTodo body) { return store.add(body.text()) }
 
   @PostMapping("/{id}/done")
   Todo complete(@PathVariable("id") int id) { return store.complete(id) }
