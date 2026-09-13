@@ -28,11 +28,14 @@ type Options struct {
 	CC       string // C compiler (default: clang)
 	Opt      string // optimisation flag (default -O2)
 	EmitLLVM string // if set, also write LLVM IR here (the backend is clang/LLVM)
-	NoLTO    bool   // disable link-time optimisation (on by default)
-	Verbose  bool
-	ExtraCC  []string
-	NoGC     bool
-	KeptTemp bool
+	// CSourceOnly stops the pipeline once the generated C is written: no C
+	// compiler runs, so no executable is produced. `teyru emit` sets it to print
+	// the C without leaving a binary behind.
+	CSourceOnly bool
+	NoLTO       bool // disable link-time optimisation (on by default)
+	Verbose     bool
+	ExtraCC     []string
+	KeptTemp    bool
 	// Native lists C sources that implement the program's native methods; they
 	// are compiled together with the generated program.
 	Native []string
@@ -121,8 +124,7 @@ func Compile(paths []string, opts Options) (*Result, error) {
 	if !opts.KeptTemp {
 		defer os.RemoveAll(rtDir)
 	}
-	rtC, rtH := writeRuntime(rtDir)
-	_ = rtH
+	rtC := writeRuntime(rtDir)
 	if err := os.WriteFile(cfile, []byte(csrc), 0o644); err != nil {
 		return nil, err
 	}
@@ -131,27 +133,45 @@ func Compile(paths []string, opts Options) (*Result, error) {
 			return nil, err
 		}
 	}
-	exe := opts.Out
 	opt := opts.Opt
 	if opt == "" {
 		opt = "-O2"
 	}
+	cc := opts.CC
+	if cc == "" {
+		cc = findCC()
+	}
+	// The result reports each output as it is written, so a failure never
+	// claims a file that was not produced.
+	res := &Result{CFile: cfile, Diags: diags}
+	// The IR is a file the caller named explicitly, so it is written on every
+	// path that gets this far, including the one that skips the C compiler.
+	if err := writeLLVMIR(cc, opt, cfile, rtDir, opts.EmitLLVM); err != nil {
+		return res, err
+	}
+	res.LLVMFile = opts.EmitLLVM
+	if opts.CSourceOnly {
+		// Only the generated C was asked for, so the C compiler is not run at
+		// all: it would produce an executable nobody looks at, and leaving one
+		// in a temporary directory is exactly what a caller asking for the C
+		// does not expect.
+		return res, nil
+	}
+	exe := opts.Out
 	base := []string{opt, "-std=gnu11", "-fno-strict-aliasing", "-w", "-I", rtDir, cfile}
 	base = append(base, strings.Fields(rtC)...)
 	base = append(base, opts.Native...)
 	base = append(base, "-o", exe, "-lm", "-lpthread")
 	base = append(base, opts.Link...)
 	base = append(base, opts.ExtraCC...)
+	args := append([]string{}, base...)
 	// Link-time optimisation lets clang inline runtime helpers (string ops, the
 	// allocation fast path) into the generated program. It is on by default and
-	// silently retried without it when the toolchain has no LTO support.
-	args := append([]string{}, base...)
+	// retried without it when the toolchain has no LTO support: only the link
+	// flags differ between the two attempts, so a retry is a successful build
+	// like any other.
 	if !opts.NoLTO {
 		args = append([]string{"-flto"}, base...)
-	}
-	cc := opts.CC
-	if cc == "" {
-		cc = findCC()
 	}
 	if opts.Verbose {
 		fmt.Fprintf(os.Stderr, "teyru: %s %s\n", cc, strings.Join(args, " "))
@@ -159,36 +179,42 @@ func Compile(paths []string, opts Options) (*Result, error) {
 	cmd := exec.Command(cc, args...)
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		if !opts.NoLTO {
-			if opts.Verbose {
-				fmt.Fprintln(os.Stderr, "teyru: retrying without -flto")
-			}
-			retry := exec.Command(cc, base...)
-			retry.Stderr = os.Stderr
-			if err2 := retry.Run(); err2 == nil {
-				return &Result{CFile: cfile, Exe: exe, Diags: diags}, nil
-			}
+		if opts.NoLTO {
+			return res, fmt.Errorf("C backend failed: %w", err)
 		}
-		_ = rtH
-		return &Result{CFile: cfile, Diags: diags}, fmt.Errorf("C backend failed: %w", err)
+		if opts.Verbose {
+			fmt.Fprintln(os.Stderr, "teyru: retrying without -flto")
+		}
+		retry := exec.Command(cc, base...)
+		retry.Stderr = os.Stderr
+		if err2 := retry.Run(); err2 != nil {
+			return res, fmt.Errorf("C backend failed: %w", err)
+		}
 	}
-	res := &Result{CFile: cfile, Exe: exe, Diags: diags}
-	if opts.EmitLLVM != "" {
-		// The backend is clang, whose middle and back end are LLVM: emit the
-		// module-level IR so it can be inspected or fed to llc/opt directly.
-		irArgs := []string{"-S", "-emit-llvm", "-std=gnu11", "-fno-strict-aliasing", "-w",
-			"-I", rtDir, cfile, "-o", opts.EmitLLVM}
-		if opt != "" {
-			irArgs = append(irArgs, opt)
-		}
-		ir := exec.Command(cc, irArgs...)
-		ir.Stderr = os.Stderr
-		if err := ir.Run(); err != nil {
-			return res, fmt.Errorf("LLVM IR emission failed: %w", err)
-		}
-		res.LLVMFile = opts.EmitLLVM
-	}
+	res.Exe = exe
 	return res, nil
+}
+
+// writeLLVMIR asks the C compiler for the LLVM module of the generated C. The
+// backend is clang, whose middle and back end are LLVM, so the module-level IR
+// can be inspected or fed to llc/opt directly. An empty path means the caller
+// asked for no IR, so callers can invoke this on every path that produces an
+// output without checking first.
+func writeLLVMIR(cc, opt, cfile, rtDir, out string) error {
+	if out == "" {
+		return nil
+	}
+	irArgs := []string{"-S", "-emit-llvm", "-std=gnu11", "-fno-strict-aliasing", "-w",
+		"-I", rtDir, cfile, "-o", out}
+	if opt != "" {
+		irArgs = append(irArgs, opt)
+	}
+	ir := exec.Command(cc, irArgs...)
+	ir.Stderr = os.Stderr
+	if err := ir.Run(); err != nil {
+		return fmt.Errorf("LLVM IR emission failed: %w", err)
+	}
+	return nil
 }
 
 // parsePrelude reads the standard library, which is Teyru source shipped with
@@ -253,14 +279,15 @@ func mangleForHeader(s string) string {
 }
 
 // writeRuntime materialises the C runtime next to the generated program.
-func writeRuntime(dir string) (cfile, hfile string) {
-	hfile = filepath.Join(dir, "tyrt.h")
+func writeRuntime(dir string) string {
+	// The header only has to exist next to the sources: it is found through the
+	// -I on the command line, so it is written but never reported back.
+	must(os.WriteFile(filepath.Join(dir, "tyrt.h"), []byte(tyrt.Header), 0o644))
 	c1 := filepath.Join(dir, "tyrt.c")
 	c2 := filepath.Join(dir, "tyrt2.c")
-	must(os.WriteFile(hfile, []byte(tyrt.Header), 0o644))
 	must(os.WriteFile(c1, []byte(tyrt.Core), 0o644))
 	must(os.WriteFile(c2, []byte(tyrt.Extra), 0o644))
-	return c1 + " " + c2, hfile
+	return c1 + " " + c2
 }
 
 func must(err error) {

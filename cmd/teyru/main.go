@@ -122,9 +122,11 @@ func main() {
 		opts.CFile = filepath.Join(dir, "program.c")
 	}
 	if cmd == "emit" {
-		opts.Out = filepath.Join(os.TempDir(), "teyru-emit")
-		opts.CFile = opts.Out + ".c"
+		// `emit` prints the generated C: it must not compile or link anything,
+		// and it must not leave a binary behind, so the C compiler is skipped.
+		opts.CFile = filepath.Join(os.TempDir(), "teyru-emit.c")
 		opts.EmitC = ""
+		opts.CSourceOnly = true
 	}
 	if cmd == "emit-llvm" {
 		dir, err := os.MkdirTemp("", "teyru-llvm-")
