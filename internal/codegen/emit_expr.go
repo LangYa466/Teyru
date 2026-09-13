@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/LangYa466/Teyru/internal/ast"
+	"github.com/LangYa466/Teyru/internal/sema"
 	"github.com/LangYa466/Teyru/internal/util"
 )
 
@@ -509,26 +510,72 @@ func (e *Emitter) assignPattern(v *ast.InstanceOf, name string) string {
 		// itself is written only when it converted exactly
 		okName := e.patternOK[v]
 		return "({ " + name + " = 0; " + okName + " = ty_prim_match((void*)" + src + ", " +
-			fmt.Sprint(prim.Kind) + ", &" + name + "); " + okName + " != 0; })"
+			fmt.Sprint(prim.Kind) + ", &" + name + ", " + fmt.Sprint(e.primOperandBoxed(v)) + "); " +
+			okName + " != 0; })"
 	}
 	ct := e.ctype(v.Type.Resolved)
 	obj := e.tmpName()
 	var b strings.Builder
 	b.WriteString("({ void* " + obj + " = (void*)" + src + "; ")
-	// the variable holds the value only when the type test succeeds, which is
-	// what `x instanceof T t` means as a condition
-	fmt.Fprintf(&b, "%s = ty_instanceof(%s, %s) ? (%s)%s : NULL; ", name, obj, e.instTarget(v), ct, obj)
-	if len(v.Binding.Decomp) > 0 {
-		// the components are part of the binding, so they are read out of the
-		// record again whenever it matches
-		fmt.Fprintf(&b, "if (%s) { ", name)
-		for _, c := range e.planComponents(v.Binding, name) {
-			fmt.Fprintf(&b, "%s = %s; ", c.name, c.accessor)
-		}
-		b.WriteString("} ")
+	if len(v.Binding.Decomp) == 0 {
+		// the variable holds the value only when the type test succeeds, which is
+		// what `x instanceof T t` means as a condition
+		fmt.Fprintf(&b, "%s = ty_instanceof(%s, %s) ? (%s)%s : NULL; ", name, obj, e.instTarget(v), ct, obj)
+		fmt.Fprintf(&b, "%s != NULL; })", name)
+		return b.String()
 	}
-	fmt.Fprintf(&b, "%s != NULL; })", name)
+	// The components are part of the binding, so they are read out of the record
+	// again whenever it matches. A nested pattern's own components are read
+	// under a test of their own, and the flag is what carries the outcome out of
+	// the expression: a component that is not there, or is of the wrong type,
+	// clears it, and the pattern as a whole does not match.
+	ok := e.tmpName()
+	fmt.Fprintf(&b, "int32_t %s = 0; ", ok)
+	fmt.Fprintf(&b, "%s = ty_instanceof(%s, %s) ? (%s)%s : NULL; ", name, obj, e.instTarget(v), ct, obj)
+	inner := e.capture(func() {
+		e.line("%s = 1;\n", ok)
+		e.emitComponentReads(e.planComponents(v.Binding, name), ok)
+	})
+	fmt.Fprintf(&b, "if (%s) { %s } ", name, inner)
+	fmt.Fprintf(&b, "%s != 0; })", ok)
 	return b.String()
+}
+
+// primOperandBoxed reports whether the operand of a primitive type pattern is a
+// reference and therefore carries a box, which JEP 507 matches against the
+// pattern's type exactly. A primitive operand is boxed by the caller to reach
+// the runtime, and for those only the conversion has to be exact, so the two
+// cases travel as a flag (javac 25 --enable-preview agrees with both rules).
+func (e *Emitter) primOperandBoxed(v *ast.InstanceOf) int {
+	// Semantic analysis boxes a primitive operand so the runtime sees an object,
+	// which turns the operand into a conversion whose source is primitive. That
+	// conversion is the only trace of "the operand was a primitive", and it is
+	// what decides between JEP 507's two rules; an operand that was already a
+	// reference is boxed all the same but has no such conversion under it.
+	for x := v.X; ; {
+		c, ok := x.(*ast.Conv)
+		if !ok {
+			return operandIsBox(e.prog, x.GetType())
+		}
+		if _, isPrim := c.X.GetType().(*ast.PrimType); isPrim {
+			return 0
+		}
+		x = c.X
+	}
+}
+
+// operandIsBox reports whether a static type is a reference, and the operand
+// therefore carries a box. Program.Erased cannot answer this: it erases a type
+// variable, but it is not a test for primitiveness and it rewrites a primitive
+// type rather than returning it unchanged.
+func operandIsBox(p *sema.Program, t ast.Type) int {
+	if tv, ok := t.(*ast.TypeVarType); ok {
+		t = p.Erased(tv)
+	}
+	if _, isPrim := t.(*ast.PrimType); isPrim {
+		return 0
+	}
+	return 1
 }
 
 // primMatchExpr renders the run time question a primitive type pattern asks,
@@ -539,7 +586,7 @@ func (e *Emitter) primMatchExpr(v *ast.InstanceOf, prim *ast.PrimType) string {
 	ok := e.tmpName()
 	inner := e.capture(func() {
 		e.line("%s %s = 0;\n", e.ctype(prim), val)
-		e.line("int32_t %s = ty_prim_match((void*)%s, %d, &%s);\n", ok, src, prim.Kind, val)
+		e.line("int32_t %s = ty_prim_match((void*)%s, %d, &%s, %d);\n", ok, src, prim.Kind, val, e.primOperandBoxed(v))
 	})
 	return "({ " + inner + " " + ok + " != 0; })"
 }

@@ -784,9 +784,7 @@ func (e *Emitter) declareExprPattern(v *ast.InstanceOf) string {
 	if len(pat.Decomp) > 0 {
 		// the components of a record pattern are part of the binding, so they
 		// are declared here and read out of the match in the condition
-		for _, b := range e.planComponents(pat, n) {
-			e.line("%s %s = %s;\n", b.ct, b.name, zeroOf(b.ct))
-		}
+		e.declareBinds(e.planComponents(pat, n))
 		return n
 	}
 	if pat.Sym != nil && !pat.Unnamed {
@@ -795,67 +793,244 @@ func (e *Emitter) declareExprPattern(v *ast.InstanceOf) string {
 	return n
 }
 
-// compBind is one variable of a record pattern and the expression that reads
-// its value out of the enclosing record.
+// compBind is one variable of a record pattern: the expression that reads its
+// value out of the enclosing record, the test the component has to pass before
+// the variables nested inside it may be read, and those nested binds.
 type compBind struct {
 	ct       string
 	name     string
 	accessor string
+	// test guards the reads nested in this component, and is empty when the
+	// enclosing record already settles what they need. A component read out of
+	// the matched value itself needs no test; a component a nested pattern
+	// destructures is only reachable when it holds a value, and one the pattern
+	// names a narrower type for has to be of that type.
+	test string
+	subs []compBind
 }
 
 // planComponents walks a record pattern and returns the variables it binds,
-// with the accessor for each. Nested patterns get a temporary for the inner
-// record, declared before the variables read out of it.
+// with the accessor and the test for each. Nested patterns get a temporary for
+// the inner record, declared before the variables read out of it.
 //
 // The name of that temporary is derived from the receiver rather than taken
 // from the counter, so that planning one pattern twice — once to declare its
 // variables, once to assign them — yields the same names. A pattern in the
 // condition of a loop is planned both ways.
 func (e *Emitter) planComponents(p *ast.Param, recv string) []compBind {
-	var out []compBind
-	var walk func(p *ast.Param, recv string)
-	walk = func(p *ast.Param, recv string) {
+	var walk func(p *ast.Param, recv string) []compBind
+	walk = func(p *ast.Param, recv string) []compBind {
+		var out []compBind
 		for i, sub := range p.Decomp {
 			if i >= len(p.Comps) {
-				return
+				break
 			}
 			comp := p.Comps[i]
 			accessor := fmt.Sprintf("(%s)->f_%s", recv, mangle(comp.Name))
 			if len(sub.Decomp) > 0 {
 				inner := fmt.Sprintf("%s_n%d", recv, i)
-				out = append(out, compBind{e.ctype(comp.Type), inner, accessor})
-				walk(sub, inner)
+				out = append(out, compBind{
+					ct:       e.ctype(comp.Type),
+					name:     inner,
+					accessor: accessor,
+					test:     e.compTest(sub, comp, inner),
+					subs:     walk(sub, inner),
+				})
 				continue
 			}
 			if sub.Sym == nil || sub.Unnamed {
+				// a pattern that binds nothing asks nothing of the component:
+				// the unnamed pattern matches every value, null included
 				continue
 			}
-			out = append(out, compBind{e.ctype(comp.Type), e.localName(sub.Sym), accessor})
+			name := e.localName(sub.Sym)
+			out = append(out, compBind{
+				ct:       e.ctype(comp.Type),
+				name:     name,
+				accessor: accessor,
+				test:     e.compTest(sub, comp, name),
+			})
 		}
+		return out
 	}
-	walk(p, recv)
-	return out
+	return walk(p, recv)
 }
 
-// bindComponents extracts the record components of a record pattern.
-func (e *Emitter) bindComponents(p *ast.Param, recv string) {
-	for _, b := range e.planComponents(p, recv) {
-		e.line("%s %s = %s;\n", b.ct, b.name, b.accessor)
+// nestedClass returns the class a component pattern names for its component, or
+// nil when the pattern is total: a pattern written without a type (`var`, or a
+// bare name) and the unnamed pattern ask nothing about the type of the value.
+// The checker resolves the type of the pattern a case or a condition tests, but
+// a component pattern keeps its type only as written, so the name is resolved
+// here. A name that resolves to nothing leaves the pattern total rather than
+// being guessed at, which reads the component as though the pattern had asked
+// for nothing.
+func (e *Emitter) nestedClass(sub *ast.Param, comp *ast.Field) *ast.Class {
+	if sub == nil || sub.Unnamed || sub.Type == nil || sub.Type.Dims > 0 {
+		return nil
 	}
+	if ct, ok := sub.Type.Resolved.(*ast.ClassType); ok {
+		return ct.Class
+	}
+	if comp != nil && comp.Owner != nil {
+		// a type parameter of the record shadows a class of the same name, and
+		// the checker binds the component to that type rather than to the class
+		for _, tv := range comp.Owner.TypeParams {
+			if tv.Name == sub.Type.Name {
+				return nil
+			}
+		}
+	}
+	return e.resolveClass(sub.Type.Name)
+}
+
+// resolveClass resolves a type name as written in a pattern. A class nested in
+// another is registered under the class that encloses it and under no name of
+// its own, so the walk goes segment by segment, the way the checker resolves a
+// qualified name. A package name resolves to nothing here, and the pattern
+// stays total.
+func (e *Emitter) resolveClass(name string) *ast.Class {
+	parts := strings.Split(name, ".")
+	cl := e.prog.LookupClass(parts[0])
+	for _, seg := range parts[1:] {
+		if cl == nil {
+			return nil
+		}
+		cl = cl.Nested[seg]
+	}
+	return cl
+}
+
+// compTest renders the test a component pattern places on its component before
+// the variables nested inside that component may be read, or "" when there is
+// none. The name is the variable the component is read into; the test names it,
+// so an empty one only asks whether a test exists.
+//
+// A record pattern asks whether the component holds a value: matching a record
+// means being an instance of it, so a null component fails the pattern. A type
+// pattern that names a class narrower than the component's own type asks the
+// same question of that class, and a null component fails it as well. A type
+// pattern that names the component's own type is total — it reads the component
+// as it is, null included, which is what javac does — and a pattern written
+// without a type is total too, so both leave the component to the enclosing
+// test.
+func (e *Emitter) compTest(sub *ast.Param, comp *ast.Field, name string) string {
+	cls := e.nestedClass(sub, comp)
+	narrower := cls != nil && e.ctype(&ast.ClassType{Class: cls}) != e.ctype(comp.Type)
+	switch {
+	case len(sub.Decomp) > 0:
+		if narrower {
+			return fmt.Sprintf("%s != NULL && ty_instanceof((void*)%s, &cls_%s)", name, name, mangle(cls.Full))
+		}
+		return fmt.Sprintf("%s != NULL", name)
+	case narrower:
+		return fmt.Sprintf("ty_instanceof((void*)%s, &cls_%s)", name, mangle(cls.Full))
+	}
+	return ""
+}
+
+// patternTestsComponents reports whether a pattern asks about its components as
+// well as the record itself, which is what makes its condition more than the
+// type test on the value.
+func (e *Emitter) patternTestsComponents(p *ast.Param) bool {
+	for i, sub := range p.Decomp {
+		if i >= len(p.Comps) {
+			break
+		}
+		if e.compTest(sub, p.Comps[i], "") != "" || e.patternTestsComponents(sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// declareBinds declares the variables of a record pattern with their zero
+// values, each before the variables read out of it.
+func (e *Emitter) declareBinds(binds []compBind) {
+	for _, b := range binds {
+		e.line("%s %s = %s;\n", b.ct, b.name, zeroOf(b.ct))
+		e.declareBinds(b.subs)
+	}
+}
+
+// emitComponentReads fills the variables of a record pattern, outermost first.
+// okName names the int32_t variable holding the result of the pattern so far: a
+// component a nested pattern rejects clears it, so the test that reads these
+// variables reports that the pattern did not match. An empty okName is for a
+// caller that has already made sure the pattern matched — the reads a failed
+// test would have guarded are left out there. Either way a component nested in
+// another is only ever read under the test that makes it safe: a value that is
+// not of the tested type, or is not there at all, is never dereferenced.
+func (e *Emitter) emitComponentReads(binds []compBind, okName string) {
+	for _, b := range binds {
+		e.line("%s = %s;\n", b.name, b.accessor)
+		if b.test == "" {
+			continue
+		}
+		if len(b.subs) == 0 {
+			// nothing nested to read, so the test is the whole of it
+			if okName != "" {
+				e.line("if (!(%s)) { %s = 0; }\n", b.test, okName)
+			}
+			continue
+		}
+		e.line("if (%s) {\n", b.test)
+		e.indent++
+		e.emitComponentReads(b.subs, okName)
+		e.indent--
+		if okName == "" {
+			e.line("}\n")
+		} else {
+			e.line("} else { %s = 0; }\n", okName)
+		}
+	}
+}
+
+// bindComponents declares the variables of a record pattern and reads the
+// components into them. The receiver has already matched, so reading the
+// components themselves is safe; a component a nested pattern rejects is left
+// at its zero value instead of being read through.
+func (e *Emitter) bindComponents(p *ast.Param, recv string) {
+	binds := e.planComponents(p, recv)
+	e.declareBinds(binds)
+	e.emitComponentReads(binds, "")
 }
 
 // patternBind declares the variables of a case pattern with zero values, reads
 // them inside the type test, and returns the condition that says the pattern
 // matched. The caller must only use the variables under that condition: a value
-// that is not of the tested type is never read.
+// that is not of the tested type is never read, and neither is a component that
+// a nested pattern rejects — that component is read only under a test of its
+// own, which also clears the condition, so a nested pattern matches only when
+// every component it destructures is there and of the type it names.
+// switchSelectorValue renders the selector of the switch being emitted as the
+// runtime sees it. A primitive selector has to be boxed like any other
+// primitive operand of a primitive type pattern: handing ty_prim_match the
+// number where it expects an object made it dereference the value as a class
+// pointer (a switch on a long with `case int i` segfaulted).
+func (e *Emitter) switchSelectorValue(id int) string {
+	if p, ok := e.switchSel.(*ast.PrimType); ok && p.Kind != ast.Void {
+		if fn := boxFn(p.Kind); fn != "" {
+			return fn + fmt.Sprintf("(_s%d)", id)
+		}
+	}
+	return fmt.Sprintf("_s%d", id)
+}
+
+// switchOperandBoxed is primOperandBoxed for the selector of the switch being
+// emitted: a reference selector carries a box, a primitive one does not.
+func (e *Emitter) switchOperandBoxed() int {
+	return operandIsBox(e.prog, e.switchSel)
+}
+
 func (e *Emitter) patternBind(cs *ast.Case, id int) string {
 	pat := cs.Pattern
-	src := fmt.Sprintf("((void*)_s%d)", id)
+	src := e.switchSelectorValue(id)
 	if prim, isPrim := e.prog.Erased(pat.Type.Resolved).(*ast.PrimType); isPrim {
 		val := e.tmpName()
 		ok := e.tmpName()
 		e.line("%s %s = 0;\n", e.ctype(prim), val)
-		e.line("int32_t %s = ty_prim_match((void*)%s, %d, &%s);\n", ok, src, prim.Kind, val)
+		e.line("int32_t %s = ty_prim_match((void*)%s, %d, &%s, %d);\n", ok, src, prim.Kind, val,
+			e.switchOperandBoxed())
 		if pat.Sym != nil && !pat.Unnamed {
 			e.locals[pat.Sym] = val
 		}
@@ -874,21 +1049,32 @@ func (e *Emitter) patternBind(cs *ast.Case, id int) string {
 		varName = e.localName(pat.Sym)
 		e.line("%s %s = NULL;\n", ct, varName)
 	}
-	for _, b := range binds {
-		e.line("%s %s = %s;\n", b.ct, b.name, zeroOf(b.ct))
+	e.declareBinds(binds)
+	if len(binds) == 0 {
+		// nothing is read out of the match, so the type test is all of it
+		e.line("if (%s) {\n", pred)
+		e.indent++
+		e.line("%s = (%s)%s;\n", recv, ct, src)
+		if varName != "" {
+			e.line("%s = %s;\n", varName, recv)
+		}
+		e.indent--
+		e.line("}\n")
+		return fmt.Sprintf("(%s != NULL)", recv)
 	}
+	ok := e.tmpName()
+	e.line("int32_t %s = 0;\n", ok)
 	e.line("if (%s) {\n", pred)
 	e.indent++
 	e.line("%s = (%s)%s;\n", recv, ct, src)
-	if varName != "" {
-		e.line("%s = %s;\n", varName, recv)
-	}
-	for _, b := range binds {
-		e.line("%s = %s;\n", b.name, b.accessor)
-	}
+	// passing the type test is the whole of the match for a pattern with no
+	// nested components, and every one that fails a test of its own clears the
+	// flag again
+	e.line("%s = 1;\n", ok)
+	e.emitComponentReads(binds, ok)
 	e.indent--
 	e.line("}\n")
-	return fmt.Sprintf("(%s != NULL)", recv)
+	return fmt.Sprintf("(%s != 0)", ok)
 }
 
 // clearPatterns drops the substitutions recorded for one controlling expression.
@@ -914,6 +1100,13 @@ func (e *Emitter) switchStmt(s *ast.Switch, resultTmp string) {
 	}
 	id := e.switchID
 	e.switchID++
+	// the selector's static type decides how a primitive type pattern in a case
+	// is matched: a reference selector carries a box and JEP 507 then requires
+	// the box to be exactly the pattern's type, while a primitive selector is
+	// only asked for an exact conversion
+	selType := e.switchSel
+	e.switchSel = s.X.GetType()
+	defer func() { e.switchSel = selType }()
 	if switchNeedsChain(s) {
 		e.switchChain(s, resultTmp, id)
 		return
@@ -1066,7 +1259,7 @@ func (e *Emitter) emitPatternBinding(cs *ast.Case, id int) {
 	if cs.Pattern == nil {
 		return
 	}
-	src := fmt.Sprintf("((void*)_s%d)", id)
+	src := e.switchSelectorValue(id)
 	if prim, isPrim := e.prog.Erased(cs.Pattern.Type.Resolved).(*ast.PrimType); isPrim {
 		// the body only runs when the pattern matched, so the value is simply
 		// read again
@@ -1075,7 +1268,8 @@ func (e *Emitter) emitPatternBinding(cs *ast.Case, id int) {
 		}
 		n := e.localName(cs.Pattern.Sym)
 		e.line("%s %s = 0;\n", e.ctype(prim), n)
-		e.line("ty_prim_match((void*)%s, %d, &%s);\n", src, prim.Kind, n)
+		e.line("ty_prim_match((void*)%s, %d, &%s, %d);\n", src, prim.Kind, n,
+			e.switchOperandBoxed())
 		return
 	}
 	if len(cs.Pattern.Decomp) > 0 {
@@ -1134,20 +1328,29 @@ func (e *Emitter) caseCond(s *ast.Switch, cs *ast.Case, id int) string {
 		}
 		return fmt.Sprintf("({ %s (%s) && (%s); })", inner, bound, guard)
 	}
-	if cs.Guard == nil {
+	if cs.Guard == nil && (cs.Pattern == nil || !e.patternTestsComponents(cs.Pattern)) {
 		return cond
 	}
 	if cs.Pattern != nil {
 		// The guard reads the pattern variables, so they have to exist before
 		// it runs. They are read inside the type test and the whole thing
 		// becomes the condition, which keeps a value of the wrong type from
-		// ever being dereferenced.
+		// ever being dereferenced. A nested pattern is bound the same way and
+		// for a second reason: what it reads is only there under the tests of
+		// its own components, and those tests have to be part of the condition
+		// that picks the case, or the body would run for a value the pattern
+		// rejects.
 		var guard string
 		var bound string
 		inner := e.capture(func() {
 			bound = e.patternBind(cs, id)
-			guard = e.expr(cs.Guard)
+			if cs.Guard != nil {
+				guard = e.expr(cs.Guard)
+			}
 		})
+		if cs.Guard == nil {
+			return fmt.Sprintf("({ %s %s; })", inner, bound)
+		}
 		return fmt.Sprintf("({ %s (%s) && (%s); })", inner, bound, guard)
 	}
 	return "(" + cond + " && " + e.expr(cs.Guard) + ")"

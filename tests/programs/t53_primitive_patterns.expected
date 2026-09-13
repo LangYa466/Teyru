@@ -1,16 +1,15 @@
 int 42
-large int
+long 300
 double 1.5
 other
 true
 none
-char 65
 none
-false true
+none
+false false
 true true
 false true
 true
 false true
 false true
-false
 false

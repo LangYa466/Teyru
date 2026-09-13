@@ -183,11 +183,17 @@ int8_t ty_unbox_byte(void *o);
 uint16_t ty_unbox_char(void *o);
 int32_t ty_unbox_bool(void *o);
 
-/* Primitive type patterns (JEP 507). ty_prim_match reports whether a boxed
-   value can be read as the requested primitive kind without losing anything,
-   and stores it through out. kind uses the same numbering as TY_BOX:
-   1 boolean, 2 byte, 3 short, 4 char, 5 int, 6 long, 7 float, 8 double. */
-int32_t ty_prim_match(void *o, int32_t kind, void *out);
+/* Primitive type patterns (JEP 507). ty_prim_match reports whether the operand
+   matches the requested primitive kind and stores the converted value through
+   out. kind uses the same numbering as TY_BOX: 1 boolean, 2 byte, 3 short,
+   4 char, 5 int, 6 long, 7 float, 8 double.
+
+   boxed says the operand was a reference and therefore carries a box: JEP 507
+   then requires the box to be exactly the pattern's type (an Integer matches
+   `int i` but not `long l`). When the operand was a primitive, which the
+   compiler boxes to get here, only the conversion has to be exact, so
+   `long v = 5; v instanceof int i` matches but 5000000000L does not. */
+int32_t ty_prim_match(void *o, int32_t kind, void *out, int32_t boxed);
 
 /* ---- misc ------------------------------------------------------------- */
 void ty_sync_enter(void *lock);

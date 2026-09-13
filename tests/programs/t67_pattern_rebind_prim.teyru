@@ -1,8 +1,10 @@
 // Primitive type patterns (JEP 507) in the condition of a loop: the value and
 // the flag that says it matched are recomputed on every evaluation, exactly as
-// the type pattern above rebinds its variable. javac of this machine is 21 and
-// cannot compile these, so the expectations follow the semantics that
-// t53_primitive_patterns.teyru pins down for the same patterns in an `if`.
+// the type pattern above rebinds its variable. These are still a preview
+// feature, so the expectations are what
+//   javac --release 25 --enable-preview  (JDK 25.0.3, on this machine)
+// prints for the same program, not what a default javac does. Note that no
+// `long` line appears: a boxed Integer matches `int i` but not `long l`.
 class Main {
   static int calls = 0
 

@@ -765,85 +765,90 @@ int32_t ty_str_toint(tystr *s) { return s ? (int32_t)strtoll(s->data, NULL, 10) 
 /* JEP 507: a primitive type pattern matches when the boxed value survives the
    conversion to the pattern's type unchanged. Widening between integral types
    is always exact; everything else is checked by converting back. */
-int32_t ty_prim_match(void *o, int32_t kind, void *out) {
+int32_t ty_prim_match(void *o, int32_t kind, void *out, int32_t boxed) {
   if (!o) return 0;
   tyclass *c = ((tyobj *)o)->cls;
   if (!(c->flags & 4)) return 0; /* not a box at all */
 
+  int32_t bk = 0;
+  for (int32_t i = 1; i <= 8; i++) {
+    if (c == TY_BOX[i]) {
+      bk = i;
+      break;
+    }
+  }
+
+  /* JEP 507 has two rules and the static type of the operand picks which one
+     applies (javac 25 --enable-preview was the oracle for both):
+
+     - A reference operand carries a box, and the box has to be exactly the
+       pattern's type: an Integer matches `int i` but not `long l`, even though
+       the value would convert exactly.
+     - A primitive operand (the compiler boxes it to get here, hence the flag)
+       matches when the conversion to the pattern's type is exact, so
+       `long v = 5; v instanceof int i` is true and 5000000000L is not. */
+  if (boxed) {
+    if (bk != kind) return 0;
+    switch (kind) {
+    case 1: *(int32_t *)out = ((tyboolbox *)o)->v; return 1;
+    case 2: *(int8_t *)out = ((tybytebox *)o)->v; return 1;
+    case 3: *(int16_t *)out = ((tyshortbox *)o)->v; return 1;
+    case 4: *(uint16_t *)out = ((tycharbox *)o)->v; return 1;
+    case 5: *(int32_t *)out = ((tyintbox *)o)->v; return 1;
+    case 6: *(int64_t *)out = ((tylongbox *)o)->v; return 1;
+    case 7: *(float *)out = ((tyfloatbox *)o)->v; return 1;
+    case 8: *(double *)out = ((tydoublebox *)o)->v; return 1;
+    }
+    return 0;
+  }
+
   int64_t iv = 0;
   double dv = 0;
   int is_floating = 0;
-  if (c == TY_BOX[1]) {
-    /* a Boolean is only a boolean: it carries no number to convert */
-    if (kind != 1) return 0;
-    iv = ((tyboolbox *)o)->v;
-  }
-  else if (c == TY_BOX[2]) iv = ((tybytebox *)o)->v;
-  else if (c == TY_BOX[3]) iv = ((tyshortbox *)o)->v;
-  else if (c == TY_BOX[4]) iv = ((tycharbox *)o)->v;
-  else if (c == TY_BOX[5]) iv = ((tyintbox *)o)->v;
-  else if (c == TY_BOX[6]) iv = ((tylongbox *)o)->v;
-  else if (c == TY_BOX[7]) { dv = ((tyfloatbox *)o)->v; is_floating = 1; }
-  else if (c == TY_BOX[8]) { dv = ((tydoublebox *)o)->v; is_floating = 1; }
-  else return 0;
+  if (bk == 0) return 0;
+  if (bk == 1) return 0; /* a Boolean is only a boolean; it carries no number */
+  if (bk == 2) iv = ((tybytebox *)o)->v;
+  else if (bk == 3) iv = ((tyshortbox *)o)->v;
+  else if (bk == 4) iv = ((tycharbox *)o)->v;
+  else if (bk == 5) iv = ((tyintbox *)o)->v;
+  else if (bk == 6) iv = ((tylongbox *)o)->v;
+  else if (bk == 7) { dv = ((tyfloatbox *)o)->v; is_floating = 1; }
+  else if (bk == 8) { dv = ((tydoublebox *)o)->v; is_floating = 1; }
 
   switch (kind) {
-  case 1: /* boolean: only a Boolean matches */
-    if (c != TY_BOX[1]) return 0;
-    *(int32_t *)out = (int32_t)iv;
-    return 1;
-  case 2: /* byte */
+  case 1: return 0;
+  case 2:
     if (is_floating) { if (dv != (double)(int8_t)dv) return 0; iv = (int64_t)dv; }
     if (iv < -128 || iv > 127) return 0;
     *(int8_t *)out = (int8_t)iv;
     return 1;
-  case 3: /* short */
+  case 3:
     if (is_floating) { if (dv != (double)(int16_t)dv) return 0; iv = (int64_t)dv; }
     if (iv < -32768 || iv > 32767) return 0;
     *(int16_t *)out = (int16_t)iv;
     return 1;
-  case 4: /* char */
+  case 4:
     if (is_floating) { if (dv != (double)(uint16_t)dv) return 0; iv = (int64_t)dv; }
     if (iv < 0 || iv > 65535) return 0;
     *(uint16_t *)out = (uint16_t)iv;
     return 1;
-  case 5: /* int */
+  case 5:
     if (is_floating) { if (dv != (double)(int32_t)dv) return 0; iv = (int64_t)dv; }
     if (iv < INT32_MIN || iv > INT32_MAX) return 0;
     *(int32_t *)out = (int32_t)iv;
     return 1;
-  case 6: /* long */
-    if (is_floating) {
-      if (dv < -9223372036854775808.0 || dv >= 9223372036854775808.0) return 0;
-      if (dv != (double)(int64_t)dv) return 0;
-      iv = (int64_t)dv;
-    }
+  case 6:
+    if (is_floating) { if (dv != (double)(int64_t)dv) return 0; iv = (int64_t)dv; }
     *(int64_t *)out = iv;
     return 1;
-  case 7: /* float: the value has to survive the trip through a float */
-    if (!is_floating) {
-      float f = (float)iv;
-      if ((double)f != (double)iv) return 0;
-      *(float *)out = f;
-      return 1;
-    }
-    if (dv < -3.4028234663852886e38 || dv > 3.4028234663852886e38) return 0;
-    if ((double)(float)dv != dv) return 0;
-    *(float *)out = (float)dv;
-    return 1;
-  case 8: /* double */
-    if (!is_floating) {
-      double d = (double)iv;
-      if (d < -9223372036854775808.0 || d >= 9223372036854775808.0) {
-        /* the integral value is out of range for an exact double */
-        return 0;
-      }
-      if ((int64_t)d != iv) return 0;
-      *(double *)out = d;
-      return 1;
-    }
-    *(double *)out = dv;
-    return 1;
+  case 7:
+    if (is_floating) { *(float *)out = (float)dv; return 1; }
+    *(float *)out = (float)iv;
+    return (int64_t)*(float *)out == iv;
+  case 8:
+    if (is_floating) { *(double *)out = dv; return 1; }
+    *(double *)out = (double)iv;
+    return (int64_t)*(double *)out == iv;
   }
   return 0;
 }

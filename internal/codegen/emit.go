@@ -37,6 +37,9 @@ type Emitter struct {
 	retType   ast.Type // declared result type of the method being emitted
 	curLambda *ast.Lambda
 	switchID  int
+	// static type of the selector of the switch being emitted: a primitive type
+	// pattern in a case asks about a box only when the selector is a reference
+	switchSel ast.Type
 	switchCur int
 	// labels attached to the statement being emitted right now; a loop
 	// consumes them and turns them into its continue and break targets
