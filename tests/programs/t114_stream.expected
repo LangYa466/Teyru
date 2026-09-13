@@ -1,0 +1,178 @@
+filter-map: [ALICE, CAROL, DAVE, FRANK]
+filter-none: []
+count: 6
+kept: [bob, eve]
+trace: [in:alice, in:bob, out:bob, in:carol, in:dave, in:eve, out:eve, in:frank]
+iterate: [1, 2, 4, 8, 16, 32]
+iterate3: [0, 1, 2, 3, 4]
+iterate3-zero: []
+generate: [x, x, x]
+findFirst: Optional[first]
+takeWhile-inf: [1, 2, 3, 4]
+sorted: [apple, apple, date, fig, fig, pear]
+sorted-rev: [pear, fig, fig, date, apple, apple]
+sorted-len: [fig, fig, pear, date, apple, apple]
+distinct: [pear, apple, fig, date]
+skip: [fig, apple, date, fig]
+limit: [pear, apple]
+skip-limit: [apple, fig, apple]
+skip-past: []
+takeWhile: [pear]
+dropWhile: [apple, fig, apple, date, fig]
+takeWhile-first: []
+dropWhile-first: [pear, apple, fig, apple, date, fig]
+flatMap: [one, two, three, four, five, six]
+flatMap-count: 6
+reduce-id: 24
+reduce-op: Optional[14]
+reduce-empty: Optional.empty
+reduce-3: 25
+collect-3: alice;bob;carol;dave;eve;frank;
+joining: alicebobcaroldaveevefrank
+joining-delim: alice | bob | carol | dave | eve | frank
+joining-all: [alice, bob, carol, dave, eve, frank]
+joining-empty: [[]]
+min: Optional[alice]
+max: Optional[frank]
+min-len: Optional[bob]
+max-len-first: Optional[alice]
+min-empty: Optional.empty
+findFirst: Optional[carol]
+findAny: Optional[frank]
+findFirst-empty: Optional.empty
+anyMatch: true
+anyMatch-no: false
+allMatch: true
+allMatch-no: false
+noneMatch: true
+noneMatch-no: false
+toArray: [bob, eve]
+toList: [5, 3, 5, 4, 3, 5]
+toSet: [a, b, c, d, e, f]
+toSet-collector: [alice, bob, carol, dave, eve, frank]
+toCollection: [bob, eve]
+toMap:
+  alice=5
+  bob=3
+  carol=5
+  dave=4
+  eve=3
+  frank=5
+toMap-merge:
+  3=fig/fig
+  4=pear/date
+  5=apple/apple
+counting: 6
+counting-empty: 0
+summingInt: 25
+summingLong: 25
+summingDouble: 25.0
+summingInt-empty: 0
+averagingInt: 4.166666666666667
+averagingLong: 4.166666666666667
+averagingDouble: 4.166666666666667
+averagingInt-empty: 0.0
+groupingBy:
+  3 -> [bob, eve]
+  4 -> [dave]
+  5 -> [alice, carol, frank]
+groupingBy-counting:
+  3 -> 2
+  4 -> 1
+  5 -> 3
+groupingBy-treemap:
+  3
+    98 -> [bob]
+    101 -> [eve]
+  4
+    100 -> [dave]
+  5
+    97 -> [alice]
+    99 -> [carol]
+    102 -> [frank]
+partitioningBy: false=[bob, carol, dave, eve, frank] true=[alice]
+partitioningBy-count: false=4 true=2
+partitioningBy-all: false=[] true.size=6
+mapping: [5, 3, 5, 4, 3, 5]
+mapping-groups:
+  3 -> [98, 101]
+  4 -> [100]
+  5 -> [97, 99, 102]
+reducing-id: alicebobcaroldaveevefrank
+reducing-op: Optional[14]
+reducing-empty: Optional.empty
+reducing-3: 25
+minBy: Optional[alice]
+maxBy: Optional[alice]
+builder: [a, b, c]
+concat: [alice, bob, eve, frank]
+concat-empty: []
+of-one: [solo]
+of-many: [a, b, c]
+empty: []
+empty-count: 0
+ofNullable: 0 [yes]
+range: [1, 2, 3, 4, 5]
+range-empty: []
+rangeClosed: [1, 2, 3, 4, 5]
+range-map: [1, 4, 9, 16, 25]
+range-filter: [3, 6, 9]
+range-sum: 5050
+range-count: 5
+range-min: OptionalInt[1]
+range-max: OptionalInt[9]
+range-min-empty: OptionalInt.empty
+range-avg: OptionalDouble[3.5]
+range-avg-empty: OptionalDouble.empty
+range-sumstats: IntSummaryStatistics{count=6, sum=21, min=1, average=3.500000, max=6}
+range-sumstats-empty: IntSummaryStatistics{count=0, sum=0, min=2147483647, average=0.000000, max=-2147483648}
+range-reduce: 15
+range-reduce-op: OptionalInt[15]
+range-reduce-empty: OptionalInt.empty
+range-sorted: [1, 1, 2, 3]
+range-distinct: [3, 1, 2]
+range-limit: [1, 3, 9, 27]
+range-takeWhile: [1, 2, 3]
+range-dropWhile: [6, 7, 8]
+range-skip: [6, 7, 8]
+range-flatMap: [1, 1, 2, 1, 2, 3]
+range-boxed: [1, 2, 3, 4]
+range-asLong: [1, 2, 3]
+range-asDouble: [1.0, 2.0, 3.0]
+range-mapToObj: [n1, n2, n3, n4]
+range-concat: [1, 2, 8, 9]
+range-generate: [7, 7, 7]
+range-anyMatch: true
+range-allMatch: true
+range-noneMatch: true
+range-findFirst: OptionalInt[3]
+peek1 peek2 peek3 range-peek: [1, 2, 3]
+range-collect: 1234
+long-sum: 500000500000
+long-stats: LongSummaryStatistics{count=6, sum=21, min=1, average=3.500000, max=6}
+long-avg: OptionalDouble[2.3333333333333335]
+long-max: OptionalLong[4]
+long-boxed: [1, 2, 3]
+double-sum: 0.875
+double-stats: DoubleSummaryStatistics{count=3, sum=7.500000, min=1.500000, average=2.500000, max=3.500000}
+double-avg: OptionalDouble[2.3333333333333335]
+double-min: OptionalDouble[-2.0]
+double-boxed: [1.5, 2.5]
+spliterator-size: 6
+spliterator-exact: 6
+spliterator-ordered: true
+spliterator-sized: true
+stream-spliterator-ordered: true
+stream-spliterator-split: null
+gotalice gotbob gotcarol 
+Spliterators.iterator: alice bob false
+StreamSupport: [alice, bob]
+isParallel: false
+Streams.of: [alice, bob]
+Streams.parallelStream: true 6
+closed-in-try: []
+closed-after: [first, second]
+IllegalStateException: stream has already been operated upon or closed
+IllegalStateException: stream has already been operated upon or closed
+IllegalArgumentException: -1
+IllegalArgumentException: -1

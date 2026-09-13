@@ -59,7 +59,19 @@ class Math {
   public static native long floorDiv(long a, long b)
   public static native int floorMod(int a, int b)
   public static native long floorMod(long a, long b)
-  public static native double random()
+
+  /* Java's Math.random() is nextDouble() on one Random that the class keeps
+     for the life of the program, so the values here are java.util.Random's
+     and not the C library's -- which is what the runtime's ty_random returned
+     (rand()/RAND_MAX+1), a different generator with a different seeding. The
+     generator itself is java.util.Random, in 25_util_misc.teyru. Java seeds
+     its holder lazily on the first call; this seeds when Math is first used,
+     which for a program that never calls random() is a clock read and nothing
+     else. */
+  private static final Random RANDOM = new Random()
+  public static double random() {
+    return RANDOM.nextDouble()
+  }
 }
 
 class System {

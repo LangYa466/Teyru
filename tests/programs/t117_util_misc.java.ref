@@ -1,0 +1,715 @@
+// The same program written with Java's punctuation, kept so the comparison
+// against javac can be redone:
+//
+//   cp tests/programs/t117_util_misc.java.ref /tmp/Main.java
+//   /usr/lib/jvm/java-25/bin/javac -d /tmp/out /tmp/Main.java
+//   /usr/lib/jvm/java-25/bin/java -Duser.language=en -Duser.country=US -cp /tmp/out Main
+//
+// The output is tests/programs/t117_util_misc.expected, byte for byte.
+// (The class is named Main; javac wants the file named after it. The
+// `/usr/lib/jvm/java-25` path is the one the java on PATH is not: the JDK
+// below it refuses these class files.)
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.BitSet;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Enumeration;
+import java.util.List;
+import java.util.NoSuchElementException;
+import java.util.Properties;
+import java.util.Random;
+import java.util.StringTokenizer;
+import java.util.UUID;
+
+/* The java.util classes the library was missing: StringTokenizer, Random,
+ * UUID, BitSet, Properties, and the range forms of the Arrays helpers.
+ *
+ * Every line here is a contract of the JDK's own implementation rather than a
+ * description of one: Random is the published LCG (so a fixed seed has to give
+ * the fixed numbers below), UUID parses and compares by the bit layout, and
+ * BitSet's hashCode is the folding the JDK documents. Nothing printed below
+ * comes from a clock or from randomUUID itself -- the generator is driven
+ * from fixed seeds and the UUIDs are parsed from fixed strings, so the same
+ * program is reproducible on both sides. */
+
+class Exposed extends Random {
+    public Exposed(long s) {
+        super(s);
+    }
+
+    public int nextBits(int bits) {
+        return next(bits);
+    }
+}
+
+class ByLen implements Comparator<String> {
+    public int compare(String a, String b) {
+        return a.length() - b.length();
+    }
+}
+
+/* A comparator of Object applied to a String[]: Java's range forms take
+ * Comparator<? super T>, so this has to compile on both sides. */
+class AnyCmp implements Comparator<Object> {
+    public int compare(Object a, Object b) {
+        return a.toString().length() - b.toString().length();
+    }
+}
+
+public class Main {
+
+    // ------------------------------------------------------------- strings
+
+    public static void main(String[] args) throws Exception {
+        strings();
+        randoms();
+        uuids();
+        bits();
+        props();
+        arrays();
+    }
+
+    static void dump(String label, StringTokenizer st) {
+        StringBuilder sb = new StringBuilder();
+        while (st.hasMoreTokens()) {
+            sb.append("<").append(st.nextToken()).append(">");
+        }
+        System.out.println(label + " n=" + st.countTokens() + " " + sb.toString());
+    }
+
+    static void strings() {
+        dump("default", new StringTokenizer("this is\ta test\n"));
+        dump("comma", new StringTokenizer("this,is,a,test", ","));
+        dump("empty", new StringTokenizer(""));
+        dump("onlydelims", new StringTokenizer(",,,", ","));
+        dump("lead", new StringTokenizer("   a  b ", " "));
+        StringTokenizer rd = new StringTokenizer("a,b;c", ",;", true);
+        String acc = "";
+        while (rd.hasMoreTokens()) {
+            acc = acc + "|" + rd.nextToken();
+        }
+        System.out.println("retdelims " + acc);
+        StringTokenizer ch = new StringTokenizer("1,2 3-4", ", -");
+        System.out.println("count0=" + ch.countTokens());
+        System.out.println("t1=" + ch.nextToken());
+        System.out.println("count1=" + ch.countTokens());
+        System.out.println("t2=" + ch.nextToken(" -"));
+        System.out.println("t3=" + ch.nextToken());
+        System.out.println("count2=" + ch.countTokens());
+        System.out.println("t4=" + ch.nextToken(","));
+        try {
+            System.out.println("t5=" + ch.nextToken());
+        } catch (NoSuchElementException ex) {
+            System.out.println("t5 threw nse");
+        }
+        System.out.println("count3=" + ch.countTokens());
+        StringTokenizer e = new StringTokenizer("x");
+        System.out.println("has=" + e.hasMoreElements() + " " + e.nextElement() + " " + e.hasMoreElements());
+        try {
+            e.nextToken();
+            System.out.println("no throw");
+        } catch (NoSuchElementException ex) {
+            System.out.println("nse threw");
+        }
+        try {
+            e.nextElement();
+            System.out.println("no throw2");
+        } catch (NoSuchElementException ex) {
+            System.out.println("nse2 threw");
+        }
+        try {
+            StringTokenizer n = new StringTokenizer(null, ",");
+            System.out.println("nullstr " + n.hasMoreTokens());
+        } catch (NullPointerException ex) {
+            System.out.println("nullstr threw npe");
+        }
+        try {
+            StringTokenizer nn = new StringTokenizer("a b", null);
+            System.out.println("nulld " + nn.countTokens() + " " + nn.nextToken());
+        } catch (NullPointerException ex) {
+            System.out.println("nulld threw npe");
+        }
+        StringTokenizer emp2 = new StringTokenizer("", ",");
+        System.out.println("empty2 " + emp2.countTokens() + " " + emp2.hasMoreTokens());
+        StringTokenizer ws = new StringTokenizer(" \r\n\f\tz");
+        System.out.println("ws " + ws.countTokens() + " len=" + ws.nextToken().length() + " more=" + ws.hasMoreTokens());
+        StringTokenizer multi = new StringTokenizer("::a::b:", ":");
+        System.out.println("multi " + multi.countTokens() + " " + multi.nextToken() + " " + multi.nextToken());
+        StringTokenizer c = new StringTokenizer("abc", "");
+        System.out.println("emptydelim " + c.countTokens() + " " + c.nextToken());
+        Enumeration<Object> en = new StringTokenizer("p q", " ");
+        System.out.println("as-enum " + en.hasMoreElements() + " " + en.nextElement() + " " + en.nextElement());
+    }
+
+    // ------------------------------------------------------------- random
+
+    static void randoms() {
+        Random r = new Random(42L);
+        System.out.println(r.nextInt());
+        System.out.println(r.nextInt());
+        System.out.println(r.nextInt());
+        System.out.println(r.nextLong());
+        System.out.println(r.nextBoolean());
+        System.out.println(r.nextBoolean());
+        System.out.println(r.nextFloat());
+        System.out.println(r.nextFloat());
+        System.out.println(r.nextDouble());
+        System.out.println(r.nextDouble());
+        System.out.println(r.nextGaussian());
+        System.out.println(r.nextGaussian());
+        System.out.println(r.nextGaussian());
+        System.out.println(r.nextInt(16));
+        System.out.println(r.nextInt(100));
+        System.out.println(r.nextInt(1));
+        System.out.println(r.nextInt(7));
+        byte[] b = new byte[8];
+        r.nextBytes(b);
+        for (int i = 0; i < b.length; i++) {
+            System.out.println(b[i]);
+        }
+        r.setSeed(42L);
+        System.out.println(r.nextInt());
+        Exposed gen = new Exposed(123456789L);
+        System.out.println(gen.nextBits(1));
+        System.out.println(gen.nextBits(4));
+        System.out.println(gen.nextBits(16));
+        System.out.println(gen.nextBits(31));
+        System.out.println(gen.nextBits(32));
+        Random big = new Random(7L);
+        System.out.println(big.nextInt(1073741824));
+        System.out.println(big.nextInt(1073741825));
+        System.out.println(big.nextInt(2000000000));
+        System.out.println(big.nextInt(2000000000));
+        System.out.println(big.nextLong());
+        try {
+            r.nextInt(0);
+        } catch (IllegalArgumentException ex) {
+            System.out.println("IAE " + ex.getMessage());
+        }
+        try {
+            r.nextInt(-5);
+        } catch (IllegalArgumentException ex2) {
+            System.out.println("IAE " + ex2.getMessage());
+        }
+    }
+
+    // --------------------------------------------------------------- uuid
+
+    static void showUuid(String s) {
+        UUID u = UUID.fromString(s);
+        System.out.println(u.toString() + " " + u.getMostSignificantBits() + " " + u.getLeastSignificantBits()
+            + " v" + u.version() + " var" + u.variant() + " h" + u.hashCode());
+    }
+
+    static void badUuid(String s) {
+        try {
+            UUID u = UUID.fromString(s);
+            System.out.println("ok " + u);
+        } catch (NumberFormatException e) {
+            System.out.println("NFE");
+        } catch (IllegalArgumentException e) {
+            System.out.println("IAE: " + e.getMessage());
+        }
+    }
+
+    static void uuids() {
+        showUuid("123e4567-e89b-12d3-a456-426614174000");
+        showUuid("f47ac10b-58cc-4372-a567-0e02b2c3d479");
+        showUuid("00000000-0000-0000-0000-000000000000");
+        showUuid("ffffffff-ffff-ffff-ffff-ffffffffffff");
+        showUuid("1-1-1-1-1");
+        showUuid("123e4567-e89b-12d3-a456-426614174000".toUpperCase());
+        UUID a = UUID.fromString("123e4567-e89b-12d3-a456-426614174000");
+        UUID b = UUID.fromString("123e4567-e89b-12d3-a456-426614174001");
+        UUID hi = UUID.fromString("ffffffff-ffff-ffff-ffff-ffffffffffff");
+        UUID lo = UUID.fromString("00000000-0000-0000-0000-000000000001");
+        System.out.println(a.equals(b) + " " + a.equals(UUID.fromString("123e4567-e89b-12d3-a456-426614174000")));
+        System.out.println(a.compareTo(b) + " " + b.compareTo(a) + " " + a.compareTo(a));
+        System.out.println(hi.compareTo(lo) + " " + lo.compareTo(hi));
+        badUuid("not-a-uuid");
+        badUuid("1-2-3-4");
+        badUuid("123e4567-e89b-12d3-a456-426614174000extra");
+        badUuid("123e4567e89b12d3a456426614174000");
+        badUuid("123e4567-e89b-12d3-a456-42661417400g");
+        UUID rr = UUID.randomUUID();
+        System.out.println("random v" + rr.version() + " var" + rr.variant() + " len" + rr.toString().length());
+    }
+
+    // ------------------------------------------------------------- bitset
+
+    static void dumpBits(String label, BitSet b) {
+        System.out.println(label + " " + b + " len=" + b.length() + " card=" + b.cardinality()
+            + " size=" + b.size() + " empty=" + b.isEmpty() + " h=" + b.hashCode());
+    }
+
+    static BitSet bs = new BitSet();
+
+    static void badBit(int what) {
+        try {
+            if (what == 1) {
+                new BitSet(-1);
+            } else if (what == 2) {
+                bs.set(-1);
+            } else if (what == 3) {
+                bs.get(-1);
+            } else if (what == 4) {
+                bs.clear(-1);
+            } else if (what == 5) {
+                bs.flip(-1);
+            } else if (what == 6) {
+                bs.nextSetBit(-1);
+            } else if (what == 7) {
+                bs.nextClearBit(-1);
+            } else if (what == 8) {
+                bs.previousSetBit(-2);
+            } else if (what == 9) {
+                bs.previousClearBit(-2);
+            } else if (what == 10) {
+                bs.set(5, 2);
+            } else if (what == 11) {
+                bs.set(-1, 2);
+            } else if (what == 12) {
+                bs.clear(5, 2);
+            } else if (what == 13) {
+                bs.flip(5, 2);
+            } else if (what == 14) {
+                bs.get(5, 2);
+            } else if (what == 15) {
+                bs.set(3, -1);
+            } else if (what == 16) {
+                bs.clear(3, -1);
+            }
+            System.out.println("no throw");
+        } catch (RuntimeException e) {
+            System.out.println(e.getMessage());
+        }
+    }
+
+    static void bits() {
+        System.out.println(new BitSet().size());
+        System.out.println(new BitSet(0).size());
+        System.out.println(new BitSet(1).size());
+        System.out.println(new BitSet(64).size());
+        System.out.println(new BitSet(65).size());
+        System.out.println(new BitSet(100).size());
+        BitSet a = new BitSet();
+        dumpBits("empty", a);
+        a.set(5);
+        dumpBits("set5", a);
+        a.set(70);
+        a.set(64);
+        dumpBits("set70", a);
+        a.set(63, 66);
+        dumpBits("set63_66", a);
+        a.set(66, 68, false);
+        dumpBits("set66_68_false", a);
+        a.clear(64);
+        dumpBits("clear64", a);
+        a.clear(68, 200);
+        dumpBits("clear68_200", a);
+        a.clear();
+        dumpBits("clear", a);
+        System.out.println(a.size());
+        a.flip(3);
+        a.flip(100);
+        dumpBits("flip3_100", a);
+        a.flip(0, 8);
+        dumpBits("flip0_8", a);
+        System.out.println(a.get(0) + " " + a.get(3) + " " + a.get(200));
+        dumpBits("get0_70", a.get(0, 70));
+        System.out.println(a.get(10, 10) + " " + a.get(300, 400));
+        System.out.println(a.get(100, 200) + " " + a.get(97, 104).length());
+        BitSet c = new BitSet();
+        c.set(1);
+        c.set(2);
+        c.set(100);
+        c.set(101);
+        System.out.println(c.nextSetBit(0) + " " + c.nextSetBit(2) + " " + c.nextSetBit(3) + " " + c.nextSetBit(102) + " " + c.nextSetBit(150));
+        System.out.println(c.nextClearBit(0) + " " + c.nextClearBit(1) + " " + c.nextClearBit(2) + " " + c.nextClearBit(3) + " " + c.nextClearBit(102) + " " + c.nextClearBit(200));
+        System.out.println(c.previousSetBit(0) + " " + c.previousSetBit(1) + " " + c.previousSetBit(2) + " " + c.previousSetBit(99) + " " + c.previousSetBit(101) + " " + c.previousSetBit(200) + " " + c.previousSetBit(-1));
+        System.out.println(c.previousClearBit(0) + " " + c.previousClearBit(1) + " " + c.previousClearBit(3) + " " + c.previousClearBit(99) + " " + c.previousClearBit(102) + " " + c.previousClearBit(200) + " " + c.previousClearBit(-1));
+        BitSet d = new BitSet();
+        d.set(1);
+        d.set(3);
+        d.set(70);
+        BitSet e2 = new BitSet();
+        e2.set(3);
+        e2.set(71);
+        BitSet f = new BitSet();
+        f.set(1);
+        f.set(3);
+        f.set(70);
+        System.out.println(d.equals(f) + " " + d.equals(e2) + " " + d.equals("x") + " " + d.intersects(e2));
+        BitSet g = new BitSet();
+        g.set(3);
+        System.out.println(d.intersects(g) + " " + d.intersects(new BitSet()));
+        BitSet h = (BitSet) d.clone();
+        System.out.println(h.equals(d) + " " + d.hashCode() + " " + h.hashCode());
+        h.set(5);
+        System.out.println(d.get(5) + " " + h.get(5) + " " + d.equals(h));
+        BitSet m = new BitSet();
+        m.set(0);
+        m.set(200);
+        System.out.println(m.size());
+        BitSet m2 = (BitSet) m.clone();
+        System.out.println(m.size() + " " + m2.size());
+        m2.and((BitSet) d.clone());
+        dumpBits("and", m2);
+        System.out.println(m.get(0) + " " + m.get(200));
+        BitSet o = (BitSet) d.clone();
+        o.or(e2);
+        dumpBits("or", o);
+        BitSet x = (BitSet) d.clone();
+        x.xor(e2);
+        dumpBits("xor", x);
+        BitSet an = (BitSet) d.clone();
+        an.andNot(e2);
+        dumpBits("andNot", an);
+        BitSet self = (BitSet) d.clone();
+        self.and(self);
+        self.or(self);
+        dumpBits("self", self);
+        self.andNot(self);
+        dumpBits("selfNot", self);
+        System.out.println(d.equals(f));
+        BitSet trim = new BitSet();
+        trim.set(5);
+        BitSet tc = (BitSet) trim.clone();
+        System.out.println(trim.size() + " " + tc.size());
+        for (int i = 1; i <= 16; i++) {
+            badBit(i);
+        }
+    }
+
+    // --------------------------------------------------------- properties
+
+    static String loadBody() {
+        String t = "";
+        t = t + "# comment line\n";
+        t = t + "! another comment\n";
+        t = t + "   spaced = value1\n";
+        t = t + "key2:value2\n";
+        t = t + "key3   value3\n";
+        t = t + "key4=multi\\\n";
+        t = t + "   continued\n";
+        t = t + "key5=two\\\\\n";
+        t = t + "key6=\\u0041\\u00e9\n";
+        t = t + "key7=\n";
+        t = t + "key8\n";
+        t = t + "key\\=9=escaped eq\n";
+        t = t + ":colonstart\n";
+        t = t + "trailing =   \n";
+        t = t + "café=raw high bytes\n";
+        return t;
+    }
+
+    static List<String> sorted(java.util.Set<String> names) {
+        List<String> xs = new ArrayList<String>(names);
+        Collections.sort(xs);
+        return xs;
+    }
+
+    static void showProps(Properties p, String label) {
+        List<String> ks = sorted(p.stringPropertyNames());
+        String acc = "";
+        for (int i = 0; i < ks.size(); i++) {
+            String k = ks.get(i);
+            acc = acc + (i == 0 ? "" : " ") + "[" + k + "=" + p.getProperty(k) + "]";
+        }
+        System.out.println(label + " n=" + ks.size() + " " + acc);
+    }
+
+    static void props() throws Exception {
+        Properties p = new Properties();
+        Object old1 = p.setProperty("b", "2");
+        Object old2 = p.setProperty("a", "1");
+        Object old3 = p.setProperty("b", "3");
+        System.out.println("setProperty old=" + old1 + " " + old2 + " " + old3);
+        System.out.println("get a=" + p.getProperty("a") + " miss=" + p.getProperty("nope"));
+        System.out.println("getdef a=" + p.getProperty("a", "D") + " miss=" + p.getProperty("nope", "D"));
+        System.out.println("getdef null=" + p.getProperty("nope", null));
+        p.setProperty("z z", "has space");
+        p.setProperty("eq", "a=b:c#d!");
+        p.setProperty("esc", "tab\there");
+        p.setProperty("long", "0123456789012345678901234567890123456789012345678901234567890");
+        p.put(Integer.valueOf(7), "seven");
+        System.out.println("nonstring " + p.getProperty("7") + " " + p.get("7"));
+        System.out.println("size=" + p.size() + " has=" + p.containsKey("a") + " ca=" + p.containsKey(Integer.valueOf(7)));
+        showProps(p, "props");
+        Properties q = new Properties();
+        q.setProperty("k", "v");
+        q.put("nk", Integer.valueOf(9));
+        Enumeration<?> en = q.propertyNames();
+        List<String> names = new ArrayList<String>();
+        while (en.hasMoreElements()) {
+            Object o = en.nextElement();
+            names.add(o.toString());
+        }
+        Collections.sort(names);
+        System.out.println("propertyNames n=" + names.size() + " " + names);
+        System.out.println("stringPropertyNames n=" + q.stringPropertyNames().size() + " " + q.stringPropertyNames());
+        System.out.println("spn values " + q.getProperty("k") + " " + q.getProperty("nk") + " " + q.getProperty("7"));
+        Properties qc = new Properties();
+        qc.setProperty("k", "v");
+        qc.put(Integer.valueOf(7), "seven");
+        try {
+            qc.propertyNames();
+            System.out.println("pn mixed ok");
+        } catch (ClassCastException ex) {
+            System.out.println("pn mixed threw cce");
+        }
+        Properties r = new Properties();
+        r.setProperty("keep", "yes");
+        r.setProperty("drop", "no");
+        Object removed = r.remove("drop");
+        System.out.println("remove " + removed + " now=" + r.size() + " " + r.getProperty("drop"));
+        System.out.println("empty " + new Properties().isEmpty());
+
+        Path dir = Files.createTempDirectory("teyru-t117");
+        Path in = dir.resolve("load1.properties");
+        Files.writeString(in, loadBody());
+        Properties lp = new Properties();
+        lp.load(Files.newInputStream(in));
+        showProps(lp, "loaded");
+        System.out.println("esc check " + lp.getProperty("key6") + " " + lp.getProperty("key5") + " " + lp.getProperty("key4"));
+        System.out.println("empty key " + lp.getProperty("") + " colon " + lp.getProperty(""));
+        String highKey = lp.getProperty("café");
+        System.out.println("high key " + (highKey == null ? "absent" : highKey));
+        Properties fromPath = new Properties();
+        fromPath.load(Files.newBufferedReader(in));
+        showProps(fromPath, "path load");
+
+        Path out = dir.resolve("store1.properties");
+        Properties sp = new Properties();
+        sp.setProperty("zz z", "value with space");
+        sp.setProperty("a", "a=b:c#d!");
+        sp.setProperty("bs", "back\\slash");
+        sp.setProperty("tab", "t\tn");
+        sp.setProperty("uni", "é中");
+        sp.store(Files.newOutputStream(out), null);
+        List<String> lines = new ArrayList<String>();
+        String text = Files.readString(out);
+        String[] parts = text.split("\n", -1);
+        for (int i = 0; i < parts.length; i++) {
+            String line = parts[i];
+            if (line.length() > 0 && line.charAt(0) != '#') {
+                lines.add(line);
+            }
+        }
+        Collections.sort(lines);
+        System.out.println("stored n=" + lines.size());
+        for (int i = 0; i < lines.size(); i++) {
+            System.out.println("  " + lines.get(i));
+        }
+        Properties back = new Properties();
+        back.load(Files.newInputStream(out));
+        showProps(back, "roundtrip");
+
+        Path cmt = dir.resolve("comments.properties");
+        Properties cp = new Properties();
+        cp.setProperty("k", "v");
+        cp.store(Files.newOutputStream(cmt), "a comment\nsecond line");
+        String ctext = Files.readString(cmt);
+        String[] cparts = ctext.split("\n", -1);
+        for (int i = 0; i < cparts.length; i++) {
+            String line = cparts[i];
+            if (line.length() > 0 && line.charAt(0) == '#' && line.indexOf(':') < 0) {
+                System.out.println("comment " + line.substring(1));
+            }
+        }
+
+        Properties one = new Properties();
+        one.setProperty("only", "a rather long value that goes past forty characters for sure");
+        one.list(System.out);
+        Properties two = new Properties();
+        two.setProperty("short", "v");
+        two.list(System.out);
+        Properties mixed = new Properties();
+        mixed.setProperty("s", "v");
+        mixed.put(Integer.valueOf(7), "seven");
+        try {
+            mixed.list(System.out);
+            System.out.println("list mixed ok");
+        } catch (ClassCastException ex) {
+            System.out.println("list mixed threw cce");
+        }
+        Properties cleared = new Properties();
+        cleared.setProperty("g", "1");
+        cleared.clear();
+        System.out.println("cleared " + cleared.size() + " " + cleared.isEmpty() + " " + cleared.keySet().size());
+    }
+
+    // ------------------------------------------------------------- arrays
+
+    static String ints(int[] a) {
+        return Arrays.toString(a);
+    }
+
+    static void arrays() {
+        int[] a = new int[]{5, 3, 9, 1, 7, 2};
+        Arrays.sort(a, 1, 4);
+        System.out.println("sort int range " + ints(a));
+        int[] b = new int[]{5, 3, 9, 1, 7, 2};
+        Arrays.sort(b, 0, 0);
+        System.out.println("sort empty range " + ints(b));
+        double[] d = new double[]{2.5, 1.5, 4.5, 3.5};
+        Arrays.sort(d, 1, 3);
+        System.out.println("sort double range " + Arrays.toString(d));
+        char[] ch = new char[]{'d', 'c', 'b', 'a'};
+        Arrays.sort(ch, 1, 3);
+        System.out.println("sort char range " + Arrays.toString(ch));
+        String[] s = new String[]{"pear", "apple", "plum", "fig", "kiwi"};
+        Arrays.sort(s, 1, 4);
+        System.out.println("sort string range " + Arrays.toString(s));
+        String[] s2 = new String[]{"pear", "apple", "plum", "fig", "kiwi"};
+        Arrays.sort(s2, 1, 4, new ByLen());
+        System.out.println("sort cmp range " + Arrays.toString(s2));
+        Object[] o = new Object[]{"pear", "apple", "plum", "fig"};
+        Arrays.sort(o, 1, 3);
+        System.out.println("sort object range " + Arrays.toString(o));
+        String[] s3 = new String[]{"pear", "apple", "plum", "fig", "kiwi"};
+        Arrays.sort(s3, 2, 2, new ByLen());
+        System.out.println("sort cmp empty " + Arrays.toString(s3));
+        String[] s4 = new String[]{"pear", "apple", "plum", "fig", "kiwi"};
+        Arrays.sort(s4, 1, 4, new AnyCmp());
+        System.out.println("sort super range " + Arrays.toString(s4));
+        System.out.println("bs super " + Arrays.binarySearch(s4, 1, 4, "fig", new AnyCmp()) + " " + Arrays.binarySearch(s4, 1, 4, "xx", new AnyCmp()));
+
+        int[] f = new int[]{1, 2, 3, 4, 5};
+        Arrays.fill(f, 1, 4, 9);
+        System.out.println("fill int range " + ints(f));
+        Arrays.fill(f, 2, 2, 0);
+        System.out.println("fill empty range " + ints(f));
+        String[] fs = new String[]{"a", "b", "c"};
+        Arrays.fill(fs, 1, 3, "z");
+        System.out.println("fill obj range " + Arrays.toString(fs));
+        double[] fd = new double[]{1.0, 2.0, 3.0};
+        Arrays.fill(fd, 0, 2, 8.5);
+        System.out.println("fill double range " + Arrays.toString(fd));
+        boolean[] fb = new boolean[]{false, false, false};
+        Arrays.fill(fb, 1, 2, true);
+        System.out.println("fill bool range " + Arrays.toString(fb));
+
+        int[] bs2 = new int[]{0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+        System.out.println("bs in " + Arrays.binarySearch(bs2, 2, 6, 3));
+        System.out.println("bs out-high " + Arrays.binarySearch(bs2, 2, 6, 7));
+        System.out.println("bs out-low " + Arrays.binarySearch(bs2, 2, 6, 1));
+        System.out.println("bs miss-mid " + Arrays.binarySearch(bs2, 2, 6, 5) + " " + Arrays.binarySearch(bs2, 2, 6, 4));
+        System.out.println("bs empty range " + Arrays.binarySearch(bs2, 3, 3, 3));
+        String[] bss = new String[]{"a", "c", "e", "g"};
+        System.out.println("bs str " + Arrays.binarySearch(bss, 1, 3, "e") + " " + Arrays.binarySearch(bss, 1, 3, "b") + " " + Arrays.binarySearch(bss, 1, 3, "f"));
+        System.out.println("bs cmp " + Arrays.binarySearch(bss, 1, 3, "e", new ByLen()) + " " + Arrays.binarySearch(bss, 1, 3, "zz", new ByLen()));
+        Object[] bso = new Object[]{"a", "c", "e"};
+        System.out.println("bs obj " + Arrays.binarySearch(bso, 0, 2, "c"));
+
+        int[] e1 = new int[]{1, 2, 3};
+        try {
+            Arrays.fill(e1, 2, 1, 0);
+            System.out.println("fill from>to no throw");
+        } catch (IllegalArgumentException ex) {
+            System.out.println("fill from>to iae " + ex.getMessage());
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            System.out.println("fill from>to aioobe " + ex.getMessage());
+        }
+        int[] e2 = new int[]{1, 2, 3};
+        try {
+            Arrays.fill(e2, -1, 2, 0);
+            System.out.println("fill from<0 no throw");
+        } catch (IllegalArgumentException ex) {
+            System.out.println("fill from<0 iae " + ex.getMessage());
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            System.out.println("fill from<0 aioobe " + ex.getMessage());
+        }
+        int[] e3 = new int[]{1, 2, 3};
+        try {
+            Arrays.fill(e3, 0, 9, 0);
+            System.out.println("fill to>len no throw");
+        } catch (IllegalArgumentException ex) {
+            System.out.println("fill to>len iae " + ex.getMessage());
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            System.out.println("fill to>len aioobe " + ex.getMessage());
+        }
+        int[] e4 = new int[3];
+        try {
+            Arrays.sort(e4, 2, 1);
+            System.out.println("sort from>to no throw");
+        } catch (IllegalArgumentException ex) {
+            System.out.println("sort from>to iae " + ex.getMessage());
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            System.out.println("sort from>to aioobe " + ex.getMessage());
+        }
+        int[] e5 = new int[3];
+        try {
+            Arrays.sort(e5, 0, 4);
+            System.out.println("sort to>len no throw");
+        } catch (IllegalArgumentException ex) {
+            System.out.println("sort to>len iae " + ex.getMessage());
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            System.out.println("sort to>len aioobe " + ex.getMessage());
+        }
+        int[] e6 = new int[3];
+        try {
+            Arrays.binarySearch(e6, 2, 1, 0);
+            System.out.println("bs from>to no throw");
+        } catch (IllegalArgumentException ex) {
+            System.out.println("bs from>to iae " + ex.getMessage());
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            System.out.println("bs from>to aioobe " + ex.getMessage());
+        }
+        int[] e7 = new int[3];
+        try {
+            Arrays.binarySearch(e7, 0, 4, 0);
+            System.out.println("bs to>len no throw");
+        } catch (IllegalArgumentException ex) {
+            System.out.println("bs to>len iae " + ex.getMessage());
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            System.out.println("bs to>len aioobe " + ex.getMessage());
+        }
+        String[] e8 = new String[3];
+        try {
+            Arrays.fill(e8, 2, 1, "z");
+            System.out.println("fill obj from>to no throw");
+        } catch (IllegalArgumentException ex) {
+            System.out.println("fill obj from>to iae " + ex.getMessage());
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            System.out.println("fill obj from>to aioobe " + ex.getMessage());
+        }
+        String[] e9 = new String[3];
+        try {
+            Arrays.sort(e9, 2, 1, new ByLen());
+            System.out.println("sort cmp from>to no throw");
+        } catch (IllegalArgumentException ex) {
+            System.out.println("sort cmp from>to iae " + ex.getMessage());
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            System.out.println("sort cmp from>to aioobe " + ex.getMessage());
+        }
+        Object[] e10 = new Object[3];
+        try {
+            Arrays.sort(e10, 2, 1);
+            System.out.println("sort obj from>to no throw");
+        } catch (IllegalArgumentException ex) {
+            System.out.println("sort obj from>to iae " + ex.getMessage());
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            System.out.println("sort obj from>to aioobe " + ex.getMessage());
+        }
+
+        System.out.println("dhc null " + Arrays.deepHashCode(null));
+        System.out.println("dhc empty " + Arrays.deepHashCode(new Object[0]));
+        System.out.println("dhc flat " + Arrays.deepHashCode(new Object[]{"a", "b", "c"}));
+        System.out.println("dhc ints " + Arrays.deepHashCode(new Object[]{Integer.valueOf(1), Integer.valueOf(2)}));
+        System.out.println("dhc prim-arr " + Arrays.deepHashCode(new int[][]{{1, 2, 3}}));
+        System.out.println("dhc nested " + Arrays.deepHashCode(new Object[]{new Object[]{Integer.valueOf(1), Integer.valueOf(2)}}));
+        System.out.println("dhc mixed " + Arrays.deepHashCode(new Object[]{"x", null, new Object[]{"y"}, Boolean.TRUE}));
+        System.out.println("hc same flat " + Arrays.hashCode(new Object[]{"a", "b", "c"}));
+        System.out.println("hc same ints " + Arrays.hashCode(new Object[]{Integer.valueOf(1), Integer.valueOf(2)}));
+        System.out.println("dhc 2d prim " + Arrays.deepHashCode(new int[][]{{1}, {2}}) + " " + Arrays.deepHashCode(new char[][]{{'a'}}) + " " + Arrays.deepHashCode(new byte[][]{{1}}) + " " + Arrays.deepHashCode(new short[][]{{2}}) + " " + Arrays.deepHashCode(new long[][]{{3L}}) + " " + Arrays.deepHashCode(new float[][]{{1.5f}}) + " " + Arrays.deepHashCode(new boolean[][]{{true}}) + " " + Arrays.deepHashCode(new double[][]{{1.5}}));
+        System.out.println("deep eq " + Arrays.deepEquals(new Object[]{new Object[]{Integer.valueOf(1), Integer.valueOf(2)}}, new Object[]{new Object[]{Integer.valueOf(1), Integer.valueOf(2)}}) + " " + Arrays.deepEquals(new Object[]{new Object[]{"a"}}, new Object[]{new Object[]{"b"}}) + " " + Arrays.deepEquals(new int[][]{{1, 2}}, new int[][]{{1, 2}}) + " " + Arrays.deepEquals(new int[][]{{1, 2}}, new int[][]{{1, 3}}));
+        System.out.println("deep str " + Arrays.deepToString(new Object[]{new Object[]{"y"}, "x"}) + " " + Arrays.deepToString(new int[][]{{1, 2}, {3}}));
+        System.out.println("asList " + Arrays.asList("a", "b").size() + " " + Arrays.asList(new Integer[]{Integer.valueOf(1), Integer.valueOf(2)}).get(1));
+        System.out.println("asList set " + Arrays.asList("a", "b").set(1, "c"));
+    }
+}
