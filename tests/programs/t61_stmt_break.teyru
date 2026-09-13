@@ -1,0 +1,75 @@
+// A break anywhere in a case body, including inside a block or an if, leaves
+// the switch: the case bodies are a break level of their own, above the loop
+// that encloses the switch.
+class Main {
+  public static void main(String[] args) {
+    for (int i = 0 : i < 3 : i++) {
+      switch (i) {
+        case 0:
+          System.out.println("zero")
+          break
+        case 1: {
+          if (true) {
+            break
+          }
+          System.out.println("unreachable")
+        }
+        default:
+          System.out.println("other")
+      }
+      System.out.println("after " + i)
+    }
+    System.out.println("----")
+
+    // the same break inside a nested loop belongs to that loop, and the
+    // continue in case 2 still continues the for
+    int sum = 0
+    for (int i = 0 : i < 4 : i++) {
+      switch (i) {
+        case 1:
+          for (int j = 0 : j < 5 : j++) {
+            if (j == 2) {
+              break
+            }
+            sum += 100 + j
+          }
+          break
+        case 2:
+          continue
+        default:
+          sum += 1
+          break
+      }
+      sum += 1000
+    }
+    System.out.println("sum " + sum)
+    System.out.println("----")
+
+    // a labelled break reaches the statement it names
+    outer:
+    for (int i = 0 : i < 3 : i++) {
+      switch (i) {
+        case 1:
+          break outer
+        default:
+          System.out.println("default " + i)
+      }
+      System.out.println("after " + i)
+    }
+    System.out.println("done")
+    System.out.println("----")
+
+    // leaving the case abandons the try around it, so the finally runs
+    switch (1) {
+      case 1:
+        try {
+          break
+        } finally {
+          System.out.println("fin a")
+        }
+      default:
+        System.out.println("default a")
+    }
+    System.out.println("end a")
+  }
+}

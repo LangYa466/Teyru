@@ -73,6 +73,10 @@ func (e *Emitter) stmt(s ast.Stmt) {
 		e.clearPatterns()
 	case *ast.DoWhile:
 		labels := e.takeLabels()
+		// Java keeps the variable a pattern binds out of the body's scope, so
+		// the declaration stands before the loop, where the condition that
+		// follows `while` can still see it
+		e.hoistPatterns(v.Cond)
 		e.line("do {\n")
 		e.indent++
 		e.pushLoop("")
@@ -82,6 +86,7 @@ func (e *Emitter) stmt(s ast.Stmt) {
 		e.indent--
 		e.line("} while (%s);\n", e.cond(v.Cond))
 		e.brkLabels(labels)
+		e.clearPatterns()
 	case *ast.For:
 		labels := e.takeLabels()
 		e.line("{\n")
@@ -89,6 +94,9 @@ func (e *Emitter) stmt(s ast.Stmt) {
 		for _, init := range v.Init {
 			e.stmt(init)
 		}
+		// the update and the body both run after the condition, so a variable
+		// a pattern in the condition binds belongs to the whole loop
+		e.hoistPatterns(v.Cond)
 		cond := "1"
 		if v.Cond != nil {
 			cond = e.cond(v.Cond)
@@ -115,6 +123,7 @@ func (e *Emitter) stmt(s ast.Stmt) {
 		e.indent--
 		e.line("}\n")
 		e.brkLabels(labels)
+		e.clearPatterns()
 	case *ast.ForEach:
 		e.forEach(v)
 	case *ast.Return:
@@ -137,13 +146,16 @@ func (e *Emitter) stmt(s ast.Stmt) {
 			target = e.labelDepth[v.Label]
 		}
 		e.leaveFinallys(target)
-		if v.Label != "" {
+		switch {
+		case v.Label != "":
 			e.line("goto %s;\n", e.labelName(v.Label, true))
-		} else {
+		case e.breakTarget() != "":
+			e.line("goto %s;\n", e.breakTarget())
+		default:
 			e.line("break;\n")
 		}
 	case *ast.Continue:
-		target := len(e.loops) - 1
+		target := e.continueDepth()
 		if v.Label != "" {
 			target = e.labelDepth[v.Label]
 		}
@@ -276,10 +288,36 @@ func (e *Emitter) leaveFinallys(loopDepth int) {
 // innermost enclosing loop, or "" when C's continue statement already means
 // the right thing.
 func (e *Emitter) continueTarget() string {
-	if len(e.loops) == 0 {
+	i := e.continueDepth()
+	if i < 0 {
 		return ""
 	}
-	return e.loops[len(e.loops)-1]
+	return e.loops[i]
+}
+
+// continueDepth returns the position in the loop stack of the innermost loop an
+// unlabelled continue can reach, or -1 when no loop encloses it. A switch case
+// body sits on the same stack but is not a loop: a continue never leaves the
+// switch it is in, so it keeps looking further out for its loop.
+func (e *Emitter) continueDepth() int {
+	for i := len(e.loops) - 1; i >= 0; i-- {
+		if !isCaseEnd(e.loops[i]) {
+			return i
+		}
+	}
+	return -1
+}
+
+// breakTarget returns the label an unlabelled break must jump to, or "" when
+// C's break statement already leaves the innermost breakable statement. The top
+// of the loop stack is that statement: a case body pushes the label that ends
+// its switch, and a C break would leave the loop around the switch instead,
+// while a loop pushes its continue target, which C's break already handles.
+func (e *Emitter) breakTarget() string {
+	if n := len(e.loops); n > 0 && isCaseEnd(e.loops[n-1]) {
+		return e.loops[n-1]
+	}
+	return ""
 }
 
 func (e *Emitter) pushLoop(target string) { e.loops = append(e.loops, target) }
@@ -527,18 +565,23 @@ func (e *Emitter) tryStmt(v *ast.Try) {
 func (e *Emitter) tryWithResources(v *ast.Try) {
 	e.line("{\n")
 	e.indent++
-	for _, r := range v.Resources {
-		e.stmt(r)
+	// a resource written as an expression is evaluated once, into a temporary
+	// the close calls read back: re-evaluating it at every exit would run its
+	// side effects again and could close a different object than it opened
+	names := make([]string, len(v.Resources))
+	for i, r := range v.Resources {
+		switch t := r.(type) {
+		case *ast.LocalVar:
+			e.stmt(r)
+			names[i] = e.localName(t.Vars[0].Sym)
+		case *ast.ExprStmt:
+			names[i] = e.tmpName()
+			e.line("tyobj* %s = (tyobj*)%s;\n", names[i], e.expr(t.X))
+		}
 	}
 	closeFn := func() {
 		for i := len(v.Resources) - 1; i >= 0; i-- {
-			var name string
-			switch r := v.Resources[i].(type) {
-			case *ast.LocalVar:
-				name = e.localName(r.Vars[0].Sym)
-			case *ast.ExprStmt:
-				name = e.tmpRef(e.expr(r.X))
-			}
+			name := names[i]
 			if name != "" {
 				e.line("if (%s) ((void(*)(void*))ty_itab((tyobj*)%s, %d))((tyobj*)%s);\n",
 					name, name, e.selectorOf(e.prog.Builtins.AutoCloseable, "close"), name)
@@ -587,7 +630,7 @@ func (e *Emitter) emitTryCore(v *ast.Try, closeFn func()) {
 		e.line("tyobj* _ex = %s.ex;\n", c)
 		e.line("ty_cur_catch = %s.prev;\n", c)
 		first := true
-		for i, cat := range v.Catches {
+		for _, cat := range v.Catches {
 			cond := e.catchCond(cat)
 			if first {
 				e.line("if (%s) {\n", cond)
@@ -600,7 +643,6 @@ func (e *Emitter) emitTryCore(v *ast.Try, closeFn func()) {
 			e.emitBlockInner(cat.Body)
 			e.indent--
 			e.line("}\n")
-			_ = i
 		}
 		e.line("else { ty_cur_catch = %s.prev; ty_throw(_ex); }\n", c)
 		e.indent--
@@ -638,6 +680,18 @@ func (e *Emitter) catchCond(cat *ast.Catch) string {
 }
 
 // ---------------------------------------------------------------- switch
+
+// caseEndPrefix starts the label every switch case body breaks out to. The loop
+// stack carries those labels as well, so the prefix is what tells them apart
+// from the entries of real loops, which are "" or a temporary such as _t12.
+const caseEndPrefix = "_end"
+
+// caseEndLabel is the C label that ends the switch with the given id.
+func caseEndLabel(id int) string { return fmt.Sprintf("%s%d", caseEndPrefix, id) }
+
+// isCaseEnd reports whether a loop stack entry is the end of a switch case body
+// rather than a loop.
+func isCaseEnd(t string) bool { return strings.HasPrefix(t, caseEndPrefix) }
 
 // hoistPatterns declares the variables bound by `instanceof` patterns that
 // appear in a controlling expression, so the condition can refer to them.
@@ -880,6 +934,12 @@ func (e *Emitter) switchStmt(s *ast.Switch, resultTmp string) {
 		}
 	}
 	e.line("default: goto _cd%d;\n}\n", id)
+	// A break anywhere in a case body leaves the switch, so the body is a level
+	// of its own on the loop stack: without it the break would leave the loop
+	// around the switch, and the finally actions of a try inside the case body
+	// would not run. A nested loop pushes its own entry above, which restores
+	// the loop meaning of a break inside it.
+	e.pushLoop(caseEndLabel(id))
 	for i, cs := range s.Cases {
 		if isDefaultCase(cs) {
 			continue
@@ -897,6 +957,7 @@ func (e *Emitter) switchStmt(s *ast.Switch, resultTmp string) {
 		}
 	}
 	e.indent--
+	e.popLoop()
 	e.line("_end%d: ;\n", id)
 	e.indent--
 	e.line("}\n")
@@ -947,6 +1008,8 @@ func (e *Emitter) switchChain(s *ast.Switch, resultTmp string, id int) {
 		e.line("case %d: goto _c%d_%d;\n", i, id, i)
 	}
 	e.line("default: goto _cd%d;\n}\n", id)
+	// see switchStmt: the case bodies are a break level of their own
+	e.pushLoop(caseEndLabel(id))
 	for i, cs := range s.Cases {
 		if isDefaultCase(cs) {
 			continue
@@ -966,6 +1029,7 @@ func (e *Emitter) switchChain(s *ast.Switch, resultTmp string, id int) {
 		}
 	}
 	e.indent--
+	e.popLoop()
 	e.line("_end%d: ;\n", id)
 	e.indent--
 	e.line("}\n")
@@ -1104,10 +1168,6 @@ func (e *Emitter) switchCaseBody(cs *ast.Case, resultTmp string, id int) {
 			e.line("goto _end%d;\n", id)
 			continue
 		}
-		if _, isBreak := st.(*ast.Break); isBreak {
-			e.line("goto _end%d;\n", id)
-			continue
-		}
 		if b, ok := st.(*ast.Block); ok && resultTmp != "" {
 			e.emitYieldBlock(b, resultTmp, id)
 			continue
@@ -1127,5 +1187,3 @@ func (e *Emitter) emitYieldBlock(b *ast.Block, resultTmp string, id int) {
 		e.stmt(st)
 	}
 }
-
-var _ = ast.ModPublic
