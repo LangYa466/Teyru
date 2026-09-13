@@ -1,0 +1,58 @@
+{
+  "name": "teyru",
+  "displayName": "Teyru",
+  "description": "Teyru language support: TextMate syntax highlighting and snippets for .teyru source files.",
+  "version": "0.1.0",
+  "publisher": "LangYa466",
+  "license": "GPL-2.0-only",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "teyru",
+    "native",
+    "compiled"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LangYa466/Teyru"
+  },
+  "bugs": {
+    "url": "https://github.com/LangYa466/Teyru/issues"
+  },
+  "homepage": "https://github.com/LangYa466/Teyru",
+  "contributes": {
+    "languages": [
+      {
+        "id": "teyru",
+        "aliases": [
+          "Teyru",
+          "teyru"
+        ],
+        "extensions": [
+          ".teyru"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "teyru",
+        "scopeName": "source.teyru",
+        "path": "./syntaxes/teyru.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "teyru",
+        "path": "./snippets/teyru.json"
+      }
+    ]
+  },
+  "scripts": {
+    "check": "node tools/check-grammar.mjs"
+  }
+}

@@ -1,0 +1,822 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Teyru",
+  "scopeName": "source.teyru",
+  "fileTypes": [
+    ".teyru"
+  ],
+  "patterns": [
+    {
+      "include": "#body"
+    }
+  ],
+  "repository": {
+    "body": {
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#text-block"
+        },
+        {
+          "include": "#string-double"
+        },
+        {
+          "include": "#string-single"
+        },
+        {
+          "include": "#number-hex"
+        },
+        {
+          "include": "#number-binary"
+        },
+        {
+          "include": "#number-octal"
+        },
+        {
+          "include": "#number-float"
+        },
+        {
+          "include": "#number-exponent"
+        },
+        {
+          "include": "#number-integer"
+        },
+        {
+          "include": "#annotation"
+        },
+        {
+          "include": "#accessor-block"
+        },
+        {
+          "include": "#for-header"
+        },
+        {
+          "include": "#enum-separator"
+        },
+        {
+          "include": "#namespace-module"
+        },
+        {
+          "include": "#namespace-package"
+        },
+        {
+          "include": "#namespace-import"
+        },
+        {
+          "include": "#keyword-lexer-literal"
+        },
+        {
+          "include": "#keyword-lexer-control"
+        },
+        {
+          "include": "#keyword-lexer-storage"
+        },
+        {
+          "include": "#keyword-lexer-type"
+        },
+        {
+          "include": "#keyword-lexer-declaration"
+        },
+        {
+          "include": "#keyword-lexer-variable"
+        },
+        {
+          "include": "#keyword-contextual-record"
+        },
+        {
+          "include": "#keyword-contextual-sealed"
+        },
+        {
+          "include": "#keyword-contextual-when"
+        },
+        {
+          "include": "#keyword-contextual-yield"
+        },
+        {
+          "include": "#keyword-contextual-var"
+        },
+        {
+          "include": "#keyword-contextual-underscore"
+        },
+        {
+          "include": "#constant-upper"
+        },
+        {
+          "include": "#type-name"
+        },
+        {
+          "include": "#function-name"
+        },
+        {
+          "include": "#property-field"
+        },
+        {
+          "include": "#property-value"
+        },
+        {
+          "include": "#identifier"
+        },
+        {
+          "include": "#generic-begin"
+        },
+        {
+          "include": "#generic-end"
+        },
+        {
+          "include": "#operator-arrow"
+        },
+        {
+          "include": "#operator-method-reference"
+        },
+        {
+          "include": "#operator-varargs"
+        },
+        {
+          "include": "#operator-increment"
+        },
+        {
+          "include": "#operator-shift-assignment"
+        },
+        {
+          "include": "#operator-comparison"
+        },
+        {
+          "include": "#operator-logical"
+        },
+        {
+          "include": "#operator-compound-assignment"
+        },
+        {
+          "include": "#operator-shift"
+        },
+        {
+          "include": "#operator-arithmetic"
+        },
+        {
+          "include": "#operator-bitwise"
+        },
+        {
+          "include": "#operator-assignment"
+        },
+        {
+          "include": "#operator-comparison-single"
+        },
+        {
+          "include": "#operator-logical-single"
+        },
+        {
+          "include": "#operator-ternary"
+        },
+        {
+          "include": "#punctuation-comma"
+        },
+        {
+          "include": "#punctuation-dot"
+        },
+        {
+          "include": "#punctuation-semicolon"
+        },
+        {
+          "include": "#braces"
+        },
+        {
+          "include": "#parens"
+        },
+        {
+          "include": "#brackets"
+        }
+      ]
+    },
+    "comments": {
+      "patterns": [
+        {
+          "include": "#comment-block-documentation"
+        },
+        {
+          "include": "#comment-block"
+        },
+        {
+          "include": "#comment-line"
+        }
+      ]
+    },
+    "comment-line": {
+      "match": "//.*$",
+      "name": "comment.line.double-slash.teyru"
+    },
+    "comment-block-documentation": {
+      "name": "comment.block.documentation.teyru",
+      "begin": "/\\*\\*(?!/)",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.comment.begin.teyru"
+        }
+      },
+      "end": "\\*/",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.comment.end.teyru"
+        }
+      }
+    },
+    "comment-block": {
+      "name": "comment.block.teyru",
+      "begin": "/\\*",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.comment.begin.teyru"
+        }
+      },
+      "end": "\\*/",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.comment.end.teyru"
+        }
+      }
+    },
+    "text-block": {
+      "name": "string.quoted.triple.teyru",
+      "begin": "\"\"\"[ \\t]*$",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.begin.teyru"
+        }
+      },
+      "end": "(?<!\\\\)\"\"\"",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.end.teyru"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#string-escape"
+        }
+      ]
+    },
+    "string-escape": {
+      "patterns": [
+        {
+          "match": "\\\\$",
+          "name": "constant.character.escape.line-continuation.teyru"
+        },
+        {
+          "match": "\\\\(?:[ntrbfs'\"\\\\]|u+[0-9a-fA-F]{4}|[0-7]{1,3})",
+          "name": "constant.character.escape.teyru"
+        },
+        {
+          "match": "\\\\.",
+          "name": "constant.character.escape.teyru"
+        }
+      ]
+    },
+    "string-double": {
+      "name": "string.quoted.double.teyru",
+      "begin": "\"",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.begin.teyru"
+        }
+      },
+      "end": "\"",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.end.teyru"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#string-escape"
+        }
+      ]
+    },
+    "string-single": {
+      "name": "string.quoted.single.teyru",
+      "begin": "'",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.character.begin.teyru"
+        }
+      },
+      "end": "'",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.character.end.teyru"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#string-escape"
+        }
+      ]
+    },
+    "number-hex": {
+      "match": "\\b0[xX][0-9a-fA-F_]+[lL]?",
+      "name": "constant.numeric.hex.teyru"
+    },
+    "number-binary": {
+      "match": "\\b0[bB][01_]+[lL]?",
+      "name": "constant.numeric.binary.teyru"
+    },
+    "number-octal": {
+      "match": "\\b0[0-7_]+[lL]?",
+      "name": "constant.numeric.octal.teyru"
+    },
+    "number-float": {
+      "match": "\\b[0-9][0-9_]*\\.[0-9_]*(?:[eE][+-]?[0-9_]+)?[fFdD]?",
+      "name": "constant.numeric.float.teyru"
+    },
+    "number-exponent": {
+      "match": "\\b[0-9][0-9_]*[eE][+-]?[0-9_]+[fFdD]?",
+      "name": "constant.numeric.float.teyru"
+    },
+    "number-integer": {
+      "match": "\\b[0-9][0-9_]*[lL]?",
+      "name": "constant.numeric.integer.teyru"
+    },
+    "annotation": {
+      "match": "(@)([A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)",
+      "captures": {
+        "1": {
+          "name": "punctuation.definition.annotation.teyru"
+        },
+        "2": {
+          "name": "entity.name.type.annotation.teyru"
+        }
+      }
+    },
+    "enum-separator": {
+      "match": "^[ \\t]*(:)[ \\t]*$",
+      "captures": {
+        "1": {
+          "name": "punctuation.separator.enum-members.teyru"
+        }
+      }
+    },
+    "namespace-module": {
+      "match": "(?<=\\bimport[ \\t]+)(module)\\b",
+      "captures": {
+        "1": {
+          "name": "keyword.other.module.teyru"
+        }
+      }
+    },
+    "namespace-package": {
+      "match": "(?<=\\bpackage[ \\t]+)[A-Za-z_$][A-Za-z0-9_$.]*",
+      "name": "entity.name.namespace.teyru"
+    },
+    "namespace-import": {
+      "match": "(?<=\\bimport[ \\t]+(?:static[ \\t]+)?)[A-Za-z_$][A-Za-z0-9_$.]*(?:\\.\\*)?",
+      "name": "entity.name.namespace.teyru"
+    },
+    "for-header": {
+      "name": "meta.control.for.teyru",
+      "begin": "(\\bfor\\b)([ \\t]*)(\\()",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.control.for.teyru"
+        },
+        "3": {
+          "name": "punctuation.section.parens.begin.teyru"
+        }
+      },
+      "end": "(\\))(?=[ \\t]*(?:\\{|$))",
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.section.parens.end.teyru"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#text-block"
+        },
+        {
+          "include": "#string-double"
+        },
+        {
+          "include": "#string-single"
+        },
+        {
+          "include": "#number-hex"
+        },
+        {
+          "include": "#number-binary"
+        },
+        {
+          "include": "#number-octal"
+        },
+        {
+          "include": "#number-float"
+        },
+        {
+          "include": "#number-exponent"
+        },
+        {
+          "include": "#number-integer"
+        },
+        {
+          "match": "[ \\t]*:[ \\t]*",
+          "name": "keyword.operator.for-separator.teyru"
+        },
+        {
+          "include": "#parens"
+        },
+        {
+          "include": "#brackets"
+        },
+        {
+          "include": "#braces"
+        },
+        {
+          "include": "#keyword-lexer-literal"
+        },
+        {
+          "include": "#keyword-lexer-control"
+        },
+        {
+          "include": "#keyword-lexer-storage"
+        },
+        {
+          "include": "#keyword-lexer-type"
+        },
+        {
+          "include": "#keyword-lexer-declaration"
+        },
+        {
+          "include": "#keyword-lexer-variable"
+        },
+        {
+          "include": "#keyword-contextual-var"
+        },
+        {
+          "include": "#keyword-contextual-underscore"
+        },
+        {
+          "include": "#constant-upper"
+        },
+        {
+          "include": "#type-name"
+        },
+        {
+          "include": "#function-name"
+        },
+        {
+          "include": "#identifier"
+        },
+        {
+          "include": "#generic-begin"
+        },
+        {
+          "include": "#generic-end"
+        },
+        {
+          "include": "#operator-arrow"
+        },
+        {
+          "include": "#operator-method-reference"
+        },
+        {
+          "include": "#operator-increment"
+        },
+        {
+          "include": "#operator-shift-assignment"
+        },
+        {
+          "include": "#operator-comparison"
+        },
+        {
+          "include": "#operator-logical"
+        },
+        {
+          "include": "#operator-compound-assignment"
+        },
+        {
+          "include": "#operator-shift"
+        },
+        {
+          "include": "#operator-arithmetic"
+        },
+        {
+          "include": "#operator-bitwise"
+        },
+        {
+          "include": "#operator-assignment"
+        },
+        {
+          "include": "#operator-comparison-single"
+        },
+        {
+          "include": "#operator-logical-single"
+        },
+        {
+          "include": "#operator-ternary"
+        },
+        {
+          "include": "#punctuation-comma"
+        },
+        {
+          "include": "#punctuation-dot"
+        }
+      ]
+    },
+    "accessor-block": {
+      "name": "meta.accessor-block.teyru",
+      "begin": "^[ \\t]*(?:(?:public|private|protected|static|final|abstract|native|synchronized|volatile|transient|strictfp|default)[ \\t]+|@[A-Za-z_][A-Za-z0-9_.]*(?:\\([^)\\n]*\\))?[ \\t]*)*(get|set)[ \\t]*(\\{)",
+      "beginCaptures": {
+        "1": {
+          "name": "storage.type.accessor.teyru"
+        },
+        "2": {
+          "name": "punctuation.section.block.begin.teyru"
+        }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.block.end.teyru"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#property-body"
+        }
+      ]
+    },
+    "property-body": {
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#text-block"
+        },
+        {
+          "include": "#string-double"
+        },
+        {
+          "include": "#string-single"
+        },
+        {
+          "include": "#number-hex"
+        },
+        {
+          "include": "#number-binary"
+        },
+        {
+          "include": "#number-octal"
+        },
+        {
+          "include": "#number-float"
+        },
+        {
+          "include": "#number-exponent"
+        },
+        {
+          "include": "#number-integer"
+        },
+        {
+          "include": "#accessor-block"
+        },
+        {
+          "include": "#property-field"
+        },
+        {
+          "include": "#property-value"
+        },
+        {
+          "include": "#body"
+        }
+      ]
+    },
+    "property-field": {
+      "match": "(?<![A-Za-z0-9_$])(field)(?![ \\t]*[.(])",
+      "captures": {
+        "1": {
+          "name": "variable.language.field.teyru"
+        }
+      }
+    },
+    "property-value": {
+      "match": "(?<![A-Za-z0-9_$])(value)(?![ \\t]*[.(])",
+      "captures": {
+        "1": {
+          "name": "variable.language.value.teyru"
+        }
+      }
+    },
+    "keyword-lexer-literal": {
+      "match": "\\b(?:false|null|true)\\b",
+      "name": "constant.language.teyru"
+    },
+    "keyword-lexer-control": {
+      "match": "\\b(?:assert|break|case|catch|continue|default|do|else|finally|for|if|return|switch|throw|try|while)\\b",
+      "name": "keyword.control.teyru"
+    },
+    "keyword-lexer-storage": {
+      "match": "\\b(?:abstract|const|final|goto|native|private|protected|public|static|strictfp|synchronized|transient|volatile)\\b",
+      "name": "storage.modifier.teyru"
+    },
+    "keyword-lexer-type": {
+      "match": "\\b(?:boolean|byte|char|double|float|int|long|short|void)\\b",
+      "name": "storage.type.primitive.teyru"
+    },
+    "keyword-lexer-declaration": {
+      "match": "\\b(?:class|enum|extends|implements|import|instanceof|interface|new|package|throws)\\b",
+      "name": "keyword.declaration.teyru"
+    },
+    "keyword-lexer-variable": {
+      "match": "\\b(?:super|this)\\b",
+      "name": "variable.language.teyru"
+    },
+    "keyword-contextual-record": {
+      "match": "\\brecord\\b",
+      "name": "keyword.declaration.record.teyru"
+    },
+    "keyword-contextual-sealed": {
+      "match": "\\b(?:non-sealed|permits|sealed)\\b",
+      "name": "storage.modifier.sealed.teyru"
+    },
+    "keyword-contextual-when": {
+      "match": "\\bwhen\\b(?![ \\t]*\\()",
+      "name": "keyword.control.when.teyru"
+    },
+    "keyword-contextual-yield": {
+      "match": "\\byield\\b(?![ \\t]*(?:[=(\\[]|\\.|\\+\\+|--))",
+      "name": "keyword.control.yield.teyru"
+    },
+    "keyword-contextual-var": {
+      "match": "\\b(?:val|var)\\b(?=[ \\t]+[A-Za-z_$])",
+      "name": "storage.type.inferred.teyru"
+    },
+    "keyword-contextual-underscore": {
+      "match": "\\b_\\b",
+      "name": "variable.language.wildcard.teyru"
+    },
+    "constant-upper": {
+      "match": "\\b[A-Z][A-Z0-9_]{1,}\\b",
+      "name": "constant.other.teyru"
+    },
+    "type-name": {
+      "match": "\\b[A-Z][A-Za-z0-9_$]*\\b",
+      "name": "entity.name.type.teyru"
+    },
+    "function-name": {
+      "match": "[A-Za-z_$][A-Za-z0-9_$]*(?=[ \\t]*\\()",
+      "name": "entity.name.function.teyru"
+    },
+    "identifier": {
+      "match": "[A-Za-z_$][A-Za-z0-9_$]*",
+      "name": "variable.other.teyru"
+    },
+    "generic-begin": {
+      "match": "(?<=[A-Za-z0-9_$])(<)(?=[?A-Z_])",
+      "captures": {
+        "1": {
+          "name": "punctuation.definition.generic.begin.teyru"
+        }
+      }
+    },
+    "generic-end": {
+      "match": "(?<=(?:\\b[A-Z][A-Za-z0-9_$]*|>))(>)(?![=>])",
+      "captures": {
+        "1": {
+          "name": "punctuation.definition.generic.end.teyru"
+        }
+      }
+    },
+    "operator-arrow": {
+      "match": "->",
+      "name": "keyword.operator.arrow.teyru"
+    },
+    "operator-method-reference": {
+      "match": "::",
+      "name": "punctuation.separator.method.teyru"
+    },
+    "operator-varargs": {
+      "match": "\\.\\.\\.",
+      "name": "punctuation.definition.parameters.varargs.teyru"
+    },
+    "operator-increment": {
+      "match": "\\+\\+|--",
+      "name": "keyword.operator.increment.teyru"
+    },
+    "operator-shift-assignment": {
+      "match": ">>>=|>>=|<<=",
+      "name": "keyword.operator.assignment.teyru"
+    },
+    "operator-comparison": {
+      "match": "==|!=|<=|>=",
+      "name": "keyword.operator.comparison.teyru"
+    },
+    "operator-logical": {
+      "match": "&&|\\|\\|",
+      "name": "keyword.operator.logical.teyru"
+    },
+    "operator-compound-assignment": {
+      "match": "\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=",
+      "name": "keyword.operator.assignment.teyru"
+    },
+    "operator-shift": {
+      "match": ">>>|>>|<<",
+      "name": "keyword.operator.bitwise.teyru"
+    },
+    "operator-arithmetic": {
+      "match": "[+\\-*/%]",
+      "name": "keyword.operator.arithmetic.teyru"
+    },
+    "operator-bitwise": {
+      "match": "[&|^~]",
+      "name": "keyword.operator.bitwise.teyru"
+    },
+    "operator-assignment": {
+      "match": "=",
+      "name": "keyword.operator.assignment.teyru"
+    },
+    "operator-comparison-single": {
+      "match": "[<>]",
+      "name": "keyword.operator.comparison.teyru"
+    },
+    "operator-logical-single": {
+      "match": "!",
+      "name": "keyword.operator.logical.teyru"
+    },
+    "operator-ternary": {
+      "match": "[?:]",
+      "name": "keyword.operator.ternary.teyru"
+    },
+    "punctuation-comma": {
+      "match": ",",
+      "name": "punctuation.separator.comma.teyru"
+    },
+    "punctuation-dot": {
+      "match": "\\.",
+      "name": "punctuation.separator.dot.teyru"
+    },
+    "punctuation-semicolon": {
+      "match": ";",
+      "name": "invalid.illegal.semicolon.teyru"
+    },
+    "braces": {
+      "begin": "\\{",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.section.block.begin.teyru"
+        }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.block.end.teyru"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#body"
+        }
+      ]
+    },
+    "parens": {
+      "begin": "\\(",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.section.parens.begin.teyru"
+        }
+      },
+      "end": "\\)",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.parens.end.teyru"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#body"
+        }
+      ]
+    },
+    "brackets": {
+      "begin": "\\[",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.section.brackets.begin.teyru"
+        }
+      },
+      "end": "\\]",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.brackets.end.teyru"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#body"
+        }
+      ]
+    }
+  }
+}
