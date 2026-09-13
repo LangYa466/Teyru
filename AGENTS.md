@@ -147,6 +147,8 @@ source → lexer → parser → ast → sema → codegen
 | `README.zh-CN.md` / `README.en.md` / `README.ja.md` | 對應語言版本 | 與 `README.md` 同步 |
 | `docs/language.md` | 完整語言參考 | 語法或語意改變時 |
 | `docs/diagnostics.md` | 每個診斷碼的說明 | 新增／修改診斷碼時 |
+| `docs/lombok.md` | Lombok 相容層：支援狀態、產生的成員、與 Lombok 的差異 | 新增或調整標註支援時 |
+| `docs/native.md` | 原生互通：以 C 實作 native 方法、符號命名與型別對應 | native 介面或 CLI 旗標改變時 |
 | `docs/architecture.md` | 編譯流程與執行期模型 | 架構改變時 |
 | `AGENTS.md` | 本檔 | 流程改變時 |
 

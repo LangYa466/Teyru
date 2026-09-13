@@ -1,7 +1,8 @@
 # Teyru 語言參考
 
-本文件描述 Teyru 0.2 的語法與語意。文件以實作為準：這裡寫的每一項都在
-`tests/programs/` 有對應的測試，`go test ./...` 會逐項驗證。
+本文件描述 Teyru 0.2 的語法與語意。文件以實作為準：這裡寫的每一項語言特性都在
+`tests/programs/` 有對應的測試，`go test ./...` 會逐項驗證；標準程式庫的 API 則只
+涵蓋一部分（例如 `Map.putAll`、`Map.keys` 還沒有測試用到），測試涵蓋範圍仍不完整。
 
 - [1. 原始檔與詞法](#1-原始檔與詞法)
 - [2. 換行與敘述終止](#2-換行與敘述終止)
@@ -428,9 +429,10 @@ try {
 | 介面 | `Cloneable`、`Comparable<T>`、`AutoCloseable`、`Iterable<T>`、`Iterator<T>` |
 | `Enum<E>` | `ordinal`、`name`、`compareTo`、`toString`、`hashCode`、`equals` |
 | `Record` | 所有 record 的根 |
-| `List<T>` | `size`、`get`、`add`、`isEmpty`、`contains`、`indexOf`；繼承 `Iterable<T>` |
-| `ArrayList<T>` | `List<T>` 的實作；可加倍成長，另有 `set`、`removeAt`、`clear`、`toString` |
-| `HashMap<K,V>` | `put`、`get`、`containsKey`、`remove`、`size`、`isEmpty`、`toString` |
+| `List<T>` | `size`、`get`、`add`、`addAll`、`isEmpty`、`contains`、`indexOf`；繼承 `Iterable<T>` |
+| `ArrayList<T>` | `List<T>` 的實作；可加倍成長，另有 `set`、`removeAt`、`clear`、`addAll`、`toString` |
+| `Map<K,V>` | `get`、`put`、`putAll`、`containsKey`、`remove`、`size`、`isEmpty`、`keys` |
+| `HashMap<K,V>` | `Map<K,V>` 的實作；另有 `toString` |
 | `Logger` | `trace`／`debug`／`info`／`warn`／`error` |
 
 集合以 Teyru 撰寫，因此 `for` 迴圈直接支援：
@@ -472,4 +474,4 @@ for (String n : names) {
 - 泛型建構子的顯式型別引數 `new <T>Foo(...)`
 - 文字區塊的縮排細則（目前實作最小縮排去除）
 - 註解的執行期保留與讀取（`java.lang.annotation` 不存在）
-- 模組系統的語意（`import module` 與 `module-info` 只被解析）
+- 模組系統的語意（`import module X` 會被剖析後忽略，執行期沒有模組系統；`module-info` 不支援）

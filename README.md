@@ -6,7 +6,7 @@
 
 Teyru 的語法對 Java 開發者高度熟悉（類別、介面、泛型、lambda、例外、record、enum、annotation），
 但拿掉了分號、補上原生 property，並且用**原生機器碼**執行：編譯器把整個程式降成 C，
-再交給 clang/LLVM（或 gcc）編成執行檔。執行期只有約兩千行的 C，裡頭有自己的垃圾回收器
+再交給 clang/LLVM（或 gcc）編成執行檔。執行期只有約 1500 行的 C，裡頭有自己的垃圾回收器
 （conservative mark-and-sweep）、字串、陣列與例外實作，沒有任何虛擬機。
 
 ```
@@ -47,13 +47,13 @@ Teyru 原始碼 (.teyru)
 | 指標 | Teyru（原生） | Java（HotSpot） | 差距 |
 |---|---|---|---|
 | 啟動 100 次總時間 | **0.068 s**（0.68 ms/次） | 1.97 s（19.8 ms/次） | **約 29 倍快** |
-| 執行檔大小 | **33 KB** | JDK 執行期約 200 MB | 約 6000 倍小 |
+| 執行檔大小 | **35 KB** | JDK 執行期約 200 MB | 約 5900 倍小 |
 | 尖峰記憶體（hello） | **2.1 MB** | 50.2 MB | **約 24 倍省** |
-| `bench_fib` 遞迴 | **0.0060 s** | 0.0259 s | **4.3 倍快** |
-| `bench_loop` 迴圈與整數運算 | **0.0208 s** | 0.0430 s | **2.1 倍快** |
-| `bench_oop` 物件與虛擬呼叫 | **0.0044 s** | 0.0261 s | **5.9 倍快** |
-| `bench_string` 字串處理 | **0.0096 s** | 0.0542 s | **5.7 倍快** |
-| `bench_alloc` 短命物件配置 | **0.0232 s** | 0.0288 s | **1.24 倍快** |
+| `bench_fib` 遞迴 | **0.0060 s** | 0.0264 s | **4.4 倍快** |
+| `bench_loop` 迴圈與整數運算 | **0.0209 s** | 0.0429 s | **2.1 倍快** |
+| `bench_oop` 物件與虛擬呼叫 | **0.0044 s** | 0.0253 s | **5.8 倍快** |
+| `bench_string` 字串處理 | **0.0093 s** | 0.0554 s | **6.0 倍快** |
+| `bench_alloc` 短命物件配置 | **0.0233 s** | 0.0308 s | **1.3 倍快** |
 
 **為什麼會快：**
 
@@ -74,13 +74,15 @@ Teyru 原始碼 (.teyru)
 **誠實的邊界。** 逃逸分析只涵蓋「不離開所在方法」的物件。會存進欄位、陣列、
 回傳或交給其他物件的物件仍然走堆積與標記清除式回收，而 HotSpot 有分代假設，
 所以在「物件長期存活、反覆回收」的負載上 JVM 仍可能勝出。上面的數字都含
-process 啟動，絕對值都很小；重現方式見 `sh scripts/bench.sh`。
+process 啟動，絕對值都很小；重現方式見 `sh scripts/bench.sh`，五支 benchmark 程式、
+啟動 100 次、執行檔大小與尖峰記憶體都由這支腳本量測（大小那一列對照的 JDK 執行期
+是量測機器上安裝的執行期，不由腳本量測）。
 
 ---
 
 ## 快速開始
 
-需要 **Go 1.24+** 與 **clang**（或 gcc）。
+需要 **Go 1.26+** 與 **clang**（或 gcc）。
 
 ```sh
 # 建置編譯器
@@ -278,26 +280,6 @@ System.out.println(p)
 清除、`build()` 取得副本）、`@SuperBuilder`（涵蓋整條繼承鏈的欄位）與
 `@Builder.ObtainVia`。
 
-### Java 25 語法對照
-
-Teyru 以 Java SE 25 最終定案的語法為基準（不含預覽功能），保留 Java 語意，
-只拿掉分號並加上原生 property：
-
-| JEP | 功能 | 狀態 |
-|---|---|---|
-| 512 | 精簡原始檔、實例 `main`、隱式 `java.io.IO`（`println`／`print`／`readln`） | ✅ |
-| 511 | `import module java.base`（解析後忽略） | ✅ 解析 |
-| 513 | 彈性建構子本體（`super()` 前可有敘述） | ✅ |
-| 440 | Record 模式（含巢狀解構與 `instanceof` 版本） | ✅ |
-| 441 | switch 模式比對與 `when` 守衛 | ✅ |
-| 456 | 未命名變數與模式 `_` | ✅ |
-| 395 | record（含精簡建構子） | ✅ |
-| 394 | `instanceof` 型別模式 | ✅ |
-| 409 | sealed 類別 | ✅ 解析 |
-| 378 | 文字區塊 | ✅ |
-| 361 | switch 運算式 | ✅ |
-| 286 | `var` 區域變數推斷 | ✅ |
-
 ### 支援的語言特性
 
 | 類別 | 內容 |
@@ -320,7 +302,7 @@ Teyru 以 Java SE 25 最終定案的語法為基準（不含預覽功能），�
 `Object`、`String`、`StringBuilder`、`Math`、`System`、`PrintStream`、
 `Iterable`／`Iterator`、`Comparable`、`AutoCloseable`、`Cloneable`、`Enum`、`Record`、
 八種原生包裝類別（`Byte`／`Short`／`Integer`／`Long`／`Float`／`Double`／`Character`／`Boolean`）、
-集合（`List`／`ArrayList`／`HashMap`），以及 `Throwable` 家族（`Exception`、
+集合（`List`／`ArrayList`／`Map`／`HashMap`），以及 `Throwable` 家族（`Exception`、
 `RuntimeException`、`NullPointerException`、`ArrayIndexOutOfBoundsException`、
 `ArithmeticException`、`ClassCastException`、`IllegalArgumentException`、
 `IllegalStateException`、`IndexOutOfBoundsException`、`NoSuchElementException`、
@@ -350,6 +332,7 @@ teyru build --native impl.c program.teyru            # 一起編譯
 | 路徑 | 說明 |
 |---|---|
 | `cmd/teyru` | CLI 進入點（`build`／`run`／`emit`／`emit-llvm`／`version`） |
+| `internal/driver` | 編譯流程：串起前後端、呼叫 C 編譯器、處理 native 來源與輸出選項 |
 | `internal/source` | 檔案、位置換算、診斷容器 |
 | `internal/lexer` | 詞法分析；換行不產生 token，只在 token 上標記「前面有換行」 |
 | `internal/parser` | 遞迴下降剖析器，以顯著性與前綴完整性判斷敘述是否結束 |
@@ -360,6 +343,7 @@ teyru build --native impl.c program.teyru            # 一起編譯
 | `internal/runtime/src` | C 執行期：GC、字串、陣列、例外、boxing、Math／System／StringBuilder |
 | `lib` | 以 Teyru 撰寫的標準程式庫 |
 | `tests/programs` | 端到端測試程式與期望輸出（`go test` 會逐一編譯並比對） |
+| `tests/native` | native 方法互通測試：Teyru 宣告 + C 實作 + 期望輸出（`TestNative`） |
 | `examples` | 範例程式與 JVM 對照的 benchmark（`bench_*.teyru` 與 `.java`） |
 | `scripts` | 開發腳本：`bench.sh` 效能量測、`pre-commit` 掛勾 |
 | `docs` | 語言參考、診斷碼、架構 |

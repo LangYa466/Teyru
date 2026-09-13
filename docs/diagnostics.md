@@ -16,7 +16,8 @@
 hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be converted to int
 ```
 
-`TY-SYN-0001` 到 `TY-SYN-0010` 由詞法分析器產生，`TY-SYN-0100` 之後由剖析器產生。
+`TY-SYN-0001`、`0002`、`0004`–`0010` 由詞法分析器產生（`TY-SYN-0003` 例外：它是剖析器
+在敘述結尾與 `throw` 換行時發出的），`TY-SYN-0100` 之後也由剖析器產生。
 
 ---
 
@@ -150,7 +151,7 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 | TY-TYP-0074 | `constructor call must be the first statement of a constructor` | `this(...)`／`super(...)` 必須是第一句。 |
 | TY-TYP-0075 | `recursive constructor invocation` | 建構子遞迴呼叫自己。 |
 
-### 方法解析與 lambda（0076–0086）
+### 方法解析、lambda 與 pattern（0076–0094）
 
 | 代碼 | 訊息 | 說明與修法 |
 |---|---|---|
@@ -165,6 +166,11 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 | TY-TYP-0084 | `lambda has %d parameters but %s requires %d` | lambda 參數數量不符。 |
 | TY-TYP-0085 | `cannot construct %s` | 建構子參照的目標不能建構。 |
 | TY-TYP-0086 | `cannot resolve static import %s` | 靜態 import 找不到對應成員。 |
+| TY-TYP-0087 | `record pattern requires a record type, found %s` | 解構 pattern 的左邊不是 record 型別（`case Point(int x, int y)` 的 `Point` 必須是 record）。 |
+| TY-TYP-0088 | `record pattern for %s needs %d components, found %d` | 解構的綁定數量與 record 成員數不符；巢狀解構也要逐一對上。 |
+| TY-TYP-0089 | `'case null' requires a reference selector` | `case null` 只能用在參考型別的 switch 選擇子上，原生型別請改用 `default`。 |
+| TY-TYP-0090 | `%s does not name a super interface` | `Interface.super.method()` 的 `Interface` 不存在或不是介面。 |
+| TY-TYP-0091 | `%s is not a super interface of %s` | 限定的 `super` 只能指向自己（直接或間接）實作的介面。 |
 | TY-TYP-0092 | `a primitive pattern needs a name to bind the value to` | 原生型別 pattern 一定要綁定變數：`o instanceof int i`，不能只寫 `o instanceof int`。 |
 | TY-TYP-0093 | `boolean cannot be converted to %s` | `boolean` 只能和 `boolean` pattern 配對。 |
 | TY-TYP-0094 | `primitive pattern %s needs a boxed value, found %s` | 選擇子既不是參考型別也不是原生數值。 |
@@ -200,6 +206,8 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 |---|---|
 | `NullPointerException` | 對 `null` 取值、呼叫方法、取陣列長度 |
 | `ArrayIndexOutOfBoundsException` | 索引超出 `[0, length)` |
+| `IndexOutOfBoundsException` | `ArrayList.get`／`set`／`removeAt` 的索引超出 `[0, size)` |
+| `NoSuchElementException` | 已經沒有元素卻再呼叫 `Iterator.next()` |
 | `ArithmeticException` | 整數除以零或取餘數為零 |
 | `ClassCastException` | `cast` 或 `instanceof` 失敗的強制轉型 |
 | `NegativeArraySizeException` | 陣列長度為負 |

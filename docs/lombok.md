@@ -52,7 +52,7 @@ System.out.println(p)                  // Person(name=ada, age=36)
 | `@Cleanup` | ✅ 完整 | 展開為 try-with-resources，任何離開路徑都會 close |
 | `@SneakyThrows` | ✅ 完整 | 展開為 try/catch(Throwable) 後重拋 |
 | `@Synchronized` | ✅ 完整 | 方法本體包進 synchronized；靜態方法用產生的 `$lock` 欄位 |
-| `@Log` 家族 | ✅ 完整 | `@Log`／`@Slf4j`／`@Log4j`／`@Log4j2`／`@CommonsLog`／`@JBossLog`／`@Flogger`／`@XSlf4j` 都產生 `private static final Logger log`（見 §4） |
+| `@Log` 家族 | ✅ 完整 | `@Log`／`@Slf4j`／`@Log4j`／`@Log4j2`／`@CommonsLog`／`@JBossLog`／`@Flogger`／`@XSlf4j` 都產生 `private static final Logger log`（見 §5） |
 | `@ExtensionMethod` | ✅ 完整 | 找不到方法時改寫為 `Ext.method(receiver, ...)` |
 | `@FieldNameConstants` | ✅ 完整 | 產生巢狀 `Fields` 類別（含 `prefix`） |
 | `@Delegate` | ✅ 完整 | 為欄位型別的公開方法產生委派方法 |
@@ -70,7 +70,9 @@ System.out.println(p)                  // Person(name=ada, age=36)
 | `@CustomLog` | ❌ 不支援 | 需要 `lombok.config` 的 `lombok.log.custom.declaration`；Teyru 不讀設定檔，所以回報 `TY-INT-0006` 而不是默默不產生東西 |
 
 「完整」的定義：`tests/programs/t16`–`t19`、`t54` 有對應的測試，`go test ./...` 會驗證輸出；
-`t55_lombok_every.teyru` 在一支程式裡把上表每一個支援的註解各用一次，輸出逐行比對。
+`t55_lombok_every.teyru` 在一支程式裡把上表每一個 ✅ 的註解各用一次，輸出逐行比對。
+唯一的 ⚠️ 一列（`@onMethod_`／`@onParam_`／`@onConstructor_`）沒有被 `t55` 涵蓋，
+它只做到「剖析後忽略」。
 （寫 `t55` 時才發現 `@Builder.Default`、`@StandardException`、回傳值的 `@Synchronized`
 三個「文件說完成、實際沒測過」的 bug，已修。）
 
