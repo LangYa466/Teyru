@@ -1,0 +1,244 @@
+default 1,234,567.891
+default 12,345
+number  0.005
+integer 1,235
+percent 50%
+currency $1,234.50
+flags true false 2147483647 1 3 0
+tuned 1234.50
+tuned 12345.6789
+round 2.67 1.00 0.12 0.14 0.14
+float 0.01 0.10 2 4
+[0] => 12346 | -12346 | 0 | 0 | #0
+[#] => 12346 | -12346 | 0 | 0 | #
+[0.00] => 12345.68 | -12345.68 | 0.50 | 0.00 | #0.00
+[#.##] => 12345.68 | -12345.68 | 0.5 | 0 | #0.##
+[#,##0.###] => 12,345.678 | -12,345.678 | 0.5 | 0 | #,##0.###
+[#,##,##0] => 12,346 | -12,346 | 0 | 0 | #,##0
+[#,#0] => 1,23,46 | -1,23,46 | 0 | 0 | #,#0
+[0.] => 12346. | -12346. | 0. | 0. | #0.
+[#.0] => 12345.7 | -12345.7 | .5 | .0 | #.0
+[###.##] => 12345.68 | -12345.68 | 0.5 | 0 | #0.##
+[#.##] => 12345.68 | -12345.68 | 0.5 | 0 | #0.##
+[0%] => 1234568% | -1234568% | 50% | 0% | #0%
+[0.0%] => 1234567.8% | -1234567.8% | 50.0% | 0.0% | #0.0%
+[‰0] => ‰12345678 | -‰12345678 | ‰500 | ‰0 | ‰#0
+[0.00¤] => 12345.68$ | -12345.68$ | 0.50$ | 0.00$ | #0.00¤
+[¤#,##0.00] => $12,345.68 | -$12,345.68 | $0.50 | $0.00 | ¤#,##0.00
+[0.00E0] => 1.23E4 | -1.23E4 | 5.00E-1 | 0.00E0 | 0.00E0
+[#E0] => .1E5 | -.1E5 | .5E0 | E0 | #E0
+[#.0E0] => .12E5 | -.12E5 | .5E0 | .0E0 | #.0E0
+[00E0] => 12E3 | -12E3 | 50E-2 | 00E0 | 00E0
+[#,##0.0E0] => 1.2346E4 | -1.2346E4 | 5000E-4 | 0.0E0 | #,##0.0E0
+[0'x'] => 12346x | -12346x | 0x | 0x | #0x
+['x'0] => x12346 | -x12346 | x0 | x0 | x#0
+[0''0] => 12346' | -12346' | 00' | 00' | #00''
+[+0;-0] => +12346 | -12346 | +0 | +0 | +#0;-#0
+[0;(0)] => 12346 | (12346) | 0 | 0 | #0;(#0)
+[#,##0.00;(#,##0.00)] => 12,345.68 | (12,345.68) | 0.50 | 0.00 | #,##0.00;(#,##0.00)
+[0.###E0] => 1.235E4 | -1.235E4 | 5E-1 | 0E0 | 0.###E0
+E ##0.0E0 500E-3 1.0E-3 12.35E3 10E9 100E3
+E ###0.0E0 5000E-4 10E-4 1.2346E4 100E8 10E4
+E #,##,##0.0E0 500000E-6 1000E-6 12345.6E0 10000E6 99999.9E0
+E 00.0E0 50.0E-2 10.0E-4 12.3E3 10.0E9 10.0E4
+nogroup 12345.60
+minfrac 12,345.6000
+maxfrac 12,345.6 #,##0.0
+applied 12,345.7 #,##0.0
+symbols 0,.%‰#;-. ∞ NaN $ USD E
+eu 12.345,68 | #.##0,00 | ,
+eu2 #,##0.00 12.345,68
+eu3 12.345,68 #,##0.00
+BAD [#,] Malformed pattern "#,"
+BAD [#,##0,] Malformed pattern "#,##0,"
+BAD [0.#0] Unexpected '0' in pattern "0.#0"
+BAD [E0] => E#0
+BAD [#,#] => #,#
+P [#,##0.###] "1,234,567.891" -> 1234567.891 idx=13 err=-1
+P [#,##0.###] "12345" -> 12345 idx=5 err=-1
+P [0.0] "0.5" -> 0.5 idx=3 err=-1
+P [#,##0] "-1,234" -> -1234 idx=6 err=-1
+P [#,##0] "+5" -> null idx=0 err=0
+P [0.0] ".5" -> 0.5 idx=2 err=-1
+P [0.0] "12." -> 12 idx=3 err=-1
+P [0.0] "1e3" -> 1 idx=1 err=-1
+P [0.0] "abc" -> null idx=0 err=0
+P [#,##0] "1,23" -> 123 idx=4 err=-1
+P [0%] "5%" -> 0.05 idx=2 err=-1
+P [¤#,##0.00] "$12.50" -> 12.5 idx=6 err=-1
+P [#,##0] "12xyz" -> 12 idx=2 err=-1
+int [1234] idx=5
+parse ex Unparseable number: "abc" off=0
+null ex NullPointerException
+obj 7 7.5
+obj ex Cannot format given Object as a Number
+pos 234 7
+show java.text.ParsePosition[index=7,errorIndex=-1]
+[yyyy-MM-dd'T'HH:mm:ss.SSS'Z'] => 2026-09-14T14:05:09.123Z | yyyy-MM-dd'T'HH:mm:ss.SSS'Z'
+[y M d H h m s S] => 2026 9 14 14 2 5 9 123 | y M d H h m s S
+[E EE EEE EEEE] => Mon Mon Mon Monday | E EE EEE EEEE
+[MMM MMMM MMMMM] => Sep September September | MMM MMMM MMMMM
+[a aa aaa] => PM PM PM | a aa aaa
+[k K kk KK] => 14 2 14 02 | k K kk KK
+[D DD DDD] => 257 257 257 | D DD DDD
+[w ww W WW] => 38 38 3 03 | w ww W WW
+[F FF] => 2 02 | F FF
+[G GG GGG] => AD AD AD | G GG GGG
+[z zz zzz zzzz Z ZZZZ ZZZZZ XXX XX X] => UTC UTC UTC Coordinated Universal Time +0000 +0000 +0000 Z Z Z | z zz zzz zzzz Z ZZZZ ZZZZZ XXX XX X
+[yy yyy yyyy yyyyy] => 26 2026 2026 02026 | yy yyy yyyy yyyyy
+[''] => ' | ''
+['a''b'] => a'b | 'a''b'
+[EEEE, MMMM d, y] => Monday, September 14, 2026 | EEEE, MMMM d, y
+[h:mm:ss a zzzz] => 2:05:09 PM Coordinated Universal Time | h:mm:ss a zzzz
+[M/d/yy, h:mm a] => 9/14/26, 2:05 PM | M/d/yy, h:mm a
+[d MMMM y] => 14 September 2026 | d MMMM y
+[HH:mm] => 14:05 | HH:mm
+[ss.SSS] => 09.123 | ss.SSS
+[EEEEE] => Monday | EEEEE
+[MMMMMM] => September | MMMMMM
+[u uu] => 1 01 | u uu
+[Y YY YYYY] => 2026 26 2026 | Y YY YYYY
+[MM MM M] => 09 09 9 | MM MM M
+[dd d] => 14 14 | dd d
+[hh:mm:ss a] => 02:05:09 PM | hh:mm:ss a
+[hh 'o''clock' a, zzzz] => 02 o'clock PM, Coordinated Universal Time | hh 'o''clock' a, zzzz
+[L] => 9 | L
+bad [Q] Illegal pattern character 'Q'
+bad [n] Illegal pattern character 'n'
+bad [b] Illegal pattern character 'b'
+bad [B] Illegal pattern character 'B'
+2026-01-01 1 1 1 1 Thu
+2026-01-04 4 2 2 1 Sun
+2026-12-31 365 1 5 5 Thu
+2026-08-31 243 36 6 5 Mon
+2026-09-29 272 40 5 5 Tue
+0 -> 12 12 0 00 24 24 0 00 AM
+1 -> 1 01 1 01 1 01 1 01 AM
+2 -> 2 02 2 02 2 02 2 02 AM
+3 -> 3 03 3 03 3 03 3 03 AM
+4 -> 4 04 4 04 4 04 4 04 AM
+5 -> 5 05 5 05 5 05 5 05 AM
+6 -> 6 06 6 06 6 06 6 06 AM
+7 -> 7 07 7 07 7 07 7 07 AM
+8 -> 8 08 8 08 8 08 8 08 AM
+9 -> 9 09 9 09 9 09 9 09 AM
+10 -> 10 10 10 10 10 10 10 10 AM
+11 -> 11 11 11 11 11 11 11 11 AM
+12 -> 12 12 12 12 12 12 0 00 PM
+13 -> 1 01 13 13 13 13 1 01 PM
+14 -> 2 02 14 14 14 14 2 02 PM
+15 -> 3 03 15 15 15 15 3 03 PM
+16 -> 4 04 16 16 16 16 4 04 PM
+17 -> 5 05 17 17 17 17 5 05 PM
+18 -> 6 06 18 18 18 18 6 06 PM
+19 -> 7 07 19 19 19 19 7 07 PM
+20 -> 8 08 20 20 20 20 8 08 PM
+21 -> 9 09 21 21 21 21 9 09 PM
+22 -> 10 10 22 22 22 22 10 10 PM
+23 -> 11 11 23 23 23 23 11 11 PM
+dateTime MMM d, y, h:mm:ss a | Sep 14, 2026, 2:05:09 PM
+styles EEEE, MMMM d, y / MMMM d, y / M/d/yy
+tstyles h:mm:ss a zzzz / h:mm:ss a z / h:mm a
+months January,February,March,April,May,June,July,August,September,October,November,December,
+short  Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec,
+days   ,Sunday,Monday,Tuesday,Wednesday,Thursday,Friday,Saturday
+sdays  ,Sun,Mon,Tue,Wed,Thu,Fri,Sat
+ampm   AM,PM eras BC,AD
+obj Sep 14, 2026, 2:05:09 PM Sep 14, 2026, 2:05:09 PM
+df ex Cannot format given Object as a Date
+[yyyy-MM-dd] "2026-09-14" lenient=true -> 1789344000000 idx=10 err=-1
+[yyyy-MM-dd'T'HH:mm:ss.SSS'Z'] "2026-09-14T14:05:09.123Z" lenient=true -> 1789394709123 idx=24 err=-1
+[M/d/yy] "9/14/26" lenient=true -> 1789344000000 idx=7 err=-1
+[MMM d, y] "Sep 14, 2026" lenient=true -> 1789344000000 idx=12 err=-1
+[EEEE, MMMM d, y] "Monday, September 14, 2026" lenient=true -> 1789344000000 idx=26 err=-1
+[h:mm a] "2:05 PM" lenient=true -> 50700000 idx=7 err=-1
+[yyyy-MM-dd] "2026-13-45" lenient=true -> 1802563200000 idx=10 err=-1
+[yyyy-MM-dd] "2026-02-30" lenient=true -> 1772409600000 idx=10 err=-1
+[yyyy-MM-dd] "2026-9-4" lenient=true -> 1788480000000 idx=8 err=-1
+[yyyy-MM-dd] "2026-09-14xyz" lenient=true -> 1789344000000 idx=10 err=-1
+[yyyy-MM-dd] "xx2026-09-14" lenient=true -> null idx=0 err=0
+[yy] "26" lenient=true -> 1767225600000 idx=2 err=-1
+[yy] "50" lenient=true -> -631152000000 idx=2 err=-1
+[y] "2026" lenient=true -> 1767225600000 idx=4 err=-1
+[HH:mm:ss.SSS] "25:10:70.1234" lenient=true -> 90671234 idx=13 err=-1
+[HH:mm:ss] "25:10:70" lenient=false -> null idx=0 err=8
+[z yyyy-MM-dd] "UTC 2026-09-14" lenient=true -> 1789344000000 idx=14 err=-1
+[X yyyy-MM-dd] "Z 2026-09-14" lenient=true -> 1789344000000 idx=12 err=-1
+[X yyyy-MM-dd] "+05 2026-09-14" lenient=true -> 1789326000000 idx=14 err=-1
+[Z yyyy-MM-dd] "+0500 2026-09-14" lenient=true -> 1789326000000 idx=16 err=-1
+ex [yyyy-MM-dd] "abc" -> Unparseable date: "abc" off=0
+ex [yyyy-MM-dd] "2026-09" -> Unparseable date: "2026-09" off=7
+ex [MMM d, y] "Xyz 14, 2026" -> Unparseable date: "Xyz 14, 2026" off=0
+ex [yyyy-MM-dd] "" -> Unparseable date: "" off=0
+ex [yyyy-MM-dd'T'HH:mm:ss] "2026-09-14 14:05:09" -> Unparseable date: "2026-09-14 14:05:09" off=10
+lenient true
+lenient false
+parseObject 1789344000000
+iso-date 2026-09-14 | 2026-01-02
+iso-time 14:05:09.123 | 01:02:03
+iso-dt   2026-09-14T14:05:09.123 | 2026-09-14T01:02:03
+iso-inst 2026-09-14T14:05:09.123Z | 2026-09-14T14:05:09Z
+basic    20260914 | 20260102
+ofPattern 2026-09-14 14:05:09
+ofPattern date 2026-09-14 | 14:05:09
+wrong type Unsupported field: YearOfEra
+ofPattern u 2026 e Mon Sep 14 2026
+quoted 2026x09 | '
+bad pattern Unknown pattern letter: j
+localized Monday, September 14, 2026 / September 14, 2026 / Sep 14, 2026 / 9/14/26
+locTime 2:05:09 PM / 9/14/26, 2:05 PM
+parse 2026-09-14 | 14:05:09 | 14:05:09.123
+parse 2026-09-14T14:05:09 | 2026-09-14T14:05:09.123Z
+parse 2026-09-14
+parse 2026-09-14 | 2026-09-14
+parse 14:05
+parse 2026-09-14T14:05
+smart 2026-02-28 2026-09-30
+lenient 2026-03-02
+strict DateTimeParseException: Text '2026-02-30' could not be parsed: Invalid date 'FEBRUARY 30'
+month Text '2026-13-01' could not be parsed: Invalid value for MonthOfYear (valid values 1 - 12): 13
+text DateTimeParseException: Text 'nope' could not be parsed at index 0 idx=0
+resolver STRICT
+M [{0}] => <1,234,567.891> toPattern=<{0}>
+M [{0,number}] => <1,234,567.891> toPattern=<{0,number}>
+M [{0,number,integer}] => <1,234,568> toPattern=<{0,number,integer}>
+M [{0,number,percent}] => <123,456,789%> toPattern=<{0,number,percent}>
+M [{0,number,currency}] => <$1,234,567.89> toPattern=<{0,number,currency}>
+M [{0,number,0.00}] => <1234567.89> toPattern=<{0,number,#0.00}>
+M [{0,number,#.##}] => <1234567.89> toPattern=<{0,number,#0.##}>
+M [{1,date}] => <Sep 14, 2026> toPattern=<{1,date}>
+M [{1,date,short}] => <9/14/26> toPattern=<{1,date,short}>
+M [{1,date,full}] => <Monday, September 14, 2026> toPattern=<{1,date,full}>
+M [{1,date,medium}] => <Sep 14, 2026> toPattern=<{1,date}>
+M [{1,time}] => <2:05:09 PM> toPattern=<{1,time}>
+M [{1,time,short}] => <2:05 PM> toPattern=<{1,time,short}>
+M [{1,time,medium}] => <2:05:09 PM> toPattern=<{1,time}>
+M [{1,time,HH:mm}] => <14:05> toPattern=<{1,date,HH:mm}>
+M [{0,choice,0#none|1#one|1<many}] => <many> toPattern=<{0,choice,0.0#none|1.0#one|1.0<many}>
+M [{3,choice,0#no files|1#one file|1<many files}] => <many files> toPattern=<{3,choice,0.0#no files|1.0#one file|1.0<many files}>
+M [At {1,time} on {1,date}, there was {2} on planet {0,number,integer}.] => <At 2:05:09 PM on Sep 14, 2026, there was a storm on planet 1,234,568.> toPattern=<At {1,time} on {1,date}, there was {2} on planet {0,number,integer}.>
+M [it''s {0}] => <it's 1,234,567.891> toPattern=<it''s {0}>
+M ['{'0'}'] => <{0}> toPattern=<'{'0}>
+M [a}b] => <a}b> toPattern=<a}b>
+M [{0}{0}] => <1,234,567.8911,234,567.891> toPattern=<{0}{0}>
+M [{1} {2} {0}] => <9/14/26, 2:05 PM a storm 1,234,567.891> toPattern=<{1} {2} {0}>
+parsed n=3 1234568 1789344000000 a storm
+parsed2 a|b c
+parsed3 3.25 true
+parsed4 MessageFormat parse error! off=0
+mex MessageFormat parse error! off=0
+mex MessageFormat parse error! off=68
+mex MessageFormat parse error! off=0
+pos null 0 0
+missing <null {1}>
+static x of 3.5
+type ex unknown format type: ordinal
+brace ex Unmatched braces in the pattern.
+arg ex can't parse argument number: x
+num ex Cannot format given Object as a Number
+choice 0.0#no files|1.0#one file|1.0<many files | no files one file many files no files no files many files
+choice -1.0#neg|0.49999999999999994<half|2.0#two | neg neg half
+limits 3 3 0.5
+choice parse 1.0000000000000002 1.0
+order ex Incorrect order of intervals, must be in ascending order
+nextDouble 1.0000000000000002 0.9999999999999999

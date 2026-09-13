@@ -307,11 +307,14 @@ class Main {
 | 套件 | 內容 |
 |---|---|
 | `java.lang` | `Object`、`Class`、`String`（`format`／`join`／`valueOf`…）、`StringBuilder`、`Math`、`System`、`PrintStream`、八個包裝類別與 `Number`、`Throwable` 家族、`Enum`、`Record` |
-| `java.util` | `List`／`ArrayList`／`LinkedList`、`Set`／`HashSet`／`LinkedHashSet`／`TreeSet`、`Map`／`HashMap`／`LinkedHashMap`／`TreeMap`、`Deque`／`ArrayDeque`、`Arrays`、`Collections`、`Objects`、`Optional`、`StringJoiner` |
+| `java.util` | `List`／`ArrayList`／`LinkedList`、`Set`／`HashSet`／`LinkedHashSet`／`TreeSet`、`Map`／`HashMap`／`LinkedHashMap`／`TreeMap`、`Deque`／`ArrayDeque`、`Arrays`、`Collections`、`Objects`、`Optional`、`StringJoiner`、`Properties`、`Random`、`UUID`、`BitSet`、`StringTokenizer` |
 | `java.time` | `LocalDate`／`LocalTime`／`LocalDateTime`／`Instant`／`Duration`／`Period` |
 | `java.io` | `File`、`Path`／`Paths`、`Files` |
 | `java.util.regex` | `Pattern`／`Matcher` |
 | `java.net` | `ServerSocket`、`Socket` 與其輸入輸出串流 |
+| `java.util.stream` | `Stream`／`IntStream`／`LongStream`／`DoubleStream`、`Collectors`、`Collector`、`Spliterator`；延遲求值，`Collection.stream()` 是入口 |
+| `java.math` | `BigInteger`、`BigDecimal`、`MathContext`、`RoundingMode` |
+| `java.text` | `NumberFormat`／`DecimalFormat`（完整 pattern 語言）、`DateFormat`／`SimpleDateFormat`、`DateTimeFormatter`、`MessageFormat`；只做 ROOT／en-US，`format` 走 `Instant` |
 | `com.google.gson` | Gson 的樹狀 API，以及由編譯器產生的物件綁定（[docs/json.md](docs/json.md)） |
 | 框架 | Spring 形狀的容器與 web 層（[docs/framework.md](docs/framework.md)） |
 

@@ -1,0 +1,23 @@
+3
+3:<a><b><c>
+2:<><a>
+1:<a>
+1:<a>
+1:<>
+1:<a>
+3:<a><b><c>
+3:<a><b><c>
+2:<a><b22c>
+3:<a><b><c>
+3:<a><><b>
+3:<a><b><,>
+1:<aXbXc>
+1:<no-match>
+3:<a><b><c>
+true
+false
+h*ll* w*rld
+h*llo world
+a#b#
+bbbbbb
+cost USD 5

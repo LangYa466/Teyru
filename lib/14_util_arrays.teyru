@@ -288,7 +288,7 @@ class Arrays {
     mergeNatural(a, buf, 0, a.length)
   }
 
-  public static <T> void sort(T[] a, Comparator<T> c) {
+  public static <T> void sort(T[] a, Comparator<? super T> c) {
     if (a.length < 2) {
       return
     }

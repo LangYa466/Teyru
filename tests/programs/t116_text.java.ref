@@ -1,0 +1,403 @@
+/* java.text, on one screen.
+   Run with -Duser.language=en -Duser.country=US -Duser.timezone=UTC: the
+   library implements the ROOT/en-US answers only (there is no Locale), and
+   there is no zone database either, so every Date is UTC.
+   This file is generated from t116_text.teyru by scripts-free hand:
+   the only edits are the semicolons, the java.util.Date helpers, and the
+   imports. t116_text.expected is this program on javac 25. */
+import java.text.*;
+import java.time.*;
+import java.time.format.*;
+import java.util.Date;
+import java.util.Locale;
+
+class Main {
+  public static void main(String[] args) throws Exception {
+    numberFormats();
+    decimalPatterns();
+    numberParse();
+    dateFormat();
+    dateParse();
+    isoFormats();
+    messages();
+  }
+
+  // ---------------------------------------------------------------- numbers
+
+  static void numberFormats() throws Exception {
+    NumberFormat f = NumberFormat.getInstance();
+    System.out.println("default " + f.format(1234567.891));
+    System.out.println("default " + f.format(12345L));
+    System.out.println("number  " + NumberFormat.getNumberInstance().format(0.005));
+    System.out.println("integer " + NumberFormat.getIntegerInstance().format(1234.6));
+    System.out.println("percent " + NumberFormat.getPercentInstance().format(0.5));
+    System.out.println("currency " + NumberFormat.getCurrencyInstance().format(1234.5));
+    System.out.println("flags " + f.isGroupingUsed() + " " + f.isParseIntegerOnly() + " " + f.getMaximumIntegerDigits() + " " + f.getMinimumIntegerDigits() + " " + f.getMaximumFractionDigits() + " " + f.getMinimumFractionDigits());
+    f.setGroupingUsed(false);
+    f.setMaximumFractionDigits(6);
+    f.setMinimumFractionDigits(2);
+    f.setMinimumIntegerDigits(4);
+    System.out.println("tuned " + f.format(1234.5));
+    System.out.println("tuned " + f.format(12345.6789));
+    DecimalFormat d = new DecimalFormat("0.00");
+    System.out.println("round " + d.format(2.675) + " " + d.format(1.005) + " " + d.format(0.125) + " " + d.format(0.135) + " " + d.format(0.145));
+    System.out.println("float " + d.format(0.005) + " " + d.format(0.1) + " " + new DecimalFormat("0").format(2.5) + " " + new DecimalFormat("0").format(3.5));
+  }
+
+  static void decimalPatterns() throws Exception {
+    String[] pats = { "0", "#", "0.00", "#.##", "#,##0.###", "#,##,##0", "#,#0", "0.", "#.0", "###.##",
+      "#.##", "0%", "0.0%", "‰0", "0.00¤", "¤#,##0.00", "0.00E0", "#E0", "#.0E0", "00E0", "#,##0.0E0",
+      "0'x'", "'x'0", "0''0", "+0;-0", "0;(0)", "#,##0.00;(#,##0.00)", "0.###E0" };
+    for (var i = 0 ; i < pats.length ; i++) {
+      DecimalFormat d = new DecimalFormat(pats[i]);
+      System.out.println("[" + pats[i] + "] => " + d.format(12345.678) + " | " + d.format(-12345.678) + " | " + d.format(0.5) + " | " + d.format(0.0) + " | " + d.toPattern());
+    }
+    // the exponent is a multiple of the pattern's integer width, and how wide
+    // the mantissa comes out is what tells that rule from the one-place one
+    String[] exps = { "##0.0E0", "###0.0E0", "#,##,##0.0E0", "00.0E0" };
+    double[] expVals = { 0.5, 0.001, 12345.6, 1.0E10, 99999.9 };
+    for (var i = 0 ; i < exps.length ; i++) {
+      DecimalFormat x = new DecimalFormat(exps[i]);
+      StringBuilder line = new StringBuilder("E " + exps[i]);
+      for (var j = 0 ; j < expVals.length ; j++) {
+        line.append(" " + x.format(expVals[j]));
+      }
+      System.out.println(line.toString());
+    }
+    DecimalFormat e = new DecimalFormat("#,##0.00");
+    e.setGroupingUsed(false);
+    System.out.println("nogroup " + e.format(12345.6));
+    e.setGroupingUsed(true);
+    e.setMinimumFractionDigits(4);
+    System.out.println("minfrac " + e.format(12345.6));
+    e.setMaximumFractionDigits(1);
+    System.out.println("maxfrac " + e.format(12345.6) + " " + e.toPattern());
+    DecimalFormat q = new DecimalFormat();
+    q.applyPattern("#,##0.0");
+    System.out.println("applied " + q.format(12345.678) + " " + q.toPattern());
+    DecimalFormatSymbols s = new DecimalFormatSymbols();
+    System.out.println("symbols " + s.getZeroDigit() + s.getGroupingSeparator() + s.getDecimalSeparator() + s.getPercent() + s.getPerMill() + s.getDigit() + s.getPatternSeparator() + s.getMinusSign() + s.getMonetaryDecimalSeparator() + " " + s.getInfinity() + " " + s.getNaN() + " " + s.getCurrencySymbol() + " " + s.getInternationalCurrencySymbol() + " " + s.getExponentSeparator());
+    s.setDecimalSeparator(',');
+    s.setGroupingSeparator('.');
+    DecimalFormat g = new DecimalFormat("#,##0.00");
+    g.setDecimalFormatSymbols(s);
+    System.out.println("eu " + g.format(12345.678) + " | " + g.toLocalizedPattern() + " | " + g.getDecimalFormatSymbols().getDecimalSeparator());
+    DecimalFormat h = new DecimalFormat();
+    h.setDecimalFormatSymbols(s);
+    h.applyLocalizedPattern("#.##0,00");
+    System.out.println("eu2 " + h.toPattern() + " " + h.format(12345.678));
+    DecimalFormat k = new DecimalFormat("0.00");
+    k.setDecimalFormatSymbols(s);
+    k.applyLocalizedPattern("#.##0,00");
+    System.out.println("eu3 " + k.format(12345.678) + " " + k.toPattern());
+    String[] bad = { "#,", "#,##0,", "0.#0", "E0", "#,#" };
+    for (var i = 0 ; i < bad.length ; i++) {
+      try {
+        DecimalFormat b = new DecimalFormat(bad[i]);
+        System.out.println("BAD [" + bad[i] + "] => " + b.toPattern());
+      } catch (Exception ex) {
+        System.out.println("BAD [" + bad[i] + "] " + ex.getMessage());
+      }
+    }
+  }
+
+  static void numberParse() throws Exception {
+    String[] texts = { "1,234,567.891", "12345", "0.5", "-1,234", "+5", ".5", "12.", "1e3", "abc", "1,23", "5%", "$12.50", "12xyz" };
+    String[] pats = { "#,##0.###", "#,##0.###", "0.0", "#,##0", "#,##0", "0.0", "0.0", "0.0", "0.0", "#,##0", "0%", "¤#,##0.00", "#,##0" };
+    for (var i = 0 ; i < texts.length ; i++) {
+      NumberFormat f = new DecimalFormat(pats[i]);
+      ParsePosition pp = new ParsePosition(0);
+      Number n = f.parse(texts[i], pp);
+      System.out.println("P [" + pats[i] + "] \"" + texts[i] + "\" -> " + n + " idx=" + pp.getIndex() + " err=" + pp.getErrorIndex());
+    }
+    NumberFormat ip = NumberFormat.getIntegerInstance();
+    ParsePosition pp = new ParsePosition(0);
+    System.out.println("int [" + ip.parse("1,234.56", pp) + "] idx=" + pp.getIndex());
+    try {
+      NumberFormat f = new DecimalFormat("#,##0");
+      Number n = f.parse("abc");
+      System.out.println("NOPE " + n);
+    } catch (ParseException e) {
+      System.out.println("parse ex " + e.getMessage() + " off=" + e.getErrorOffset());
+    }
+    try {
+      Number n = NumberFormat.getInstance().parse(null);
+      System.out.println("NOPE " + n);
+    } catch (NullPointerException e) {
+      System.out.println("null ex NullPointerException");
+    }
+    System.out.println("obj " + NumberFormat.getInstance().format(Integer.valueOf(7)) + " " + NumberFormat.getInstance().format(Double.valueOf(7.5)));
+    try {
+      System.out.println("NOPE " + NumberFormat.getInstance().format("x"));
+    } catch (Exception e) {
+      System.out.println("obj ex " + e.getMessage());
+    }
+    ParsePosition pos = new ParsePosition(3);
+    System.out.println("pos " + new DecimalFormat("#,##0").parse("xx1,234", pos) + " " + pos.getIndex());
+    System.out.println("show " + pos);
+  }
+
+  // ---------------------------------------------------------------- dates
+
+  static void dateFormat() throws Exception {
+    Date when = D(1789394709123L);
+    String[] pats = { "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", "y M d H h m s S", "E EE EEE EEEE", "MMM MMMM MMMMM",
+      "a aa aaa", "k K kk KK", "D DD DDD", "w ww W WW", "F FF", "G GG GGG",
+      "z zz zzz zzzz Z ZZZZ ZZZZZ XXX XX X", "yy yyy yyyy yyyyy",
+      "''", "'a''b'", "EEEE, MMMM d, y", "h:mm:ss a zzzz", "M/d/yy, h:mm a",
+      "d MMMM y", "HH:mm", "ss.SSS", "EEEEE", "MMMMMM", "u uu", "Y YY YYYY",
+      "MM MM M", "dd d", "hh:mm:ss a", "hh 'o''clock' a, zzzz", "L" };
+    for (var i = 0 ; i < pats.length ; i++) {
+      SimpleDateFormat f = new SimpleDateFormat(pats[i]);
+      System.out.println("[" + pats[i] + "] => " + f.format(when) + " | " + f.toPattern());
+    }
+    String[] bad = { "Q", "n", "b", "B" };
+    for (var i = 0 ; i < bad.length ; i++) {
+      try {
+        SimpleDateFormat f = new SimpleDateFormat(bad[i]);
+        System.out.println("NOPE " + f.format(when));
+      } catch (Exception ex) {
+        System.out.println("bad [" + bad[i] + "] " + ex.getMessage());
+      }
+    }
+    long[] days = { 1767225600000L, 1767484800000L, 1798675200000L, 1788217200000L, 1790722800000L };
+    SimpleDateFormat wf = new SimpleDateFormat("yyyy-MM-dd D w W F E");
+    for (var i = 0 ; i < days.length ; i++) {
+      System.out.println(wf.format(D(days[i])));
+    }
+    SimpleDateFormat hf = new SimpleDateFormat("h hh H HH k kk K KK a");
+    for (var h = 0 ; h <= 23 ; h++) {
+      System.out.println(h + " -> " + hf.format(D(1767225600000L + h * 3600000L)));
+    }
+    DateFormat df = DateFormat.getDateTimeInstance();
+    System.out.println("dateTime " + toSdf(df).toPattern() + " | " + df.format(when));
+    System.out.println("styles " + toSdf(DateFormat.getDateInstance(DateFormat.FULL)).toPattern() + " / " + toSdf(DateFormat.getDateInstance(DateFormat.LONG)).toPattern() + " / " + toSdf(DateFormat.getDateInstance(DateFormat.SHORT)).toPattern());
+    System.out.println("tstyles " + toSdf(DateFormat.getTimeInstance(DateFormat.FULL)).toPattern() + " / " + toSdf(DateFormat.getTimeInstance(DateFormat.LONG)).toPattern() + " / " + toSdf(DateFormat.getTimeInstance(DateFormat.SHORT)).toPattern());
+    DateFormatSymbols s = new DateFormatSymbols();
+    System.out.println("months " + join(s.getMonths()));
+    System.out.println("short  " + join(s.getShortMonths()));
+    System.out.println("days   " + join(s.getWeekdays()));
+    System.out.println("sdays  " + join(s.getShortWeekdays()));
+    System.out.println("ampm   " + join(s.getAmPmStrings()) + " eras " + join(s.getEras()));
+    System.out.println("obj " + df.format(when) + " " + df.format(Long.valueOf(1789394709123L)));
+    try {
+      System.out.println("NOPE " + df.format("x"));
+    } catch (Exception ex) {
+      System.out.println("df ex " + ex.getMessage());
+    }
+  }
+
+  static void dateParse() throws Exception {
+    String[] pats = { "yyyy-MM-dd", "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", "M/d/yy", "MMM d, y",
+      "EEEE, MMMM d, y", "h:mm a", "yyyy-MM-dd", "yyyy-MM-dd", "yyyy-MM-dd", "yyyy-MM-dd",
+      "yyyy-MM-dd", "yy", "yy", "y", "HH:mm:ss.SSS", "HH:mm:ss",
+      "z yyyy-MM-dd", "X yyyy-MM-dd", "X yyyy-MM-dd", "Z yyyy-MM-dd" };
+    String[] txt = { "2026-09-14", "2026-09-14T14:05:09.123Z", "9/14/26", "Sep 14, 2026",
+      "Monday, September 14, 2026", "2:05 PM", "2026-13-45", "2026-02-30", "2026-9-4", "2026-09-14xyz",
+      "xx2026-09-14", "26", "50", "2026", "25:10:70.1234", "25:10:70",
+      "UTC 2026-09-14", "Z 2026-09-14", "+05 2026-09-14", "+0500 2026-09-14" };
+    boolean[] len = { true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, false, true, true, true, true };
+    for (var i = 0 ; i < pats.length ; i++) {
+      SimpleDateFormat f = new SimpleDateFormat(pats[i]);
+      f.setLenient(len[i]);
+      ParsePosition pp = new ParsePosition(0);
+      Date d = f.parse(txt[i], pp);
+      String out = d == null ? "null" : Long.toString(msOf(d));
+      System.out.println("[" + pats[i] + "] \"" + txt[i] + "\" lenient=" + len[i] + " -> " + out + " idx=" + pp.getIndex() + " err=" + pp.getErrorIndex());
+    }
+    String[] ep = { "yyyy-MM-dd", "yyyy-MM-dd", "MMM d, y", "yyyy-MM-dd", "yyyy-MM-dd'T'HH:mm:ss" };
+    String[] et = { "abc", "2026-09", "Xyz 14, 2026", "", "2026-09-14 14:05:09" };
+    for (var i = 0 ; i < ep.length ; i++) {
+      SimpleDateFormat f = new SimpleDateFormat(ep[i]);
+      try {
+        Date d = f.parse(et[i]);
+        System.out.println("NOPE " + msOf(d));
+      } catch (ParseException e) {
+        System.out.println("ex [" + ep[i] + "] \"" + et[i] + "\" -> " + e.getMessage() + " off=" + e.getErrorOffset());
+      }
+    }
+    SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd");
+    System.out.println("lenient " + f.isLenient());
+    f.setLenient(false);
+    System.out.println("lenient " + f.isLenient());
+    System.out.println("parseObject " + Long.toString(msOf(f.parseObject("2026-09-14"))));
+  }
+
+  static void isoFormats() throws Exception {
+    LocalDate d = LocalDate.of(2026, 9, 14);
+    LocalTime t = LocalTime.of(14, 5, 9, 123000000);
+    LocalDateTime dt = LocalDateTime.of(d, t);
+    Instant i = Instant.ofEpochMilli(1789394709123L);
+    LocalTime whole = LocalTime.of(1, 2, 3);
+    System.out.println("iso-date " + DateTimeFormatter.ISO_LOCAL_DATE.format(d) + " | " + DateTimeFormatter.ISO_LOCAL_DATE.format(LocalDate.of(2026, 1, 2)));
+    System.out.println("iso-time " + DateTimeFormatter.ISO_LOCAL_TIME.format(t) + " | " + DateTimeFormatter.ISO_LOCAL_TIME.format(whole));
+    System.out.println("iso-dt   " + DateTimeFormatter.ISO_LOCAL_DATE_TIME.format(dt) + " | " + DateTimeFormatter.ISO_LOCAL_DATE_TIME.format(LocalDateTime.of(d, whole)));
+    System.out.println("iso-inst " + DateTimeFormatter.ISO_INSTANT.format(i) + " | " + DateTimeFormatter.ISO_INSTANT.format(Instant.ofEpochSecond(1789394709L)));
+    System.out.println("basic    " + DateTimeFormatter.BASIC_ISO_DATE.format(d) + " | " + DateTimeFormatter.BASIC_ISO_DATE.format(LocalDate.of(2026, 1, 2)));
+    DateTimeFormatter f = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    System.out.println("ofPattern " + f.format(dt));
+    System.out.println("ofPattern date " + DateTimeFormatter.ofPattern("yyyy-MM-dd").format(d) + " | " + DateTimeFormatter.ofPattern("HH:mm:ss").format(t));
+    try {
+      DateTimeFormatter wrong = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+      System.out.println("NOPE " + wrong.format(t));
+    } catch (Exception ex) {
+      System.out.println("wrong type " + ex.getMessage());
+    }
+    System.out.println("ofPattern u " + DateTimeFormatter.ofPattern("u").format(d) + " e " + DateTimeFormatter.ofPattern("E MMM d u").format(d));
+    System.out.println("quoted " + DateTimeFormatter.ofPattern("yyyy'x'MM").format(d) + " | " + DateTimeFormatter.ofPattern("''").format(d));
+    try {
+      DateTimeFormatter bad = DateTimeFormatter.ofPattern("yyyy j");
+      System.out.println("NOPE " + bad.format(dt));
+    } catch (Exception ex) {
+      System.out.println("bad pattern " + ex.getMessage());
+    }
+    System.out.println("localized " + DateTimeFormatter.ofLocalizedDate(FormatStyle.FULL).format(d) + " / " + DateTimeFormatter.ofLocalizedDate(FormatStyle.LONG).format(d) + " / " + DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM).format(d) + " / " + DateTimeFormatter.ofLocalizedDate(FormatStyle.SHORT).format(d));
+    System.out.println("locTime " + DateTimeFormatter.ofLocalizedTime(FormatStyle.MEDIUM).format(t) + " / " + DateTimeFormatter.ofLocalizedDateTime(FormatStyle.SHORT).format(dt));
+    System.out.println("parse " + LocalDate.parse("2026-09-14", DateTimeFormatter.ISO_LOCAL_DATE) + " | " + LocalTime.parse("14:05:09", DateTimeFormatter.ISO_LOCAL_TIME) + " | " + LocalTime.parse("14:05:09.123", DateTimeFormatter.ISO_LOCAL_TIME));
+    System.out.println("parse " + LocalDateTime.parse("2026-09-14T14:05:09", DateTimeFormatter.ISO_LOCAL_DATE_TIME) + " | " + Instant.parse("2026-09-14T14:05:09.123Z"));
+    System.out.println("parse " + LocalDate.parse("20260914", DateTimeFormatter.BASIC_ISO_DATE));
+    System.out.println("parse " + LocalDate.parse("9/14/26", DateTimeFormatter.ofPattern("M/d/uu")) + " | " + LocalDate.parse("Sep 14, 2026", DateTimeFormatter.ofPattern("MMM d, u")));
+    System.out.println("parse " + LocalTime.parse("14:05", DateTimeFormatter.ofPattern("HH:mm")));
+    System.out.println("parse " + LocalDateTime.parse("9/14/26 14:05", DateTimeFormatter.ofPattern("M/d/uu HH:mm")));
+    // the ISO forms resolve strictly, as java.time's do, so SMART and LENIENT
+    // have to be asked for by name
+    System.out.println("smart " + LocalDate.parse("2026-02-30", DateTimeFormatter.ISO_LOCAL_DATE.withResolverStyle(ResolverStyle.SMART)) + " " + LocalDate.parse("2026-09-31", DateTimeFormatter.ISO_LOCAL_DATE.withResolverStyle(ResolverStyle.SMART)));
+    System.out.println("lenient " + LocalDate.parse("2026-02-30", DateTimeFormatter.ISO_LOCAL_DATE.withResolverStyle(ResolverStyle.LENIENT)));
+    try {
+      LocalDate x = LocalDate.parse("2026-02-30", DateTimeFormatter.ISO_LOCAL_DATE);
+      System.out.println("NOPE " + x);
+    } catch (Exception ex) {
+      System.out.println("strict DateTimeParseException: " + ex.getMessage());
+    }
+    try {
+      LocalDate x = LocalDate.parse("2026-13-01", DateTimeFormatter.ISO_LOCAL_DATE);
+      System.out.println("NOPE " + x);
+    } catch (Exception ex) {
+      System.out.println("month " + ex.getMessage());
+    }
+    try {
+      LocalDate x = LocalDate.parse("nope", DateTimeFormatter.ISO_LOCAL_DATE);
+      System.out.println("NOPE " + x);
+    } catch (DateTimeParseException ex) {
+      System.out.println("text DateTimeParseException: " + ex.getMessage() + " idx=" + ex.getErrorIndex());
+    }
+    System.out.println("resolver " + DateTimeFormatter.ofPattern("u").withResolverStyle(ResolverStyle.STRICT).getResolverStyle());
+  }
+
+  // ---------------------------------------------------------------- messages
+
+  static void messages() throws Exception {
+    Object[] args = new Object[5];
+    args[0] = Double.valueOf(1234567.891);
+    args[1] = D(1789394709123L);
+    args[2] = "a storm";
+    args[3] = Integer.valueOf(2);
+    args[4] = Integer.valueOf(3);
+    String[] pats = { "{0}", "{0,number}", "{0,number,integer}", "{0,number,percent}", "{0,number,currency}",
+      "{0,number,0.00}", "{0,number,#.##}", "{1,date}", "{1,date,short}", "{1,date,full}", "{1,date,medium}",
+      "{1,time}", "{1,time,short}", "{1,time,medium}", "{1,time,HH:mm}", "{0,choice,0#none|1#one|1<many}",
+      "{3,choice,0#no files|1#one file|1<many files}", "At {1,time} on {1,date}, there was {2} on planet {0,number,integer}.",
+      "it''s {0}", "'{'0'}'", "a}b", "{0}{0}", "{1} {2} {0}" };
+    for (var i = 0 ; i < pats.length ; i++) {
+      MessageFormat m = new MessageFormat(pats[i]);
+      System.out.println("M [" + pats[i] + "] => <" + m.format(args) + "> toPattern=<" + m.toPattern() + ">");
+    }
+    MessageFormat m = new MessageFormat("At {1,time} on {1,date}, there was {2} on planet {0,number,integer}.");
+    Object[] r = m.parse("At 2:05:09 PM on Sep 14, 2026, there was a storm on planet 1,234,568.");
+    System.out.println("parsed n=" + r.length + " " + r[0] + " " + msOf(r[1]) + " " + r[2]);
+    Object[] r2 = new MessageFormat("{0} {1}").parse("a b c");
+    System.out.println("parsed2 " + r2[0] + "|" + r2[1]);
+    Object[] r3 = new MessageFormat("{0,number,0.0}x").parse("3.25x");
+    System.out.println("parsed3 " + r3[0] + " " + (r3[0] instanceof Double));
+    // a pattern with two arguments and one word of text: parse(String) throws
+    // -- it is parse(text, position) that hands back the null
+    try {
+      Object[] r4 = new MessageFormat("{0} {1}").parse("solo");
+      System.out.println("NOPE " + r4.length);
+    } catch (ParseException ex) {
+      System.out.println("parsed4 " + ex.getMessage() + " off=" + ex.getErrorOffset());
+    }
+    String[] bads = { "abc", "At 2:05:09 PM on Sep 14, 2026, there was a storm on planet 1,234,568", "x {0}" };
+    for (var i = 0 ; i < bads.length ; i++) {
+      try {
+        Object[] bad = m.parse(bads[i]);
+        System.out.println("NOPE " + bad.length);
+      } catch (ParseException e) {
+        System.out.println("mex " + e.getMessage() + " off=" + e.getErrorOffset());
+      }
+    }
+    ParsePosition pp = new ParsePosition(0);
+    Object[] partial = m.parse("nope", pp);
+    System.out.println("pos " + partial + " " + pp.getIndex() + " " + pp.getErrorIndex());
+    System.out.println("missing <" + new MessageFormat("{0} {1}").format(new Object[1]) + ">");
+    System.out.println("static " + MessageFormat.format("{1} of {0,number,#.#}", Double.valueOf(3.5), "x"));
+    try {
+      MessageFormat b = new MessageFormat("{0,ordinal}");
+      System.out.println("NOPE " + b.format(args));
+    } catch (Exception ex) {
+      System.out.println("type ex " + ex.getMessage());
+    }
+    try {
+      MessageFormat b = new MessageFormat("{0");
+      System.out.println("NOPE " + b.format(args));
+    } catch (Exception ex) {
+      System.out.println("brace ex " + ex.getMessage());
+    }
+    try {
+      MessageFormat b = new MessageFormat("{x}");
+      System.out.println("NOPE " + b.format(args));
+    } catch (Exception ex) {
+      System.out.println("arg ex " + ex.getMessage());
+    }
+    try {
+      MessageFormat b = new MessageFormat("{0,number}");
+      System.out.println("NOPE " + b.format(new Object[] { "s" }));
+    } catch (Exception ex) {
+      System.out.println("num ex " + ex.getMessage());
+    }
+    ChoiceFormat c = new ChoiceFormat("0#no files|1#one file|1<many files");
+    System.out.println("choice " + c.toPattern() + " | " + c.format(0.5) + " " + c.format(1.0) + " " + c.format(2.0) + " " + c.format(-1.0) + " " + c.format(Double.NaN) + " " + c.format(7L));
+    double[] lim = { -1.0, 0.5, 2.0 };
+    String[] fm = { "neg", "half", "two" };
+    ChoiceFormat c2 = new ChoiceFormat(lim, fm);
+    System.out.println("choice " + c2.toPattern() + " | " + c2.format(0.0) + " " + c2.format(-0.5) + " " + c2.format(1.9));
+    System.out.println("limits " + c2.getLimits().length + " " + c2.getFormats().length + " " + c2.getLimits()[1]);
+    System.out.println("choice parse " + c.parse("many files", new ParsePosition(0)) + " " + c.parse("one file", new ParsePosition(0)));
+    try {
+      ChoiceFormat b = new ChoiceFormat("0#a|0#b");
+      System.out.println("NOPE " + b.toPattern());
+    } catch (Exception ex) {
+      System.out.println("order ex " + ex.getMessage());
+    }
+    System.out.println("nextDouble " + ChoiceFormat.nextDouble(1.0) + " " + ChoiceFormat.previousDouble(1.0));
+  }
+
+  // ---------------------------------------------------------------- helpers
+
+  /* D and msOf are the one place the two programs differ: Java's date API is
+     built on java.util.Date, which Teyru does not have, so the Java twin
+     builds a Date and reads its getTime() where this file builds an Instant
+     and reads toEpochMilli(). Everything else is textually the same. */
+  static Date D(long millis) throws Exception {
+    return new Date(millis);
+  }
+
+  static long msOf(Object o) throws Exception {
+    return ((Date) o).getTime();
+  }
+
+  static SimpleDateFormat toSdf(DateFormat f) throws Exception {
+    return (SimpleDateFormat) f;
+  }
+
+  static String join(String[] a) throws Exception {
+    StringBuilder b = new StringBuilder();
+    for (var i = 0 ; i < a.length ; i++) {
+      if (i > 0) {
+        b.append(",");
+      }
+      b.append(a[i]);
+    }
+    return b.toString();
+  }
+}

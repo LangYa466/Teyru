@@ -45,8 +45,23 @@ func (e *Emitter) tmpRef(x string) string {
 }
 
 // cond renders a boolean condition.
+// cond renders an expression in a boolean context: if, while, do, for, the
+// ternary's test, and assert.
+//
+// A boxed Boolean has to be unboxed here. Everywhere else the target type is
+// known and coerce() does it, but a condition has no declared type to convert
+// to -- `Boolean b = false; if (b)` reached C as a pointer test, and a non-null
+// Boolean is true whatever it holds, so the branch went the wrong way.
 func (e *Emitter) cond(x ast.Expr) string {
-	return e.expr(x)
+	v := e.expr(x)
+	ct, ok := x.GetType().(*ast.ClassType)
+	if !ok {
+		return v
+	}
+	if k, ok := e.prog.Builtins.Unbox[ct.Class]; ok && k == ast.Boolean {
+		return e.unboxCall(v, ct, ast.TBoolean)
+	}
+	return v
 }
 
 // refExpr renders an expression that is being used as an object reference.
@@ -519,7 +534,12 @@ func (e *Emitter) selectExpr(v *ast.Select) string {
 		return "((tyobj*)&cls_" + mangle(r.Full) + ")"
 	}
 	if s, ok := v.Ref.(string); ok && s == "length" {
-		arr := e.tmpRef(e.expr(v.X))
+		// The operand's static type is an array, but the value that arrives may
+		// be erased: `List<int[]> xs; xs.get(0).length` hands back the Object*
+		// the interface signature was compiled with, and `__typeof__` of that
+		// is a struct with no len. Every array's C type is tyarr*, so the cast
+		// says the same thing whether anything was erased or not.
+		arr := e.tmpRef("(tyarr*)" + e.expr(v.X))
 		return "(" + arr + " ? " + arr + "->len : (int64_t)(intptr_t)ty_npe())"
 	}
 	if f, ok := v.Ref.(*ast.Field); ok {
@@ -725,6 +745,16 @@ func (e *Emitter) unaryInner(v *ast.Unary) string {
 	case "+":
 		return "(" + x + ")"
 	case "-":
+		// Negating the most negative value is undefined in C and a compiler
+		// may fold it away -- clang turns `-INT64_MIN` into 0 where Java says
+		// it wraps to itself. Integer negation goes through an unsigned value
+		// instead, where every input is defined.
+		if p, ok := xt.(*ast.PrimType); ok && p.IsIntegral() {
+			if p.Kind == ast.Long {
+				return "((int64_t)(0ull - (uint64_t)(" + x + ")))"
+			}
+			return "((int32_t)(0u - (uint32_t)(" + x + ")))"
+		}
 		return "(-(" + x + "))"
 	case "!":
 		if _, ok := xt.(*ast.PrimType); !ok {
@@ -1034,6 +1064,13 @@ func (e *Emitter) binary(v *ast.Binary) string {
 	// count of `<<` and `>>` is masked before it is emitted
 	if v.Op == "<<" || v.Op == ">>" {
 		y = shiftCount(y, v.OpType)
+		// A shift takes its width from its left operand in C, and the operand
+		// may have been written as a literal with no suffix of its own -- the
+		// inlined value of a constant field, say. Naming the width here is what
+		// keeps `MASK << 63` a long shift rather than an int one.
+		if ast.IsPrim(v.OpType, ast.Long) {
+			x = "(int64_t)" + x
+		}
 	}
 	return "(" + x + " " + v.Op + " " + y + ")"
 }
@@ -1517,33 +1554,53 @@ func (e *Emitter) elemPromise(name string, elem ast.Type) string {
 }
 
 func (e *Emitter) newArray(v *ast.NewArray) string {
+	// The element type is one dimension inside the type the expression has, not
+	// the bare name the parser kept: `v.Elem.Resolved` for `new int[2][2]` is
+	// `int`, while the array being created is an int[][] whose elements are
+	// int[]. Compiling the outer array as an array of ints wrote four-byte
+	// integers where the collector expects pointers.
 	elem := v.Elem.Resolved
-	es := e.elemSize(elem)
-	refs := "0"
-	if e.isRefElem(elem) {
-		refs = "1"
+	if at, ok := v.GetType().(*ast.ArrayType); ok {
+		elem = at.Elem
 	}
 	if v.Init != nil {
 		return e.arrayInitOf(v.Init, elem)
 	}
-	promise := e.elemPromise("_a", elem)
-	if len(v.Dims) == 0 {
-		return "({ tyarr* _a = ty_array_new(0, " + es + "); _a->refs = " + refs + ";" + promise + " _a; })"
+	return e.newArrayDims(elem, v.Dims)
+}
+
+// newArrayDims allocates an array whose elements are elem, with dims the
+// dimensions whose length was written. Only the written dimensions allocate
+// (JLS 15.10.1): `new int[2][]` is two null int[]s and builds no inner arrays
+// at all, because the empty brackets are part of the type rather than a level
+// to construct.
+func (e *Emitter) newArrayDims(elem ast.Type, dims []ast.Expr) string {
+	dim := "0"
+	if len(dims) > 0 {
+		dim = e.expr(dims[0])
 	}
-	dim := e.expr(v.Dims[0])
-	if len(v.Dims) == 1 {
+	if len(dims) <= 1 {
+		es := e.elemSize(elem)
+		refs := "0"
+		if e.isRefElem(elem) {
+			refs = "1"
+		}
+		promise := e.elemPromise("_a", elem)
 		return "({ tyarr* _a = ty_array_new(" + dim + ", " + es + "); _a->refs = " + refs + ";" + promise + " _a; })"
 	}
-	// multi-dimensional creation allocates the inner arrays as well. The outer
-	// arrays hold arrays, so they carry no promise; the recursive call gives the
-	// innermost ones theirs.
-	elemDims := &ast.NewArray{ExprBase: ast.ExprBase{Pos: v.Pos, T: v.GetType()}, Elem: v.Elem, Dims: v.Dims[1:], Extra: v.Extra}
-	inner := e.newArray(elemDims)
+	// Another dimension follows, so this level holds arrays: its slots are
+	// references, each one a freshly allocated array of the element type. Only
+	// the innermost array carries a promise about its elements.
+	inner := elem
+	if at, ok := elem.(*ast.ArrayType); ok {
+		inner = at.Elem
+	}
+	alloc := e.newArrayDims(inner, dims[1:])
 	n := e.tmpName()
 	i := e.tmpName()
 	var b strings.Builder
 	fmt.Fprintf(&b, "({ tyarr* %s = ty_array_new(%s, 8); %s->refs = 1;", n, dim, n)
-	fmt.Fprintf(&b, " for (int64_t %s = 0; %s < %s->len; %s++) ((void**)%s->data)[%s] = (void*)(%s);", i, i, n, i, n, i, inner)
+	fmt.Fprintf(&b, " for (int64_t %s = 0; %s < %s->len; %s++) ((void**)%s->data)[%s] = (void*)(%s);", i, i, n, i, n, i, alloc)
 	fmt.Fprintf(&b, " %s; })", n)
 	return b.String()
 }

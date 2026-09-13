@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/LangYa466/Teyru/internal/ast"
+	"github.com/LangYa466/Teyru/internal/source"
 )
 
 // The web half of the framework pass: controller methods become routes.
@@ -225,7 +226,7 @@ func (c *Checker) synthHandler(reg *ast.Class, env *typeEnv, r routeSpec, n int)
 	recv := castTo(callNamed(id("ctx"), "getBean", strLit(r.bean)), r.owner)
 	var args []ast.Expr
 	for _, p := range r.params {
-		args = append(args, c.paramExpr(p))
+		args = append(args, c.paramExpr(p, r.method.Pos))
 	}
 	call := callNamed(recv, r.method.Name, args...)
 
@@ -315,14 +316,39 @@ func (c *Checker) stringMapType() ast.Type {
 	return &ast.ClassType{Class: cl, Args: []ast.Type{c.strType, c.strType}}
 }
 
+// jsonBodyExpr reads a @RequestBody parameter of a class type out of the
+// request body.
+//
+// Spring picks a message converter from the request's Content-Type. Here the
+// parameter's type is known at compile time, so the converter is the binding
+// the compiler already generated for that class -- and a body that does not
+// parse throws the same JsonSyntaxException Gson throws, from the same reader.
+// A String parameter keeps the body exactly as it arrived, which is how an
+// endpoint takes a payload it means to look at itself, and Object does too.
+func (c *Checker) jsonBodyExpr(raw ast.Expr, want ast.Type, pos source.Pos) ast.Expr {
+	ct, ok := c.erasure(want).(*ast.ClassType)
+	if !ok || ct.Class == nil || ct.Class == c.b.Object || ct.Class.Special == "String" {
+		return nil
+	}
+	pair := c.jsonAdapterFor(ct.Class, pos)
+	if pair == nil {
+		return nil
+	}
+	return callNamed(id(ct.Class.Full), pair.reader.Name,
+		callNamed(id("JsonParser"), "parseString", raw))
+}
+
 // paramExpr builds the expression that produces one handler argument.
-func (c *Checker) paramExpr(p paramSpec) ast.Expr {
+func (c *Checker) paramExpr(p paramSpec, pos source.Pos) ast.Expr {
 	var raw ast.Expr
 	switch p.kind {
 	case "path":
 		raw = callNamed(id("vars"), "get", strLit(p.name))
 	case "body":
 		raw = sel(id("req"), "body")
+		if e := c.jsonBodyExpr(raw, p.want, pos); e != nil {
+			return e
+		}
 	case "header":
 		raw = callNamed(id("req"), "header", strLit(p.name))
 	default:

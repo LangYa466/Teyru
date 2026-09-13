@@ -483,6 +483,36 @@ func (ctx *methodCtx) checkBlock(b *ast.Block, scoped bool) {
 	}
 }
 
+// hasEffect reports whether an expression may stand alone as a statement,
+// following JLS 14.8: an assignment, an increment or decrement, a method call,
+// or an object creation. A parenthesised call is still a call, which is the one
+// nesting Java allows.
+func hasEffect(e ast.Expr) bool {
+	switch v := e.(type) {
+	case *ast.Call, *ast.New, *ast.NewArray, *ast.Assign:
+		return true
+	case *ast.Unary:
+		// an increment or a decrement is a statement; the other prefix and
+		// postfix operators are not
+		return strings.Contains(v.Op, "++") || strings.Contains(v.Op, "--")
+	}
+	return false
+}
+
+// describeExpr names an expression the way a reader wrote it, for the message
+// that says it does nothing.
+func describeExpr(e ast.Expr) string {
+	switch e.(type) {
+	case *ast.Unary, *ast.Binary:
+		return "a value"
+	case *ast.Select:
+		return "a field read"
+	case *ast.Literal:
+		return "a literal"
+	}
+	return "reading a variable"
+}
+
 func (ctx *methodCtx) checkStmt(s ast.Stmt) {
 	c := ctx.c
 	switch v := s.(type) {
@@ -524,6 +554,19 @@ func (ctx *methodCtx) checkStmt(s ast.Stmt) {
 		}
 	case *ast.ExprStmt:
 		ctx.checkExpr(v.X, nil)
+		// Java allows only the forms whose evaluation does something: an
+		// assignment, an increment or decrement, a method call, an object
+		// creation (JLS 14.8). Anything else is a statement with no effect,
+		// and rejecting it is what turns a real trap into a diagnostic -- this
+		// language ends an expression at the newline, so
+		//     long x = 100L + a
+		//              + b
+		// is two statements, and the second one used to be a silent unary plus
+		// that quietly left x one term short.
+		if !hasEffect(v.X) {
+			ctx.errf(v.X.GetPos(), "TY-TYP-0114",
+				"not a statement: %s has no effect", describeExpr(v.X))
+		}
 	case *ast.If:
 		ctx.checkCond(v.Cond)
 		ctx.checkStmt(v.Then)
@@ -737,11 +780,29 @@ func (ctx *methodCtx) checkTry(v *ast.Try) {
 	ctx.push()
 	defer ctx.pop()
 	for _, r := range v.Resources {
+		// `try (held)` is Java 9's form: an existing variable (or any
+		// expression) named as the resource. Its expression is not a statement,
+		// so the no-effect rule does not apply to it.
+		if es, ok := r.(*ast.ExprStmt); ok {
+			ctx.checkExpr(es.X, nil)
+			continue
+		}
 		ctx.checkStmt(r)
 		if lv, ok := r.(*ast.LocalVar); ok {
 			for _, vd := range lv.Vars {
 				if vd.Sym != nil {
 					vd.Sym.Final = true
+				}
+				// Java requires the resource's type to be a subtype of
+				// AutoCloseable, and this is where that stops being a
+				// formality: the implicit close is an interface call, so a
+				// class that merely happens to have a close() method compiles
+				// into a dispatch the object has no entry for -- a runtime
+				// failure with nothing in the source to point at.
+				if vd.Sym != nil && vd.Sym.Type != nil && !ast.IsError(vd.Sym.Type) &&
+					!c.isSubtype(vd.Sym.Type, &ast.ClassType{Class: c.b.AutoCloseable}) {
+					ctx.errf(vd.Pos, "TY-TYP-0113",
+						"resource type %s is not a subtype of AutoCloseable", vd.Sym.Type)
 				}
 			}
 		}
@@ -1437,18 +1498,45 @@ func (ctx *methodCtx) noteCapture(v *ast.Var) {
 	if ctx.lambda == nil {
 		return
 	}
-	// variables of the enclosing method are copied into the lambda object;
-	// the lambda's own parameters and locals stay on the C stack
-	if v.Owner == ctx.m {
-		return
-	}
-	for _, c := range ctx.lambda.Captures {
-		if c == v {
+	// A variable of an enclosing method is copied into the lambda object; the
+	// lambda's own parameters and locals stay on the C stack. Every lambda
+	// between this one and the variable's owner carries it, because a capture
+	// is one hop: a lambda written inside another lambda has to hold the value
+	// in its own object before it can copy it into a third. Recording only the
+	// innermost one left the inner closure reading a local of a method it is
+	// not compiled into, and the C name it emitted was the outer method's.
+	for lam := ctx.lambda; lam != nil; lam = lam.Outer {
+		if v.Owner == lambdaMethod(lam) {
 			return
 		}
+		seen := false
+		for _, c := range lam.Captures {
+			if c == v {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			lam.Captures = append(lam.Captures, v)
+		}
 	}
-	ctx.lambda.Captures = append(ctx.lambda.Captures, v)
 	v.Captured = true
+}
+
+// lambdaMethod is the synthesized method a lambda's body is checked in, which
+// is what decides whether a variable belongs to the lambda itself.
+func lambdaMethod(lam *ast.Lambda) *ast.Method {
+	if lam.Class == nil {
+		return nil
+	}
+	for _, ms := range lam.Class.Methods {
+		for _, m := range ms {
+			if m.Lambda == lam {
+				return m
+			}
+		}
+	}
+	return nil
 }
 
 func (ctx *methodCtx) captureOuter(target *ast.Class, v *ast.Var) {
@@ -2075,13 +2163,23 @@ func (ctx *methodCtx) checkNewArray(v *ast.NewArray) {
 		}
 		_ = i
 	}
+	levels := len(v.Dims) + v.Extra
 	if v.Init != nil {
-		v.Init.Elem = elem
+		// The braces are one array's worth of elements, so the initializer's
+		// element type is the created type with one dimension taken off:
+		// `new int[][]{{1, 2}}` makes an int[][], and its one element is an
+		// int[]. Handing the initializer the whole type instead made every
+		// element of a multi-dimensional literal answer to the wrong type --
+		// `new int[][]{ new int[]{1, 2} }` was asked for an int.
+		init := elem
+		for i := 0; i < levels-1; i++ {
+			init = &ast.ArrayType{Elem: init}
+		}
+		v.Init.Elem = init
 		ctx.checkArrayInit(v.Init, nil)
-		elem = v.Init.Elem
 	}
 	t := elem
-	for i := 0; i < len(v.Dims)+v.Extra; i++ {
+	for i := 0; i < levels; i++ {
 		t = &ast.ArrayType{Elem: t}
 	}
 	v.SetType(t)
@@ -2372,13 +2470,30 @@ type ovScore struct {
 // varargs call whose elements all match exactly used to tie with a fixed-arity
 // method and win or lose on declaration order alone.
 func (ctx *methodCtx) pickOverload(recv *ast.ClassType, cands []*ast.Method, args []ast.Expr, want ast.Type) (*ast.Method, ovScore) {
-	// Check arguments once with no target to obtain their types. Lambdas and
-	// method references need a target type, so they are checked after the
-	// overload is chosen, in bindArgs.
-	for _, a := range args {
-		if a.GetType() == nil && !isLambdaLike(a) {
-			ctx.checkExpr(a, nil)
+	// Check arguments once to obtain their types. Lambdas and method references
+	// need a target type, so they are checked after the overload is chosen, in
+	// bindArgs.
+	//
+	// A nested generic call needs one too, for the same reason: `id(chained())`
+	// where chained() has a type variable of its own leaves it open when the
+	// argument is checked with no target, and an open variable is a hole the
+	// inner call is then rejected for. When the name has a single candidate
+	// there is nothing to choose and its parameter types are the target; an
+	// overloaded name keeps checking with no target, because that target is
+	// what the overload is being chosen for.
+	var only *ast.Method
+	if len(cands) == 1 {
+		only = cands[0]
+	}
+	for i, a := range args {
+		if a.GetType() != nil || isLambdaLike(a) {
+			continue
 		}
+		var want ast.Type
+		if only != nil && i < len(only.Params) && !only.Varargs {
+			want = only.Params[i]
+		}
+		ctx.checkExpr(a, want)
 	}
 	best := ovScore{total: 1 << 30}
 	for phase := phaseStrict; phase <= phaseVarargs; phase++ {
@@ -2395,7 +2510,7 @@ func (ctx *methodCtx) pickOverload(recv *ast.ClassType, cands []*ast.Method, arg
 			}
 		}
 		if best.method != nil {
-			ctx.checkInferred(best.method, best.targs, args)
+			ctx.checkInferred(best.method, best, args)
 			return best.method, best
 		}
 	}
@@ -2407,8 +2522,39 @@ func (ctx *methodCtx) pickOverload(recv *ast.ClassType, cands []*ast.Method, arg
 // handing that to the C backend ends in an error about generated code rather
 // than about the program. An argument that is not a lambda always reports its
 // own type, so only a lambda (or method reference) can leave a hole.
-func (ctx *methodCtx) checkInferred(m *ast.Method, targs map[*ast.TypeVar]ast.Type, args []ast.Expr) {
+func (ctx *methodCtx) checkInferred(m *ast.Method, s ovScore, args []ast.Expr) {
 	if len(m.TypeParams) == 0 {
+		return
+	}
+	targs := s.targs
+	// A lambda is the one argument that cannot say what it is until its body
+	// has been checked, and the overload is picked before that happens: `pick(s
+	// -> s.length() * 2)` against `R pick(Fn<? super String, ? extends R>)`
+	// still has R open at this point. Checking the lambda against the parameter
+	// type now is what lets the body answer -- the functional interface it
+	// turns out to be is `Fn<String, Integer>`, and the variable is the
+	// wildcard's bound inside that.
+	for i, a := range args {
+		lam, ok := a.(*ast.Lambda)
+		if !ok || lam.GetType() != nil || i >= len(s.instArgs) || s.instArgs[i] == nil {
+			continue
+		}
+		ctx.checkExpr(lam, s.instArgs[i])
+		if act := ctx.lambdaActual(lam); act != nil {
+			ctx.c.inferTypeArg(s.instArgs[i], act, targs)
+		}
+	}
+	// A call with no arguments and no target says nothing about the method's
+	// type variables, and Java answers Object for one that nothing else
+	// constrains: `List.of()` is a `List<Object>`, not a mistake. (The JDK
+	// spells that one out as its own overload; a variable-arity method reaches
+	// the same place with an empty argument list.)
+	if len(args) == 0 {
+		for _, tv := range m.TypeParams {
+			if targs[tv] == nil && mentionsTypeVar(m, tv) {
+				targs[tv] = ctx.c.objType
+			}
+		}
 		return
 	}
 	missing := false
@@ -2421,7 +2567,18 @@ func (ctx *methodCtx) checkInferred(m *ast.Method, targs map[*ast.TypeVar]ast.Ty
 	if !missing {
 		return
 	}
+	// The call site is what a reader has to look at, and it is not where the
+	// method was declared: this used to point at the method's own header, so a
+	// failure inside a library call sent the reader to the library instead of
+	// to their own line. An argument is on the call's line; failing that, the
+	// declaration is all there is.
 	pos := m.Pos
+	for _, a := range args {
+		if a.GetPos().File != nil {
+			pos = a.GetPos()
+			break
+		}
+	}
 	for _, a := range args {
 		if isLambdaLike(a) && a.GetType() == nil {
 			pos = a.GetPos()
@@ -2546,6 +2703,14 @@ func (ctx *methodCtx) applicable(recv *ast.ClassType, m *ast.Method, args []ast.
 	if m.Varargs && len(args) == len(params) {
 		direct, boxed, total := true, false, 0
 		for i, a := range args {
+			// The array that stands in for the variable arguments is an
+			// ordinary argument here, and it is the only thing that can say
+			// what the method's type variable is: `asList(String[])` settles
+			// T = String, and without this the call was rejected for a type
+			// argument that was sitting in the argument list all along.
+			if len(mbind) > 0 {
+				params[i] = c.inferTypeArg(params[i], a.GetType(), mbind)
+			}
 			cost, ok := ctx.convCost(a.GetType(), params[i])
 			if !ok {
 				direct = false
@@ -2580,7 +2745,7 @@ func (ctx *methodCtx) applicable(recv *ast.ClassType, m *ast.Method, args []ast.
 			// any functional interface will do; the argument is checked once the
 			// overload is known
 			if pt != nil {
-				if i < len(params) {
+				if i < n {
 					params[i] = c.subst(pt, mbind)
 				}
 				s.total += 1
@@ -2589,7 +2754,13 @@ func (ctx *methodCtx) applicable(recv *ast.ClassType, m *ast.Method, args []ast.
 		}
 		if len(mbind) > 0 {
 			pt = c.inferTypeArg(pt, a.GetType(), mbind)
-			if i < len(params) {
+			// Only a fixed parameter may be written back. A variable-arity
+			// element is not a parameter: `asList(w, w)` has one parameter,
+			// `T[]`, and putting the inferred `String[]` into params[0] turned
+			// the next element's type into String -- so a call whose every
+			// argument is an array was rejected for a method that is right
+			// there.
+			if i < n {
 				params[i] = pt
 			}
 		}
@@ -2689,7 +2860,13 @@ func (c *Checker) inferTypeArg(param, arg ast.Type, bind map[*ast.TypeVar]ast.Ty
 				if util.IsPrim(arg) {
 					bind[p.Var] = c.boxed(arg)
 				} else {
-					bind[p.Var] = c.erasure(arg)
+					// The whole type, not its erasure: a bound that keeps its
+					// arguments is what lets the argument list refine it later
+					// (`collect` sees `Set<T>` from the target first, and the
+					// collector it is given says which Set it really is).
+					// Erasing here threw that away and left the outer call with
+					// a variable nothing could settle.
+					bind[p.Var] = arg
 				}
 			}
 			return bind[p.Var]
@@ -2725,6 +2902,35 @@ func (c *Checker) inferTypeArg(param, arg ast.Type, bind map[*ast.TypeVar]ast.Ty
 			return &ast.ArrayType{Elem: c.inferTypeArg(p.Elem, at.Elem, bind)}
 		}
 		return param
+	case *ast.WildcardType:
+		if p.Bound == nil {
+			return param
+		}
+		if p.Super {
+			// `Comparator<? super T>` against a `Comparator<String>` settles T =
+			// String: the argument's type is what the lower bound is asking
+			// about, and leaving T open makes the containment check ask whether
+			// String is a subtype of a bare variable -- false for every
+			// argument. This is the contravariant direction of the same rule
+			// the `? extends` case above follows.
+			if tv, isVar := p.Bound.(*ast.TypeVarType); isVar && arg != nil {
+				if v, bound := bind[tv.Var]; bound && v == nil {
+					bind[tv.Var] = arg
+					return &ast.WildcardType{Bound: arg, Super: true}
+				}
+			}
+			// T may also already have a value -- from the receiver, or from an
+			// explicit witness -- and the check has to see it: `Function<? super
+			// T, U>` with T = String must accept a Function<String, Integer>.
+			nb := c.subst(p.Bound, bind)
+			if nb == p.Bound {
+				return param
+			}
+			return &ast.WildcardType{Bound: nb, Super: true}
+		}
+		// The free variable is the wildcard's bound: `Fn<? super String,
+		// ? extends R>` against `Fn<String, Integer>` settles R = Integer.
+		return c.inferTypeArg(p.Bound, arg, bind)
 	}
 	return param
 }
@@ -2848,14 +3054,50 @@ func (ctx *methodCtx) bindArgs(m *ast.Method, s ovScore, args []ast.Expr, recv *
 	}
 }
 
+// lambdaActual is the functional interface a lambda actually turned out to be.
+// Its parameter types are the ones the target handed it, but its result comes
+// from its own body -- which is the only place a type variable the target left
+// open can be read off. A body that is a block says nothing here, so such a
+// lambda reports nothing and leaves the variable to be settled elsewhere.
+func (ctx *methodCtx) lambdaActual(lam *ast.Lambda) ast.Type {
+	ct, ok := lam.GetType().(*ast.ClassType)
+	if !ok || len(ct.Args) != len(lam.Params)+1 {
+		return nil
+	}
+	body, ok := lam.Body.(ast.Expr)
+	if !ok || body.GetType() == nil || ast.IsError(body.GetType()) {
+		return nil
+	}
+	res := body.GetType()
+	if util.IsPrim(res) {
+		res = ctx.c.boxed(res)
+	}
+	actual := &ast.ClassType{Class: ct.Class}
+	for _, p := range lam.Params {
+		if p.Sym == nil || p.Sym.Type == nil {
+			return nil
+		}
+		actual.Args = append(actual.Args, p.Sym.Type)
+	}
+	actual.Args = append(actual.Args, res)
+	return actual
+}
+
 func (ctx *methodCtx) checkCall(v *ast.Call, want ast.Type) {
 	if len(v.TypeArgs) > 0 {
 		var ts []ast.Type
 		for _, te := range v.TypeArgs {
 			ts = append(ts, ctx.c.resolveType(ctx.env, te))
 		}
+		// Saved and put back rather than cleared: an argument is checked while
+		// this call's witness is in hand, and an argument that is itself a call
+		// with a witness of its own would otherwise clear the outer one --
+		// `pair(f, Builder.<Integer>make())` then bound the lambda's parameter
+		// to Object, because by the time the overload was picked the outer
+		// witness was gone.
+		prev := ctx.pendingTypeArgs
 		ctx.pendingTypeArgs = ts
-		defer func() { ctx.pendingTypeArgs = nil }()
+		defer func() { ctx.pendingTypeArgs = prev }()
 	}
 	if v.ThisCtor {
 		ctx.checkThisCtor(v)
@@ -3052,7 +3294,7 @@ func (ctx *methodCtx) checkUnqualifiedCall(v *ast.Call, want ast.Type) {
 				v.Recv = ctx.implicitThis(v.Pos)
 			}
 		}
-		v.SetType(ctx.c.subst(m.Result, s.targs))
+		v.SetType(ctx.c.wildToBound(ctx.c.subst(m.Result, s.targs)))
 		return
 	}
 	// static imports
@@ -3064,7 +3306,7 @@ func (ctx *methodCtx) checkUnqualifiedCall(v *ast.Call, want ast.Type) {
 			}
 			v.Method = m
 			v.Static = true
-			v.SetType(ctx.c.subst(m.Result, s.targs))
+			v.SetType(ctx.c.wildToBound(ctx.c.subst(m.Result, s.targs)))
 			return
 		}
 	}
@@ -3161,7 +3403,7 @@ func (ctx *methodCtx) checkMethodCall(v *ast.Call, rt ast.Type, want ast.Type) {
 			}
 			v.Method = m
 			v.Static = true
-			v.SetType(ctx.c.subst(m.Result, s.targs))
+			v.SetType(ctx.c.wildToBound(ctx.c.subst(m.Result, s.targs)))
 			return
 		}
 		ctx.errf(v.Pos, "TY-TYP-0076", "cannot find method %s(%s) in %s", v.Name, argTypes(v.Args), cl.Name)
@@ -3224,7 +3466,11 @@ func (ctx *methodCtx) checkMethodCall(v *ast.Call, rt ast.Type, want ast.Type) {
 			res = ctx.c.subst(res, bindings(m.Owner, sup.Args))
 		}
 	}
-	v.SetType(res)
+	// after the receiver's arguments are in, not before: `E get(int)` on a
+	// `List<? extends Number>` is only a wildcard once E has been replaced by
+	// what the receiver said, and a wildcard is not a type anything can be
+	// done with.
+	v.SetType(ctx.c.wildToBound(res))
 	if !v.Static && !ctx.accessibleInstance(m, rt) {
 		ctx.errf(v.Pos, "TY-TYP-0079", "%s has %s access in %s", m.Name, visName(m.Mods), m.Owner.Name)
 	}
@@ -3583,10 +3829,10 @@ func (ctx *methodCtx) checkLambda(lam *ast.Lambda, want ast.Type) {
 		lam.SetType(ast.ErrorType{})
 		return
 	}
-	bind := bindings(ct.Class, ct.Args)
+	bind := c.samBindings(ct, sam)
 	params := make([]ast.Type, len(sam.Params))
 	for i, p := range sam.Params {
-		params[i] = c.subst(p, bind)
+		params[i] = c.wildToBound(c.subst(p, bind))
 	}
 	if len(lam.Params) != len(params) {
 		ctx.errf(lam.Pos, "TY-TYP-0084", "lambda has %d parameters but %s requires %d", len(lam.Params), sam.Name, len(params))
@@ -3606,7 +3852,7 @@ func (ctx *methodCtx) checkLambda(lam *ast.Lambda, want ast.Type) {
 	cl.LocalOwner = ctx.m
 	cl.Lambda = lam
 	lam.Class = cl
-	m := &ast.Method{Name: sam.Name, Owner: cl, Mods: ast.ModPublic, Result: c.subst(sam.Result, bind), Params: params, Lambda: lam, SynthKind: "lambda"}
+	m := &ast.Method{Name: sam.Name, Owner: cl, Mods: ast.ModPublic, Result: c.wildToBound(c.subst(sam.Result, bind)), Params: params, Lambda: lam, SynthKind: "lambda"}
 	cl.Methods[m.Name] = append(cl.Methods[m.Name], m)
 	c.addCtor(cl, &ast.Method{Name: "<init>", IsCtor: true, Owner: cl, Mods: ast.ModPublic, Result: ast.TVoid, SynthKind: "lambda-ctor"})
 	// check the body in the lambda's scope
@@ -3637,6 +3883,15 @@ func (ctx *methodCtx) checkLambda(lam *ast.Lambda, want ast.Type) {
 			// a void compatible body is a statement expression (JLS 15.27.2)
 			lctx.checkExpr(b, nil)
 			lam.ExprStmt = true
+		} else if _, open := m.Result.(*ast.TypeVarType); open {
+			// The target's result type may still be an open variable:
+			// `Comparator<String> c = comparing(s -> s)` against
+			// `Comparator<T> comparing(Fn<? super T, ? extends U> key)` has U
+			// unsettled when the body is checked, and checking a String against
+			// a bare `U` rejects it for not being one. The body's own type is
+			// what settles U, so it is checked with no target and the caller
+			// reads the answer back.
+			lctx.checkExpr(b, nil)
 		} else {
 			lctx.checkExpr(b, m.Result)
 			lctx.convertTo(b, m.Result)
@@ -3667,6 +3922,30 @@ func (ctx *methodCtx) checkLambda(lam *ast.Lambda, want ast.Type) {
 	}
 	c.addInstanceFields(cl)
 	c.layout(cl)
+}
+
+// samBindings maps the type variables of the interface that *declares* the
+// single abstract method onto what they are at the use site.
+//
+// `interface Un2<T> extends Function<T, T>` declares nothing itself: its one
+// abstract method is Function's apply, and the T in apply's signature belongs
+// to Function. Binding only ct's own variables leaves that T unsubstituted, so
+// an inferred lambda parameter comes out as the bare variable and `n ->
+// n.intValue()` is looked up on Object. Walking the inheritance path first and
+// then through ct's own arguments is what makes it Integer.
+func (c *Checker) samBindings(ct *ast.ClassType, sam *ast.Method) map[*ast.TypeVar]ast.Type {
+	bind := bindings(ct.Class, ct.Args)
+	if sam.Owner == nil || sam.Owner == ct.Class {
+		return bind
+	}
+	sup := c.asSuper(ct, sam.Owner)
+	if sup == nil {
+		return bind
+	}
+	for k, v := range bindings(sam.Owner, sup.Args) {
+		bind[k] = c.subst(v, bind)
+	}
+	return bind
 }
 
 // singleAbstract finds the functional interface method.
@@ -3713,12 +3992,12 @@ func (ctx *methodCtx) checkMethodRef(mr *ast.MethodRef, want ast.Type) {
 		mr.SetType(ast.ErrorType{})
 		return
 	}
-	bind := bindings(ct.Class, ct.Args)
+	bind := c.samBindings(ct, sam)
 	params := make([]ast.Type, len(sam.Params))
 	for i, p := range sam.Params {
-		params[i] = c.subst(p, bind)
+		params[i] = c.wildToBound(c.subst(p, bind))
 	}
-	res := c.subst(sam.Result, bind)
+	res := c.wildToBound(c.subst(sam.Result, bind))
 	// build an equivalent lambda
 	lam := &ast.Lambda{ExprBase: ast.ExprBase{Pos: mr.Pos}, Iface: sam}
 	for i := range params {

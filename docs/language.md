@@ -471,16 +471,31 @@ for (String n : names) {
 |---|---|---|
 | `java.time` | `lib/20` | `LocalDate`／`LocalTime`／`LocalDateTime`／`Instant`／`Duration`／`Period`／`DayOfWeek`／`Month`；曆法算在 epoch day 上，輸出與 JDK 逐位元組相同（沒有時區，`now()` 讀 UTC） |
 | `java.io` | `lib/16` | `File`、`Path`／`Paths`、`Files`（`readString`／`writeString`／`readAllLines`／`exists`／`createDirectories`／`listFiles`） |
-| `java.util.regex` | `lib/21` | `Pattern`／`Matcher`：回溯式比對，支援字面值、`.`、`*`／`+`／`?`／`{n,m}` 與其懶惰形式、字元類別、`\d`／`\w`／`\s`、`^`／`$`、`|`、捕獲與非捕獲群組、`replaceAll`／`replaceFirst`；不支援的語法（佔有量詞、前後視、反向參考、`\p{...}`）在 `compile` 就被拒絕 |
+| `java.util.regex` | `lib/21` | `Pattern`／`Matcher`：回溯式比對，支援字面值、`.`、`*`／`+`／`?`／`{n,m}` 與其懶惰形式、字元類別、`\d`／`\w`／`\s`、`^`／`$`、`|`、捕獲與非捕獲群組、`replaceAll`／`replaceFirst`／`split`（含 `limit` 的三種正負號）；不支援的語法（佔有量詞、前後視、反向參考、`\p{...}`）在 `compile` 就被拒絕。`String.matches`／`replaceAll`／`replaceFirst`／`split` 就是這五個方法，不是另一套實作 |
 | `java.net` | `lib/15` | `ServerSocket`、`Socket`、`SocketInputStream`／`SocketOutputStream`；同步阻塞的 POSIX socket，逾時以 `SocketTimeoutException` 回報 |
+| `java.util.stream` | `lib/22` | `Stream`／`IntStream`／`LongStream`／`DoubleStream`、`Collectors`（26 個工廠）、`Collector`、`Spliterator`／`Spliterators`、`StreamSupport`、統計與 `OptionalInt` 家族；中間操作建管線、終端操作才拉，`Collection.stream()` 是入口 |
+| `java.math` | `lib/23` | `BigInteger`（base-2^30 limb、符號與大小）、`BigDecimal`（unscaled value 與 scale）、`MathContext`、`RoundingMode`；演算法照 JDK 翻譯，因為小數位數、除法留下的 scale、進位方式都是可觀察的 |
+| `java.text` | `lib/24` | `NumberFormat`／`DecimalFormat`／`DecimalFormatSymbols`（完整 pattern 語言）、`DateFormat`／`SimpleDateFormat`（四種 style 與 parse）、`DateTimeFormatter`、`MessageFormat`、`ChoiceFormat`、`ParseException`／`ParsePosition`。**沒有 `Locale`**（只做 ROOT／en-US），**沒有 `java.util.Date`**（`format`／`parse` 走 `Instant`），`format` 沒有 `FieldPosition` 多載 |
+| `java.util` 其餘 | `lib/25` | `Properties`、`Random`（逐位元組照 java.util.Random）、`UUID`、`BitSet`、`StringTokenizer`、`Enumeration`、`ArrayOps`（陣列的範圍形式） |
 | `com.google.gson` | `lib/10`、`lib/19` | Gson 的樹狀 API，以及由編譯器產生的物件綁定（見 [docs/json.md](json.md)） |
 | 框架 | `lib/17`、`lib/18` | Spring 形狀的容器與 web 層（見 [docs/framework.md](framework.md)） |
 
+### 名稱怎麼找
+
+簡單名稱照 JLS 6.5.5：先看檔案自己的套件，再看單一型別匯入，再看 on-demand
+匯入，最後才看程式整體的名字（預設套件與前綴）。兩個 `import p.*` 都提供同一個
+名字時是 `TY-TYP-0099`，不會照宣告順序挑一個。
+
+前綴的名字是全域的——這正是 `List`、`String` 不加 import 就能用的原因——但
+**具名套件看不到預設套件**（JLS 7.4.2）。所以使用者在預設套件宣告 `class Node`
+不會弄壞標準庫自己講的 `Node`；反過來，在 `package teyru` 裡宣告一個前綴已經有
+的名字是 `TY-TYP-0001` 重複宣告，因為兩者的完整名稱相同。
+
 ### 沒有的東西
 
-反射、執行緒、`Stream`／`Spliterator`、`BigDecimal`／`BigInteger`、
-`java.util.concurrent`、時區資料庫、`DateTimeFormatter`、`Properties`。這些缺席
-都是刻意的：它們要嘛需要執行期反射，要嘛需要一份比整個語言還大的資料表。
+反射、執行緒、`java.util.concurrent`、時區資料庫、`Scanner`。這些缺席都是刻意的：它們要嘛需要執行期反射，要嘛需要一份比整個語言還大
+的資料表（時區），要嘛需要語言本身沒有的東西（執行緒），要嘛——`Scanner` 就是——
+做半套會比不做更糟。
 
 需要自己的原生程式庫時，`native` 方法可以實作在 C 裡，見
 [docs/native.md](native.md)。
@@ -499,8 +514,23 @@ for (String n : names) {
 10. 同名區域類別：Java 把區域類別限縮在它的區塊（JLS 6.3），所以同一個類別的
     兩個方法可以各宣告一個 `class Local`；Teyru 以簡單名稱透過外圍型別解析，
     這種寫法會回報 `TY-TYP-0001`。
-11. lambda 的型別引數推論不會從主體回推，`f.compose(v -> v * 10)` 這種沒有目標
-    型別的寫法需要寫出型別見證（javac 也拒絕該例，只是訊息不同）。
+11. 型別引數推論比 javac 弱一層，靠目標型別而不是完整的約束求解（沒有 JLS 18）：
+    - lambda 的型別引數會**從主體回推**：目標是 `Fn<String, ? extends R>` 而主體是
+      `s -> s.length()` 時 `R` 定為 `Integer`。反過來不行——主體本身是一個需要目標
+      型別的泛型呼叫時，兩邊互相依賴，單向代入停在那裡：
+      `words.stream().flatMap(w -> Stream.of(w.split(" ")))` 要先把
+      `Function<String, Stream<String>>` 寫出來。
+    - 引數如果只有唯一一個候選方法，會拿該參數的型別當目標——所以巢狀的泛型呼叫
+      可以推出來。
+    - **有自由型別變數的泛型呼叫，當它是引數、或是一個鏈式呼叫的接收者時，拿不到
+      目標型別**：`sort(xs, naturalOrder())` 與 `comparing(...).thenComparing(...)`
+      需要寫出型別見證（`Comparator.<String>naturalOrder()`）或先放進一個有宣告型別
+      的變數。javac 對這兩種寫法都可以。
+    - 顯式見證屬於它自己的呼叫：`pair(f, Builder.<Integer>make())` 的外層見證不會被
+      內層覆蓋。
+12. **沒有捕獲轉換**：`List<? extends Number>` 在這裡就是 `List<Number>`。Java 靠捕獲
+    擋下的寫入（對 `? extends` 的容器 `add`）這裡擋不住；反過來說，Java 靠捕獲才
+    能編過的讀取（`list.get(0).doubleValue()`）這裡直接可行。
 
 ## 13. 尚未實作
 
@@ -508,7 +538,7 @@ for (String n : names) {
 - `sealed` 的 `permits` 子句沒有被驗證：沒有 `permits` 的 sealed 型別在
   switch 窮盡性上被視為不可判定而要求 `default`；switch **陳述式**的窮盡性
   仍從寬
-- 反射、執行緒、檔案與網路 I/O
+- 反射、執行緒（檔案與網路 I/O 有，見 `java.io`／`java.net`）
 - 與 Java 生態互通（JAR、JDK 類別庫、JNI）
 - 識別字中的 Unicode 逸出（`\u0041` 不能拼出識別字）
 - 泛型建構子的顯式型別引數 `new <T>Foo(...)`
@@ -518,8 +548,8 @@ for (String n : names) {
 - 模組系統的語意（`import module X` 會被剖析後忽略，執行期沒有模組系統；`module-info` 不支援）
 - 陣列的執行期元素型別一律是 `teyru.Array`，所以 `String[].class` 與
   `int[].class` 是同一個物件（Java 是兩個）
-- 標準程式庫缺口：`String.lines()`（需要 `Stream`）、`String.join(...)`、
-  `String.format(...)`、`List.of(...)`、`java.util.Arrays`、
-  `Comparator.comparingInt(...)` 家族
+- 標準程式庫缺口：`Scanner`（見 §11）；`String.format` 的
+  `%t`／`%T`（日期時間轉換）也未實作，遇到會以 `ty_unimplemented` 停止而不是
+  印出看起來合理的東西
 - 無法解析的完整限定名稱（例如 `java.util.Arrays.sort(x)`）會回報
   `cannot find symbol java`——訊息指向鏈的第一段而不是整條路徑

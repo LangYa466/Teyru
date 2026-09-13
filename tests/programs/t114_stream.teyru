@@ -1,0 +1,408 @@
+/* java.util.stream, all of it, in one program. Expected output is javac 25's
+   for tests/programs/t114_stream.java.ref -- the same program with Java's
+   punctuation, run with `-Duser.language=en -Duser.country=US`.
+
+   The two files are the same program, and the differences are the spelling
+   this dialect needs and Java does not:
+
+     - a collector whose type argument cannot be read off an argument carries
+       a type witness -- `Collectors.<String>toList()`, where javac reads the
+       same type off the assignment;
+     - the flatMap lambda returns an inferred generic call of its own, which is
+       the one shape that still wants `Function<String, Stream<String>>`
+       written down.
+
+   Everything else -- laziness, the collectors, the primitive streams, the
+   consume-once rule and Java's exception messages -- is exercised as-is. The
+   only extra API is `Streams.of(list)` / `Streams.parallelStream(list)`, this
+   dialect's own door to a collection (`list.stream()` is the same call, and
+   the twin writes that). */
+
+package teyru
+
+class T114 {
+  static List<String> names() {
+    List<String> xs = new ArrayList<String>()
+    xs.add("alice")
+    xs.add("bob")
+    xs.add("carol")
+    xs.add("dave")
+    xs.add("eve")
+    xs.add("frank")
+    return xs
+  }
+
+  static <T extends Comparable<T>> List<T> sortedKeys(Set<T> keys) {
+    List<T> out = new ArrayList<T>(keys)
+    Collections.sort(out)
+    return out
+  }
+
+  public static void main(String[] args) {
+    List<String> names = names()
+    Comparator<String> nat = Comparator.<String>naturalOrder()
+    Comparator<String> byLen = Comparator.<String, Integer>comparing(s -> Integer.valueOf(s.length()))
+
+    // ------------------------------------------------------------- filter/map
+    List<String> shouty = names.stream().filter(s -> s.length() > 3).map(s -> s.toUpperCase()).collect(Collectors.<String>toList())
+    System.out.println("filter-map: " + shouty)
+
+    // The filter is total, so the stream is empty and not null.
+    System.out.println("filter-none: " + names.stream().filter(s -> s.length() > 99).collect(Collectors.<String>toList()))
+    System.out.println("count: " + names.stream().count())
+
+    // -------------------------------------------------------------- laziness
+    // The peek before the filter sees every element; the one after sees only
+    // what the filter let through. Nothing runs until the terminal operation.
+    List<String> trace = new ArrayList<String>()
+    List<String> kept = names.stream().peek(s -> trace.add("in:" + s)).filter(s -> s.length() == 3).peek(s -> trace.add("out:" + s)).collect(Collectors.<String>toList())
+    System.out.println("kept: " + kept)
+    System.out.println("trace: " + trace)
+
+    // limit stops an infinite iterate, which is only possible because the
+    // pipeline pulls.
+    System.out.println("iterate: " + Stream.iterate(1, n -> n * 2).limit(6).collect(Collectors.<Integer>toList()))
+
+    // The three-argument iterate tests the seed before handing it out.
+    System.out.println("iterate3: " + Stream.iterate(0, n -> n < 5, n -> n + 1).collect(Collectors.<Integer>toList()))
+    System.out.println("iterate3-zero: " + Stream.iterate(9, n -> n < 5, n -> n + 1).collect(Collectors.<Integer>toList()))
+
+    // generate is infinite too, and findFirst is what ends it.
+    System.out.println("generate: " + Stream.generate(() -> "x").limit(3).collect(Collectors.<String>toList()))
+    System.out.println("findFirst: " + Stream.generate(() -> "first").findFirst())
+
+    // takeWhile on an infinite stream: the predicate is what stops it.
+    System.out.println("takeWhile-inf: " + Stream.iterate(1, n -> n + 1).takeWhile(n -> n < 5).collect(Collectors.<Integer>toList()))
+
+    // -------------------------------------------- sorted, distinct, skip, limit
+    List<String> shuffled = new ArrayList<String>()
+    shuffled.add("pear")
+    shuffled.add("apple")
+    shuffled.add("fig")
+    shuffled.add("apple")
+    shuffled.add("date")
+    shuffled.add("fig")
+
+    System.out.println("sorted: " + shuffled.stream().sorted().collect(Collectors.<String>toList()))
+    System.out.println("sorted-rev: " + shuffled.stream().sorted(Collections.<String>reverseOrder()).collect(Collectors.<String>toList()))
+    System.out.println("sorted-len: " + shuffled.stream().sorted(byLen).collect(Collectors.<String>toList()))
+    System.out.println("distinct: " + shuffled.stream().distinct().collect(Collectors.<String>toList()))
+    System.out.println("skip: " + shuffled.stream().skip(2).collect(Collectors.<String>toList()))
+    System.out.println("limit: " + shuffled.stream().limit(2).collect(Collectors.<String>toList()))
+    System.out.println("skip-limit: " + shuffled.stream().skip(1).limit(3).collect(Collectors.<String>toList()))
+    System.out.println("skip-past: " + shuffled.stream().skip(99).collect(Collectors.<String>toList()))
+
+    // --------------------------------------------------- takeWhile / dropWhile
+    System.out.println("takeWhile: " + shuffled.stream().takeWhile(s -> s.length() == 4).collect(Collectors.<String>toList()))
+    System.out.println("dropWhile: " + shuffled.stream().dropWhile(s -> s.length() == 4).collect(Collectors.<String>toList()))
+    // The predicate is false for the first element, so dropWhile keeps all of
+    // them and takeWhile keeps none.
+    System.out.println("takeWhile-first: " + shuffled.stream().takeWhile(s -> s.length() == 99).collect(Collectors.<String>toList()))
+    System.out.println("dropWhile-first: " + shuffled.stream().dropWhile(s -> s.length() == 99).collect(Collectors.<String>toList()))
+
+    // ----------------------------------------------------------------- flatMap
+    List<String> words = new ArrayList<String>()
+    words.add("one two")
+    words.add("three")
+    words.add("four five six")
+    // The lambda's return type is itself an inferred generic call -- the one
+    // shape that still needs the type written down. The twin writes the same
+    // lambda inline, where javac infers its way through in one step.
+    Function<String, Stream<String>> splitter = w -> Stream.of(w.split(" "))
+    System.out.println("flatMap: " + words.stream().flatMap(splitter).collect(Collectors.<String>toList()))
+    System.out.println("flatMap-count: " + words.stream().flatMap(splitter).count())
+
+    // ------------------------------------------------------------------ reduce
+    List<Integer> nums = new ArrayList<Integer>()
+    nums.add(3)
+    nums.add(1)
+    nums.add(4)
+    nums.add(1)
+    nums.add(5)
+    System.out.println("reduce-id: " + nums.stream().reduce(10, (a, b) -> a + b))
+    System.out.println("reduce-op: " + nums.stream().reduce((a, b) -> a + b))
+    System.out.println("reduce-empty: " + names.stream().filter(s -> s.isEmpty()).reduce((a, b) -> a + b))
+    System.out.println("reduce-3: " + names.stream().reduce(0, (count, s) -> count + s.length(), (a, b) -> a + b))
+
+    // ----------------------------------------------------------------- collect
+    Supplier<StringBuilder> maker = StringBuilder::new
+    StringBuilder concat = names.stream().collect(maker, (sb, s) -> {
+      sb.append(s)
+      sb.append(";")
+    }, (a, b) -> a.append(b))
+    System.out.println("collect-3: " + concat)
+
+    String joined = names.stream().collect(Collectors.joining())
+    System.out.println("joining: " + joined)
+    System.out.println("joining-delim: " + names.stream().collect(Collectors.joining(" | ")))
+    System.out.println("joining-all: " + names.stream().collect(Collectors.joining(", ", "[", "]")))
+    System.out.println("joining-empty: [" + names.stream().filter(s -> s.isEmpty()).collect(Collectors.joining(", ", "[", "]")) + "]")
+
+    // ----------------------------------------- count, min, max, find, anyMatch
+    System.out.println("min: " + names.stream().min(nat))
+    System.out.println("max: " + names.stream().max(nat))
+    System.out.println("min-len: " + names.stream().min(byLen))
+    System.out.println("max-len-first: " + names.stream().max(byLen))
+    System.out.println("min-empty: " + names.stream().filter(s -> s.isEmpty()).min(nat))
+    System.out.println("findFirst: " + names.stream().filter(s -> s.startsWith("c")).findFirst())
+    System.out.println("findAny: " + names.stream().filter(s -> s.startsWith("f")).findAny())
+    System.out.println("findFirst-empty: " + names.stream().filter(s -> s.startsWith("z")).findFirst())
+    System.out.println("anyMatch: " + names.stream().anyMatch(s -> s.startsWith("b")))
+    System.out.println("anyMatch-no: " + names.stream().anyMatch(s -> s.startsWith("z")))
+    System.out.println("allMatch: " + names.stream().allMatch(s -> s.length() >= 3))
+    System.out.println("allMatch-no: " + names.stream().allMatch(s -> s.length() > 3))
+    System.out.println("noneMatch: " + names.stream().noneMatch(s -> s.startsWith("z")))
+    System.out.println("noneMatch-no: " + names.stream().noneMatch(s -> s.startsWith("a")))
+
+    // ------------------------------------------------------------------ toArray
+    Object[] asArray = names.stream().filter(s -> s.length() == 3).toArray()
+    System.out.println("toArray: " + Arrays.toString(asArray))
+
+    // ------------------------------------------------------------------ toList
+    System.out.println("toList: " + names.stream().map(s -> s.length()).toList())
+
+    // ---------------------------------------------------------------- to a set
+    Set<String> initials = new LinkedHashSet<String>()
+    for (String s : names) {
+      initials.add(s.substring(0, 1))
+    }
+    System.out.println("toSet: " + sortedKeys(initials))
+    // The collector builds its own set, so it is printed sorted: which set that
+    // is (hash or insertion order) is not part of the contract.
+    System.out.println("toSet-collector: " + sortedKeys(names.stream().collect(Collectors.<String>toSet())))
+
+    // -------------------------------------------------------- to a collection
+    List<String> collected = names.stream().filter(s -> s.length() == 3).collect(Collectors.<String, List<String>>toCollection(() -> new ArrayList<String>()))
+    System.out.println("toCollection: " + collected)
+
+    // ------------------------------------------------------------------ toMap
+    Map<String, Integer> lengths = names.stream().collect(Collectors.<String, String, Integer>toMap(s -> s, s -> Integer.valueOf(s.length())))
+    List<String> keys = sortedKeys(lengths.keySet())
+    System.out.println("toMap:")
+    for (String k : keys) {
+      System.out.println("  " + k + "=" + lengths.get(k))
+    }
+    // The three-argument form decides what a duplicate key means.
+    Map<Integer, String> merged = shuffled.stream().collect(Collectors.<String, Integer, String>toMap(s -> Integer.valueOf(s.length()), s -> s, (a, b) -> a + "/" + b))
+    List<Integer> mkeys = sortedKeys(merged.keySet())
+    System.out.println("toMap-merge:")
+    for (Integer k : mkeys) {
+      System.out.println("  " + k + "=" + merged.get(k))
+    }
+
+    // -------------------------------------------------------------- counting
+    System.out.println("counting: " + names.stream().collect(Collectors.<String>counting()))
+    System.out.println("counting-empty: " + names.stream().filter(s -> s.isEmpty()).collect(Collectors.<String>counting()))
+
+    // ------------------------------------------------------------ summing
+    System.out.println("summingInt: " + names.stream().collect(Collectors.<String>summingInt(s -> s.length())))
+    System.out.println("summingLong: " + names.stream().collect(Collectors.<String>summingLong(s -> s.length())))
+    System.out.println("summingDouble: " + names.stream().collect(Collectors.<String>summingDouble(s -> s.length())))
+    System.out.println("summingInt-empty: " + names.stream().filter(s -> s.isEmpty()).collect(Collectors.<String>summingInt(s -> s.length())))
+
+    // ----------------------------------------------------------- averaging
+    System.out.println("averagingInt: " + names.stream().collect(Collectors.<String>averagingInt(s -> s.length())))
+    System.out.println("averagingLong: " + names.stream().collect(Collectors.<String>averagingLong(s -> s.length())))
+    System.out.println("averagingDouble: " + names.stream().collect(Collectors.<String>averagingDouble(s -> s.length())))
+    System.out.println("averagingInt-empty: " + names.stream().filter(s -> s.isEmpty()).collect(Collectors.<String>averagingInt(s -> s.length())))
+
+    // ----------------------------------------------------------- groupingBy
+    Map<Integer, List<String>> byLength = names.stream().collect(Collectors.<String, Integer>groupingBy(s -> Integer.valueOf(s.length())))
+    List<Integer> byLengthKeys = sortedKeys(byLength.keySet())
+    System.out.println("groupingBy:")
+    for (Integer k : byLengthKeys) {
+      System.out.println("  " + k + " -> " + byLength.get(k))
+    }
+
+    Map<Integer, Long> counted = names.stream().collect(Collectors.<String, Integer, LongAccumulator, Long>groupingBy(s -> Integer.valueOf(s.length()), Collectors.<String>counting()))
+    List<Integer> countedKeys = sortedKeys(counted.keySet())
+    System.out.println("groupingBy-counting:")
+    for (Integer k : countedKeys) {
+      System.out.println("  " + k + " -> " + counted.get(k))
+    }
+
+    // groupingBy with a map factory and a second groupingBy inside it: a
+    // TreeMap of TreeMaps. The type arguments are spelled out because none of
+    // them can be read off the arguments.
+    Map<Integer, Map<Integer, List<String>>> inTreeMap = names.stream().collect(Collectors.<String, Integer, Map<Integer, List<String>>, Map<Integer, List<String>>, TreeMap<Integer, Map<Integer, List<String>>>>groupingBy(s -> Integer.valueOf(s.length()), () -> new TreeMap<Integer, Map<Integer, List<String>>>(), Collectors.<String, Integer, List<String>, List<String>, TreeMap<Integer, List<String>>>groupingBy(s -> Integer.valueOf(s.charAt(0)), () -> new TreeMap<Integer, List<String>>(), Collectors.<String>toList())))
+    System.out.println("groupingBy-treemap:")
+    for (Integer k : inTreeMap.keySet()) {
+      System.out.println("  " + k)
+      Map<Integer, List<String>> inner = inTreeMap.get(k)
+      for (Integer ik : inner.keySet()) {
+        System.out.println("    " + ik + " -> " + inner.get(ik))
+      }
+    }
+
+    // --------------------------------------------------------- partitioningBy
+    Map<Boolean, List<String>> parts = names.stream().collect(Collectors.<String>partitioningBy(s -> s.startsWith("a")))
+    System.out.println("partitioningBy: false=" + parts.get(Boolean.FALSE) + " true=" + parts.get(Boolean.TRUE))
+    Map<Boolean, Long> partCount = names.stream().collect(Collectors.<String, LongAccumulator, Long>partitioningBy(s -> s.length() == 3, Collectors.<String>counting()))
+    System.out.println("partitioningBy-count: false=" + partCount.get(Boolean.FALSE) + " true=" + partCount.get(Boolean.TRUE))
+    // Both keys are present even when one side is empty.
+    Map<Boolean, List<String>> allTrue = names.stream().collect(Collectors.<String>partitioningBy(s -> s.length() >= 3))
+    System.out.println("partitioningBy-all: false=" + allTrue.get(Boolean.FALSE) + " true.size=" + allTrue.get(Boolean.TRUE).size())
+
+    // ---------------------------------------------------------------- mapping
+    List<Integer> mapped = names.stream().collect(Collectors.<String, Integer, List<Integer>, List<Integer>>mapping(s -> Integer.valueOf(s.length()), Collectors.<Integer>toList()))
+    System.out.println("mapping: " + mapped)
+    Map<Integer, List<Integer>> mappedGroups = names.stream().collect(Collectors.<String, Integer, List<Integer>, List<Integer>>groupingBy(s -> Integer.valueOf(s.length()), Collectors.<String, Integer, List<Integer>, List<Integer>>mapping(s -> Integer.valueOf(s.charAt(0)), Collectors.<Integer>toList())))
+    List<Integer> mappedGroupKeys = sortedKeys(mappedGroups.keySet())
+    System.out.println("mapping-groups:")
+    for (Integer k : mappedGroupKeys) {
+      System.out.println("  " + k + " -> " + mappedGroups.get(k))
+    }
+
+    // --------------------------------------------------------------- reducing
+    System.out.println("reducing-id: " + names.stream().collect(Collectors.<String>reducing("", (a, b) -> a + b)))
+    System.out.println("reducing-op: " + nums.stream().collect(Collectors.<Integer>reducing((a, b) -> a + b)))
+    System.out.println("reducing-empty: " + names.stream().filter(s -> s.isEmpty()).collect(Collectors.<String>reducing((a, b) -> a + b)))
+    System.out.println("reducing-3: " + names.stream().collect(Collectors.<String, Integer>reducing(Integer.valueOf(0), s -> Integer.valueOf(s.length()), (a, b) -> a + b)))
+
+    // ---------------------------------------------------------------- minBy/maxBy
+    System.out.println("minBy: " + names.stream().collect(Collectors.<String>minBy(nat)))
+    System.out.println("maxBy: " + names.stream().collect(Collectors.<String>maxBy(byLen)))
+
+    // ----------------------------------------------------------------- builder
+    Stream.Builder<String> builder = Stream.builder()
+    builder.add("a")
+    builder.add("b")
+    builder.add("c")
+    System.out.println("builder: " + builder.build().collect(Collectors.<String>toList()))
+
+    // ------------------------------------------------------------------ concat
+    System.out.println("concat: " + Stream.concat(names.stream().limit(2), names.stream().skip(4)).collect(Collectors.<String>toList()))
+    System.out.println("concat-empty: " + Stream.concat(Stream.<String>empty(), Stream.<String>empty()).collect(Collectors.<String>toList()))
+
+    // ------------------------------------------------------------ of and empty
+    System.out.println("of-one: " + Stream.of("solo").collect(Collectors.<String>toList()))
+    System.out.println("of-many: " + Stream.of("a", "b", "c").collect(Collectors.<String>toList()))
+    System.out.println("empty: " + Stream.<String>empty().collect(Collectors.<String>toList()))
+    System.out.println("empty-count: " + Stream.<String>empty().count())
+    System.out.println("ofNullable: " + Stream.ofNullable(null).count() + " " + Stream.ofNullable("yes").collect(Collectors.<String>toList()))
+
+    // ----------------------------------------------------------- IntStream
+    System.out.println("range: " + Arrays.toString(IntStream.range(1, 6).toArray()))
+    System.out.println("range-empty: " + Arrays.toString(IntStream.range(3, 3).toArray()))
+    System.out.println("rangeClosed: " + Arrays.toString(IntStream.rangeClosed(1, 5).toArray()))
+    System.out.println("range-map: " + Arrays.toString(IntStream.rangeClosed(1, 5).map(n -> n * n).toArray()))
+    System.out.println("range-filter: " + Arrays.toString(IntStream.rangeClosed(1, 10).filter(n -> n % 3 == 0).toArray()))
+    System.out.println("range-sum: " + IntStream.rangeClosed(1, 100).sum())
+    System.out.println("range-count: " + IntStream.range(0, 10).filter(n -> n % 2 == 0).count())
+    System.out.println("range-min: " + IntStream.of(4, 2, 9, 1).min())
+    System.out.println("range-max: " + IntStream.of(4, 2, 9, 1).max())
+    System.out.println("range-min-empty: " + IntStream.empty().min())
+    System.out.println("range-avg: " + IntStream.rangeClosed(1, 6).average())
+    System.out.println("range-avg-empty: " + IntStream.empty().average())
+    System.out.println("range-sumstats: " + IntStream.rangeClosed(1, 6).summaryStatistics())
+    System.out.println("range-sumstats-empty: " + IntStream.empty().summaryStatistics())
+    System.out.println("range-reduce: " + IntStream.rangeClosed(1, 5).reduce(0, (a, b) -> a + b))
+    System.out.println("range-reduce-op: " + IntStream.rangeClosed(1, 5).reduce((a, b) -> a + b))
+    System.out.println("range-reduce-empty: " + IntStream.empty().reduce((a, b) -> a + b))
+    System.out.println("range-sorted: " + Arrays.toString(IntStream.of(3, 1, 2, 1).sorted().toArray()))
+    System.out.println("range-distinct: " + Arrays.toString(IntStream.of(3, 1, 2, 1).distinct().toArray()))
+    System.out.println("range-limit: " + Arrays.toString(IntStream.iterate(1, n -> n * 3).limit(4).toArray()))
+    System.out.println("range-takeWhile: " + Arrays.toString(IntStream.iterate(1, n -> n + 1).takeWhile(n -> n < 4).toArray()))
+    System.out.println("range-dropWhile: " + Arrays.toString(IntStream.rangeClosed(1, 8).dropWhile(n -> n < 6).toArray()))
+    System.out.println("range-skip: " + Arrays.toString(IntStream.rangeClosed(1, 8).skip(5).toArray()))
+    System.out.println("range-flatMap: " + Arrays.toString(IntStream.rangeClosed(1, 3).flatMap(n -> IntStream.rangeClosed(1, n)).toArray()))
+    System.out.println("range-boxed: " + IntStream.rangeClosed(1, 4).boxed().collect(Collectors.<Integer>toList()))
+    System.out.println("range-asLong: " + LongStream.of(IntStream.rangeClosed(1, 3).asLongStream().toArray()).boxed().collect(Collectors.<Long>toList()))
+    System.out.println("range-asDouble: " + DoubleStream.of(IntStream.rangeClosed(1, 3).asDoubleStream().toArray()).boxed().collect(Collectors.<Double>toList()))
+    System.out.println("range-mapToObj: " + IntStream.rangeClosed(1, 4).<String>mapToObj(n -> "n" + n).collect(Collectors.<String>toList()))
+    System.out.println("range-concat: " + Arrays.toString(IntStream.concat(IntStream.rangeClosed(1, 2), IntStream.rangeClosed(8, 9)).toArray()))
+    System.out.println("range-generate: " + Arrays.toString(IntStream.generate(() -> 7).limit(3).toArray()))
+    System.out.println("range-anyMatch: " + IntStream.rangeClosed(1, 5).anyMatch(n -> n > 3))
+    System.out.println("range-allMatch: " + IntStream.rangeClosed(1, 5).allMatch(n -> n > 0))
+    System.out.println("range-noneMatch: " + IntStream.rangeClosed(1, 5).noneMatch(n -> n > 9))
+    System.out.println("range-findFirst: " + IntStream.rangeClosed(3, 9).findFirst())
+    System.out.println("range-peek: " + Arrays.toString(IntStream.rangeClosed(1, 3).peek(n -> System.out.print("peek" + n + " ")).toArray()))
+    IntStream collectInto = IntStream.rangeClosed(1, 4)
+    System.out.println("range-collect: " + collectInto.collect(maker, (sb, n) -> {
+      sb.append(n)
+    }, (a, b) -> a.append(b)))
+
+    // ----------------------------------------------------------- LongStream
+    System.out.println("long-sum: " + LongStream.rangeClosed(1, 1000000).sum())
+    System.out.println("long-stats: " + LongStream.rangeClosed(1, 6).summaryStatistics())
+    System.out.println("long-avg: " + LongStream.of(1, 2, 4).average())
+    System.out.println("long-max: " + LongStream.of(1, 2, 4).max())
+    System.out.println("long-boxed: " + LongStream.rangeClosed(1, 3).boxed().collect(Collectors.<Long>toList()))
+
+    // --------------------------------------------------------- DoubleStream
+    System.out.println("double-sum: " + DoubleStream.of(0.5, 0.25, 0.125).sum())
+    System.out.println("double-stats: " + DoubleStream.of(1.5, 2.5, 3.5).summaryStatistics())
+    System.out.println("double-avg: " + DoubleStream.of(1.0, 2.0, 4.0).average())
+    System.out.println("double-min: " + DoubleStream.of(1.0, -2.0, 4.0).min())
+    System.out.println("double-boxed: " + DoubleStream.of(1.5, 2.5).boxed().collect(Collectors.<Double>toList()))
+
+    // ------------------------------------------- Spliterator and StreamSupport
+    Spliterator<String> sized = Spliterators.spliterator(names.iterator(), 6, Spliterator.ORDERED | Spliterator.SIZED)
+    System.out.println("spliterator-size: " + sized.estimateSize())
+    System.out.println("spliterator-exact: " + sized.getExactSizeIfKnown())
+    System.out.println("spliterator-ordered: " + sized.hasCharacteristics(Spliterator.ORDERED))
+    System.out.println("spliterator-sized: " + sized.hasCharacteristics(Spliterator.SIZED))
+
+    Spliterator<String> sp = names.stream().limit(3).spliterator()
+    System.out.println("stream-spliterator-ordered: " + sp.hasCharacteristics(Spliterator.ORDERED))
+    System.out.println("stream-spliterator-split: " + sp.trySplit())
+    while (sp.tryAdvance(s -> System.out.print("got" + s + " "))) {
+      // the three elements, then false
+    }
+    System.out.println()
+
+    Iterator<String> fromSpliterator = Spliterators.iterator(names.stream().limit(2).spliterator())
+    System.out.println("Spliterators.iterator: " + fromSpliterator.next() + " " + fromSpliterator.next() + " " + fromSpliterator.hasNext())
+
+    Stream<String> viaSupport = StreamSupport.stream(names.stream().limit(2).spliterator(), false)
+    System.out.println("StreamSupport: " + viaSupport.collect(Collectors.<String>toList()))
+    System.out.println("isParallel: " + names.stream().isParallel())
+
+    // Streams is this dialect's own door to a collection -- `list.stream()` is
+    // the same call -- and the only place parallelStream() is spelled. Both
+    // lines are the Java twin's `names.stream()`.
+    System.out.println("Streams.of: " + Streams.of(names).limit(2).collect(Collectors.<String>toList()))
+    System.out.println("Streams.parallelStream: " + (Streams.parallelStream(names).isParallel() == false) + " " + Streams.parallelStream(names).count())
+
+    // ----------------------------------------------------------- onClose/close
+    List<String> closed = new ArrayList<String>()
+    try (Stream<String> held = names.stream().limit(1).onClose(() -> closed.add("first")).onClose(() -> closed.add("second"))) {
+      System.out.println("closed-in-try: " + closed)
+    }
+    System.out.println("closed-after: " + closed)
+
+    // -------------------------------------------------------- consume-once
+    try {
+      Stream<String> once = names.stream()
+      once.count()
+      once.count()
+      System.out.println("no exception")
+    } catch (IllegalStateException e) {
+      System.out.println("IllegalStateException: " + e.getMessage())
+    }
+
+    // A derived stream consumes its source too, as in the JDK.
+    try {
+      Stream<String> source = names.stream()
+      source.filter(s -> s.length() == 3).count()
+      source.count()
+      System.out.println("no exception")
+    } catch (IllegalStateException e) {
+      System.out.println("IllegalStateException: " + e.getMessage())
+    }
+
+    // IllegalArgumentException from a negative limit, and Java's message.
+    try {
+      names.stream().limit(-1)
+      System.out.println("no exception")
+    } catch (IllegalArgumentException e) {
+      System.out.println("IllegalArgumentException: " + e.getMessage())
+    }
+    try {
+      names.stream().skip(-1)
+      System.out.println("no exception")
+    } catch (IllegalArgumentException e) {
+      System.out.println("IllegalArgumentException: " + e.getMessage())
+    }
+  }
+}

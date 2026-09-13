@@ -130,9 +130,8 @@ class CollectionSupport {
  * library; sort(list) hands it a comparator over the natural ordering, since
  * the merge would otherwise have to ask each element for compareTo.
  *
- * shuffle uses Math.random(): Java takes a java.util.Random so that a caller
- * can reproduce a shuffle, and there is no Random in this library yet, so a
- * shuffle cannot be seeded (docs/language.md §13). */
+ * shuffle takes a java.util.Random, which is what lets a caller reproduce a
+ * shuffle: the seeded form is a function of the Random's own sequence. */
 class Collections {
   private Collections() {
   }
@@ -141,7 +140,7 @@ class Collections {
     list.sort(new NaturalOrderComparator<T>())
   }
 
-  public static <T> void sort(List<T> list, Comparator<T> c) {
+  public static <T> void sort(List<T> list, Comparator<? super T> c) {
     list.sort(c)
   }
 
@@ -159,8 +158,17 @@ class Collections {
   }
 
   public static <T> void shuffle(List<T> list) {
+    shuffle(list, new Random())
+  }
+
+  /* The seeded form is what makes a shuffle reproducible, and it is the one
+     Java tests are written against: the sequence of swaps is a function of the
+     Random's own nextInt, so the same seed gives the same order here and
+     there. Java's no-argument form draws from a Random of its own, which is
+     what the call above does. */
+  public static <T> void shuffle(List<T> list, Random rnd) {
     for (int i = list.size() - 1 : i > 0 : i--) {
-      int j = (int) (Math.random() * (i + 1))
+      int j = rnd.nextInt(i + 1)
       T tmp = list.get(i)
       list.set(i, list.get(j))
       list.set(j, tmp)
@@ -377,27 +385,27 @@ class UnmodifiableCollection<T> implements Collection<T>, Iterable<T> {
   }
 
   public boolean add(T e) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public boolean remove(Object o) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public boolean addAll(Collection<? extends T> other) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public boolean removeAll(Collection<?> other) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public boolean retainAll(Collection<?> other) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public void clear() {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public boolean equals(Object o) {
@@ -475,47 +483,47 @@ class UnmodifiableList<T> implements List<T>, Collection<T> {
   }
 
   public T set(int i, T e) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public void add(int i, T e) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public boolean add(T e) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public T remove(int i) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public boolean remove(Object o) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public boolean addAll(Collection<? extends T> other) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public boolean addAll(int index, Collection<? extends T> other) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public boolean removeAll(Collection<?> other) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public boolean retainAll(Collection<?> other) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public void clear() {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public void sort(Comparator<T> c) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public boolean equals(Object o) {
@@ -566,27 +574,27 @@ class UnmodifiableSet<T> implements Set<T>, Collection<T> {
   }
 
   public boolean add(T e) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public boolean remove(Object o) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public boolean addAll(Collection<? extends T> other) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public boolean removeAll(Collection<?> other) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public boolean retainAll(Collection<?> other) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public void clear() {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public boolean equals(Object o) {
@@ -645,19 +653,19 @@ class UnmodifiableMap<K, V> implements Map<K, V> {
   }
 
   public V put(K key, V value) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public V remove(Object key) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public void putAll(Map<? extends K, ? extends V> other) {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public void clear() {
-    throw new UnsupportedOperationException("unmodifiable")
+    throw new UnsupportedOperationException()
   }
 
   public boolean equals(Object o) {
@@ -748,43 +756,43 @@ class SingletonList<T> implements List<T>, Collection<T> {
   }
 
   public T set(int i, T e) {
-    throw new UnsupportedOperationException("set")
+    throw new UnsupportedOperationException()
   }
 
   public void add(int i, T e) {
-    throw new UnsupportedOperationException("add")
+    throw new UnsupportedOperationException()
   }
 
   public boolean add(T e) {
-    throw new UnsupportedOperationException("add")
+    throw new UnsupportedOperationException()
   }
 
   public T remove(int i) {
-    throw new UnsupportedOperationException("remove")
+    throw new UnsupportedOperationException()
   }
 
   public boolean remove(Object o) {
-    throw new UnsupportedOperationException("remove")
+    throw new UnsupportedOperationException()
   }
 
   public boolean addAll(Collection<? extends T> c) {
-    throw new UnsupportedOperationException("addAll")
+    throw new UnsupportedOperationException()
   }
 
   public boolean addAll(int index, Collection<? extends T> c) {
-    throw new UnsupportedOperationException("addAll")
+    throw new UnsupportedOperationException()
   }
 
   public boolean removeAll(Collection<?> c) {
-    throw new UnsupportedOperationException("removeAll")
+    throw new UnsupportedOperationException()
   }
 
   public boolean retainAll(Collection<?> c) {
-    throw new UnsupportedOperationException("retainAll")
+    throw new UnsupportedOperationException()
   }
 
   public void clear() {
-    throw new UnsupportedOperationException("clear")
+    throw new UnsupportedOperationException()
   }
 
   public boolean equals(Object o) {
@@ -849,15 +857,15 @@ class SingletonListIterator<T> implements ListIterator<T>, Iterator<T> {
   }
 
   public void remove() {
-    throw new UnsupportedOperationException("remove")
+    throw new UnsupportedOperationException()
   }
 
   public void set(T e) {
-    throw new UnsupportedOperationException("set")
+    throw new UnsupportedOperationException()
   }
 
   public void add(T e) {
-    throw new UnsupportedOperationException("add")
+    throw new UnsupportedOperationException()
   }
 }
 
@@ -941,43 +949,43 @@ class NCopiesList<T> implements List<T>, Collection<T> {
   }
 
   public T set(int i, T e) {
-    throw new UnsupportedOperationException("set")
+    throw new UnsupportedOperationException()
   }
 
   public void add(int i, T e) {
-    throw new UnsupportedOperationException("add")
+    throw new UnsupportedOperationException()
   }
 
   public boolean add(T e) {
-    throw new UnsupportedOperationException("add")
+    throw new UnsupportedOperationException()
   }
 
   public T remove(int i) {
-    throw new UnsupportedOperationException("remove")
+    throw new UnsupportedOperationException()
   }
 
   public boolean remove(Object o) {
-    throw new UnsupportedOperationException("remove")
+    throw new UnsupportedOperationException()
   }
 
   public boolean addAll(Collection<? extends T> c) {
-    throw new UnsupportedOperationException("addAll")
+    throw new UnsupportedOperationException()
   }
 
   public boolean addAll(int index, Collection<? extends T> c) {
-    throw new UnsupportedOperationException("addAll")
+    throw new UnsupportedOperationException()
   }
 
   public boolean removeAll(Collection<?> c) {
-    throw new UnsupportedOperationException("removeAll")
+    throw new UnsupportedOperationException()
   }
 
   public boolean retainAll(Collection<?> c) {
-    throw new UnsupportedOperationException("retainAll")
+    throw new UnsupportedOperationException()
   }
 
   public void clear() {
-    throw new UnsupportedOperationException("clear")
+    throw new UnsupportedOperationException()
   }
 
   public boolean equals(Object o) {
@@ -1054,14 +1062,14 @@ class NCopiesIterator<T> implements ListIterator<T>, Iterator<T> {
   }
 
   public void remove() {
-    throw new UnsupportedOperationException("remove")
+    throw new UnsupportedOperationException()
   }
 
   public void set(T e) {
-    throw new UnsupportedOperationException("set")
+    throw new UnsupportedOperationException()
   }
 
   public void add(T e) {
-    throw new UnsupportedOperationException("add")
+    throw new UnsupportedOperationException()
   }
 }

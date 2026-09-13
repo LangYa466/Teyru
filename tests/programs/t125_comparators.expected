@@ -1,0 +1,13 @@
+== natural and reversed ==
+[apple, fig, kiwi, pear]
+[pear, kiwi, fig, apple]
+== comparing ==
+[fig, pear, kiwi, apple]
+[apple, fig, kiwi, pear]
+== thenComparing breaks the ties ==
+[a, bb, dd, ccc]
+== nullsFirst and nullsLast ==
+[null, a, b]
+[a, b, null]
+== reversed flips the whole order ==
+[ccc, bb, dd, a]

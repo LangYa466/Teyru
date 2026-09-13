@@ -832,47 +832,6 @@ int32_t ty_str_charat(tystr *s, int32_t i) {
   return (unsigned char)s->data[i];
 }
 int32_t ty_str_contains(tystr *s, tystr *sub) { return ty_str_indexof(s, sub) >= 0; }
-/* Java semantics: trailing empty fields are dropped, and an empty separator
-   returns the whole string as the single element. */
-tyarr *ty_str_split(tystr *s, tystr *sep) {
-  if (!s || !sep) ty_npe();
-  if (sep->len == 0) {
-    tyarr *one = ty_array_new(1, 8);
-    one->refs = 1;
-    /* the declared result is String[], so the array promises String for its
-       elements the same way `new String[]` does; TY_STRING is installed before
-       any user code runs */
-    one->elemcls = TY_STRING;
-    ((void **)one->data)[0] = ty_str_new(s->data, s->len);
-    return one;
-  }
-  int64_t count = 1, i = 0;
-  while (i + sep->len <= s->len) {
-    if (memcmp(s->data + i, sep->data, (size_t)sep->len) == 0) {
-      count++;
-      i += sep->len;
-    } else {
-      i++;
-    }
-  }
-  tyarr *out = ty_array_new(count, 8);
-  out->refs = 1;
-  out->elemcls = TY_STRING;
-  int64_t start = 0, field = 0;
-  i = 0;
-  while (i + sep->len <= s->len) {
-    if (memcmp(s->data + i, sep->data, (size_t)sep->len) == 0) {
-      ((void **)out->data)[field++] = ty_str_new(s->data + start, i - start);
-      i += sep->len;
-      start = i;
-    } else {
-      i++;
-    }
-  }
-  ((void **)out->data)[field] = ty_str_new(s->data + start, s->len - start);
-  while (out->len > 0 && ((tystr **)out->data)[out->len - 1]->len == 0) out->len--;
-  return out;
-}
 int32_t ty_str_starts(tystr *s, tystr *p) {
   if (!s || !p) return 0;
   return p->len <= s->len && memcmp(s->data, p->data, (size_t)p->len) == 0;
@@ -1904,51 +1863,6 @@ tystr *ty_str_replace_str(tystr *s, tystr *a, tystr *b) {
   return r;
 }
 
-/* --------------------------------------------------- regex-shaped methods */
-
-/* Teyru has no regular expression engine. Rather than answer a pattern it
-   cannot honour -- which would silently change what a program matches --
-   replaceAll, replaceFirst, matches and split(String, int) test the pattern for
-   a metacharacter and, for a pattern that has one, call ty_unimplemented, which
-   prints the method name and exits 70. A pattern with no metacharacter is a
-   literal, and for it these are exactly Java. */
-static const char *regex_meta = "\\^$.|?*+()[]{}";
-void ty_str_check_literal(tystr *re, const char *what) {
-  int64_t i;
-  if (!re) ty_npe();
-  for (i = 0; i < re->len; i++)
-    if (strchr(regex_meta, re->data[i])) ty_unimplemented(what);
-}
-tystr *ty_str_replaceall(tystr *s, tystr *re, tystr *rep) {
-  ty_str_check_literal(re, "String.replaceAll");
-  return ty_str_replace_str(s, re, rep);
-}
-tystr *ty_str_replacefirst(tystr *s, tystr *re, tystr *rep) {
-  int32_t at;
-  int64_t i, n;
-  char *p;
-  tystr *r;
-  ty_str_check_literal(re, "String.replaceFirst");
-  if (!s || !re || !rep) ty_npe();
-  at = ty_str_indexof(s, re);
-  if (at < 0) return ty_str_new(s->data, s->len);
-  n = at + rep->len + (s->len - at - re->len);
-  r = ty_str_new(NULL, n);
-  p = r->data;
-  memcpy(p, s->data, (size_t)at);
-  memcpy(p + at, rep->data, (size_t)rep->len);
-  for (i = 0; i < s->len - at - re->len; i++)
-    p[at + rep->len + i] = s->data[at + re->len + i];
-  return r;
-}
-/* matches() is anchored at both ends, as Java defines it: the whole string has
-   to be the pattern, which for a literal pattern is equality. */
-int32_t ty_str_matches(tystr *s, tystr *re) {
-  ty_str_check_literal(re, "String.matches");
-  if (!s || !re) ty_npe();
-  return s->len == re->len && memcmp(s->data, re->data, (size_t)s->len) == 0;
-}
-
 /* -------------------------------------------------------------- char[] */
 
 /* A char is one byte in this runtime, so the two views are element for element:
@@ -2034,64 +1948,6 @@ tystr *ty_str_interned(tystr *s) {
   intern_tab[h] = e;
   intern_used++;
   return s;
-}
-
-/* split with a limit, Java's way. The limit is a count of fields, not of
-   separators: a positive limit stops after that many fields with the rest of
-   the string left whole in the last one, a limit of zero drops the trailing
-   empty fields, and a negative limit keeps every field it finds. */
-tyarr *ty_str_split_limit(tystr *s, tystr *re, int32_t limit) {
-  tyarr *out;
-  int64_t i = 0, field = 0, n = 1, at;
-  ty_str_check_literal(re, "String.split");
-  if (!s || !re) ty_npe();
-  if (limit > 0 && n > limit) n = limit;
-  if (re->len == 0) {
-    /* an empty pattern matches before every character: Java gives one field per
-       character, and with a positive limit it stops at the limit */
-    n = s->len;
-    if (limit > 0 && limit < n) n = limit;
-    if (n == 0) {
-      tyarr *one = ty_array_new(1, 8);
-      one->refs = 1;
-      one->elemcls = TY_STRING;
-      ((void **)one->data)[0] = ty_str_new(s->data, s->len);
-      return one;
-    }
-    out = ty_array_new(n, 8);
-    out->refs = 1;
-    out->elemcls = TY_STRING;
-    for (i = 0; i < n; i++) {
-      int64_t len = (i == n - 1 && limit <= 0) ? s->len - i : 1;
-      ((void **)out->data)[i] = ty_str_new(s->data + i, len);
-    }
-    return out;
-  }
-  while (i + re->len <= s->len) {
-    if (limit <= 0 || n < limit) {
-      if (memcmp(s->data + i, re->data, (size_t)re->len) == 0) { n++; i += re->len; continue; }
-    }
-    i++;
-  }
-  out = ty_array_new(n, 8);
-  out->refs = 1;
-  out->elemcls = TY_STRING;
-  i = 0;
-  at = 0;
-  while (i + re->len <= s->len && (limit <= 0 || field < n - 1)) {
-    if (memcmp(s->data + i, re->data, (size_t)re->len) == 0) {
-      ((void **)out->data)[field++] = ty_str_new(s->data + at, i - at);
-      i += re->len;
-      at = i;
-    } else {
-      i++;
-    }
-  }
-  ((void **)out->data)[field] = ty_str_new(s->data + at, s->len - at);
-  if (limit == 0) {
-    while (out->len > 0 && ((tystr **)out->data)[out->len - 1]->len == 0) out->len--;
-  }
-  return out;
 }
 
 /* -------------------------------------------- StringBuilder/StringBuffer */
@@ -2313,6 +2169,47 @@ static void fmtb_init(fmtbuf *b) {
   b->cap = 64;
   b->len = 0;
   b->buf = (char *)malloc((size_t)b->cap);
+}
+
+/* The scratch buffers one String.format is holding while it runs.
+
+   Java reports a bad format by throwing, and a throw here is a longjmp to
+   whatever handler surrounds the call: every buffer between the loop and that
+   handler becomes unreachable at once, so freeing them at the normal exits is
+   not enough -- a program that catches a formatting error in a loop would leak
+   the format under test every time. These buffers are malloc'd on purpose (the
+   collector is no place for a scratch buffer a nested allocation could
+   collect), so the throw helpers free them on the way out instead.
+
+   The runtime has no threads and the format helpers below are one call deep,
+   so a plain list is enough; it is emptied whenever a format ends, normally or
+   not. */
+#define FMT_LIVE_MAX 8
+static fmtbuf *fmt_live[FMT_LIVE_MAX];
+static int fmt_live_n;
+
+static void fmt_hold(fmtbuf *b) {
+  if (fmt_live_n < FMT_LIVE_MAX) fmt_live[fmt_live_n++] = b;
+}
+static void fmt_drop(fmtbuf *b) {
+  int i;
+  for (i = 0; i < fmt_live_n; i++) {
+    if (fmt_live[i] == b) {
+      fmt_live[i] = fmt_live[--fmt_live_n];
+      return;
+    }
+  }
+}
+/* The buffers below the current format belong to a format that is still
+   running -- `%s` on an object whose toString calls String.format again puts
+   two on the list at once -- so a throw frees down to the innermost one and no
+   further. */
+static int fmt_base;
+
+static void fmt_abandon(void) {
+  while (fmt_live_n > fmt_base) {
+    free(fmt_live[--fmt_live_n]->buf);
+  }
 }
 static void fmtb_need(fmtbuf *b, int64_t extra) {
   if (b->len + extra <= b->cap) return;
@@ -2691,6 +2588,7 @@ static void bad_arg(char conv, void *o) {
   } else {
     snprintf(msg, sizeof msg, "%c != %s", conv, name);
   }
+  fmt_abandon();
   ty_throw(ty_illarg(msg));
 }
 /* Java's flag check: a combination the conversion gives no meaning to is an
@@ -2714,6 +2612,7 @@ static void bad_flags(char conv, const fmtflags *f) {
   char msg[80], fl[8];
   flag_str(fl, f);
   snprintf(msg, sizeof msg, "Conversion = %c, Flags = %s", conv, fl);
+  fmt_abandon();
   ty_throw(ty_illarg(msg));
 }
 /* A flag combination that contradicts itself, and a flag on a conversion that
@@ -2722,6 +2621,7 @@ static void bad_flag_set(const fmtflags *f) {
   char msg[80], fl[8];
   flag_str(fl, f);
   snprintf(msg, sizeof msg, "Flags = '%s'", fl);
+  fmt_abandon();
   ty_throw(ty_illarg(msg));
 }
 /* A '-' with no width has nothing to justify against, and Java quotes the
@@ -2732,11 +2632,13 @@ static void bad_width(tystr *fmt, int64_t spec0, int64_t speclen) {
   if (n > 76) n = 76;
   memcpy(msg, fmt->data + spec0, (size_t)n);
   msg[n] = 0;
+  fmt_abandon();
   ty_throw(ty_illarg(msg));
 }
 static void bad_int(const char *prefix, int64_t v) {
   char msg[32];
   snprintf(msg, sizeof msg, "%s%d", prefix, (int)v);
+  fmt_abandon();
   ty_throw(ty_illarg(msg));
 }
 static void check_flags(char conv, const fmtflags *f, tystr *fmt, int64_t spec0, int64_t speclen) {
@@ -2834,8 +2736,36 @@ missing:
   memcpy(msg + 18, fmt->data + spec0, (size_t)n);
   msg[18 + n] = '\'';
   msg[19 + n] = 0;
+  fmt_abandon();
   ty_throw(ty_illarg(msg));
   return NULL;
+}
+
+/* pick_arg answers with the argument one conversion uses. Java's `%<` reuses
+   the argument the previous conversion used and leaves the running count where
+   it was, so "%s %<s" prints the same argument twice; anything else takes the
+   next one, or the one an explicit "N$" named. A null reference is a value, so
+   "there was no previous" is its own flag rather than a null argument. */
+static void *pick_arg(tyarr *args, int64_t *ai, int64_t fixed, void **last, int *have_last,
+                      int relative, tystr *fmt, int64_t spec0, int64_t speclen) {
+  if (relative) {
+    if (!*have_last) {
+      char msg[80];
+      int64_t n = speclen;
+      if (n > 48) n = 48;
+      memcpy(msg, "Format specifier '", 18);
+      memcpy(msg + 18, fmt->data + spec0, (size_t)n);
+      msg[18 + n] = '\'';
+      msg[19 + n] = 0;
+      fmt_abandon();
+  ty_throw(ty_illarg(msg));
+    }
+    return *last;
+  }
+  void *o = next_arg(args, ai, fixed, fmt, spec0, speclen);
+  *last = o;
+  *have_last = 1;
+  return o;
 }
 
 /* ------------------------------------------------------- format assembly */
@@ -2848,8 +2778,13 @@ missing:
 tystr *ty_str_format(tystr *fmt, tyarr *args) {
   fmtbuf out;
   int64_t i = 0, ai = 0, fixed = -1;
+  void *last = NULL;
+  int have_last = 0, relative = 0;
   if (!fmt) ty_npe();
+  int outer_base = fmt_base;
+  fmt_base = fmt_live_n;
   fmtb_init(&out);
+  fmt_hold(&out);
   while (i < fmt->len) {
     fmtflags f;
     char conv, c = fmt->data[i];
@@ -2866,6 +2801,7 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
        order. It stands before the flags, so it is read first -- but only when
        a '$' follows, because the same digits are otherwise a width. */
     fixed = -1;
+    relative = 0;
     {
       int64_t save = i, idx = 0;
       while (i < fmt->len && TY_ASCII_DIGIT(fmt->data[i])) {
@@ -2874,6 +2810,11 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
       }
       if (i > save && i < fmt->len && fmt->data[i] == '$') {
         fixed = idx - 1;
+        i++;
+      } else if (i == save && i < fmt->len && fmt->data[i] == '<') {
+        /* `%<` names the previous argument, so it is read where the "N$"
+           would have been */
+        relative = 1;
         i++;
       } else {
         i = save;
@@ -2955,7 +2896,7 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
 
     switch (conv) {
       case 's': case 'S': case 'b': case 'B': case 'h': case 'H': case 'c': case 'C': {
-        void *o = next_arg(args, &ai, fixed, fmt, spec0, i - spec0);
+        void *o = pick_arg(args, &ai, fixed, &last, &have_last, relative, fmt, spec0, i - spec0);
         char *heap = NULL;
         const char *body;
         int64_t blen, k;
@@ -3003,7 +2944,7 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
         break;
       }
       case 'd': case 'o': case 'x': case 'X': {
-        void *o = next_arg(args, &ai, fixed, fmt, spec0, i - spec0);
+        void *o = pick_arg(args, &ai, fixed, &last, &have_last, relative, fmt, spec0, i - spec0);
         int kind;
         int64_t v;
         char raw[32], grp[80];
@@ -3062,7 +3003,7 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
         break;
       }
       case 'e': case 'E': case 'f': case 'g': case 'G': case 'a': case 'A': {
-        void *o = next_arg(args, &ai, fixed, fmt, spec0, i - spec0);
+        void *o = pick_arg(args, &ai, fixed, &last, &have_last, relative, fmt, spec0, i - spec0);
         double v;
         int upper = conv == 'E' || conv == 'G' || conv == 'A';
         fmtbuf body, t;
@@ -3074,6 +3015,7 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
         }
         v = float_arg(conv, o);
         fmtb_init(&body);
+        fmt_hold(&body);
         if (v != v) {
           /* a NaN takes no sign and no zero padding, whatever the flags say */
           fmtb_add(&body, upper ? "NAN" : "NaN", 3);
@@ -3106,6 +3048,7 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
             plen = 1;
           }
           fmtb_init(&t);
+          fmt_hold(&t);
           if (conv == 'a' || conv == 'A') {
             fmt_hex_body(&t, v, P, upper);
           } else if (conv == 'e' || conv == 'E') {
@@ -3117,9 +3060,11 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
           }
           move_number(&body, &t, &f);
           free(t.buf);
+          fmt_drop(&t);
         }
         fmt_put(&out, &f, prefix, plen, body.buf, body.len);
         free(body.buf);
+        fmt_drop(&body);
         break;
       }
       case 't': case 'T':
@@ -3128,6 +3073,7 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
       default: {
         char msg[64];
         snprintf(msg, sizeof msg, "Conversion = '%c'", conv);
+        fmt_abandon();
         ty_throw(ty_illarg(msg));
       }
     }
@@ -3135,6 +3081,8 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
   {
     tystr *r = ty_str_new(out.buf, out.len);
     free(out.buf);
+    fmt_drop(&out);
+    fmt_base = outer_base;
     return r;
   }
 }

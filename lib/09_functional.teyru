@@ -74,4 +74,56 @@ interface Comparator<T> {
   default Comparator<T> reversed() {
     return (a, b) -> compare(b, a)
   }
+
+  /* The comparing family, which is how a comparator is normally written. The
+     key extractor's result has to be Comparable, and `? super U` is what makes
+     a Comparable<String> usable where a Comparable<Object> is asked for --
+     Java says the same thing in the same place. */
+  static <T, U extends Comparable<? super U>> Comparator<T> comparing(Function<? super T, ? extends U> key) {
+    return (a, b) -> key.apply(a).compareTo(key.apply(b))
+  }
+
+  static <T extends Comparable<? super T>> Comparator<T> naturalOrder() {
+    return (a, b) -> a.compareTo(b)
+  }
+
+  static <T extends Comparable<? super T>> Comparator<T> reverseOrder() {
+    return (a, b) -> b.compareTo(a)
+  }
+
+  /* thenComparing compares the second key only where the first two are equal,
+     which is what makes a chain of keys a total order on the first one. */
+  default Comparator<T> thenComparing(Comparator<? super T> other) {
+    return (a, b) -> {
+      int r = compare(a, b)
+      if (r != 0) {
+        return r
+      }
+      return other.compare(a, b)
+    }
+  }
+
+  static <T> Comparator<T> nullsFirst(Comparator<? super T> c) {
+    return (a, b) -> {
+      if (a == null) {
+        return b == null ? 0 : -1
+      }
+      if (b == null) {
+        return 1
+      }
+      return c.compare(a, b)
+    }
+  }
+
+  static <T> Comparator<T> nullsLast(Comparator<? super T> c) {
+    return (a, b) -> {
+      if (a == null) {
+        return b == null ? 0 : 1
+      }
+      if (b == null) {
+        return -1
+      }
+      return c.compare(a, b)
+    }
+  }
 }

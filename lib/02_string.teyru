@@ -53,19 +53,68 @@ class String extends Object implements Comparable<String> {
   public native String toString()
   public native String replace(char old, char now)
   public native String replace(String old, String now)
-  /* Java's three regex methods, answered for a literal pattern. Teyru has no
-     regular expression engine and will not grow one here, so the C side tests
-     the pattern for metacharacters and calls ty_unimplemented with the method
-     name when it finds one -- a loud exit 70 rather than a silent wrong
-     answer. A literal pattern is by far the common call, and for it these are
-     exact. The search is not anchored for replaceAll/replaceFirst (Java's
-     literal-looking patterns are unanchored too) but matches() is anchored at
-     both ends, as Java defines it. */
-  public native String replaceAll(String re, String rep)
-  public native String replaceFirst(String re, String rep)
-  public native boolean matches(String re)
-  public native String[] split(String re)
-  public native String[] split(String re, int limit)
+  /* Java's five regex methods. These were natively implemented over a literal
+     pattern until lib/21 gave the language an engine; now they are what Java
+     says they are -- Pattern.compile(re) and a Matcher call. `matches` is
+     anchored at both ends, replaceAll/replaceFirst are not, which is exactly
+     what Matcher does; the only thing left here is Java's handling of a
+     trailing empty field in split, which the Matcher overloads cannot express
+     because they work on a match rather than on a partition. */
+  public String replaceAll(String re, String rep) {
+    return Pattern.compile(re).matcher(this).replaceAll(rep)
+  }
+  public String replaceFirst(String re, String rep) {
+    return Pattern.compile(re).matcher(this).replaceFirst(rep)
+  }
+  public boolean matches(String re) {
+    return Pattern.compile(re).matcher(this).matches()
+  }
+  public String[] split(String re) {
+    return split(re, 0)
+  }
+  public String[] split(String re, int limit) {
+    return Pattern.compile(re).split(this, limit)
+  }
+
+  /* Java's String.lines: the lines of this string as a stream. A line is a
+     sequence of characters up to a terminator (\n, \r\n or \r) or to the end
+     of the string, and the terminator is not part of it -- so a string that
+     ends in one has no empty line after it, and an empty string has no lines at
+     all. Both come out of the split's own rules: a limit of zero drops the
+     trailing empty fields, and the empty string is the one case that rule does
+     not cover. */
+  public Stream<String> lines() {
+    List<String> out = new ArrayList<String>()
+    int n = length()
+    int start = 0
+    while (start < n) {
+      int i = start
+      int at = -1
+      int skip = 1
+      while (i < n) {
+        char c = charAt(i)
+        if (c == '\n') {
+          at = i
+          break
+        }
+        if (c == '\r') {
+          at = i
+          if (i + 1 < n && charAt(i + 1) == '\n') {
+            skip = 2
+          }
+          break
+        }
+        i++
+      }
+      if (at < 0) {
+        out.add(substring(start, n))
+        break
+      }
+      out.add(substring(start, at))
+      start = at + skip
+    }
+    return Streams.of(out)
+  }
 
   public static native String valueOf(Object v)
   public static native String valueOf(char[] v)

@@ -4,3 +4,8 @@ package todo
 // components and needs nothing else.
 record Todo(int id, String text, boolean done) {
 }
+
+// What a create request carries. A separate record from Todo because the id is
+// the store's to give: binding the whole Todo would let a payload choose one.
+record NewTodo(String text) {
+}

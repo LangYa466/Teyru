@@ -104,11 +104,11 @@ class MapKeySet<K, V> implements Set<K>, Collection<K> {
   }
 
   public boolean add(K e) {
-    throw new UnsupportedOperationException("add")
+    throw new UnsupportedOperationException()
   }
 
   public boolean addAll(Collection<? extends K> c) {
-    throw new UnsupportedOperationException("addAll")
+    throw new UnsupportedOperationException()
   }
 
   public boolean equals(Object o) {
@@ -319,19 +319,19 @@ class MapValues<K, V> implements List<V>, Collection<V> {
   }
 
   public boolean add(V e) {
-    throw new UnsupportedOperationException("add")
+    throw new UnsupportedOperationException()
   }
 
   public void add(int index, V element) {
-    throw new UnsupportedOperationException("add")
+    throw new UnsupportedOperationException()
   }
 
   public boolean addAll(Collection<? extends V> c) {
-    throw new UnsupportedOperationException("addAll")
+    throw new UnsupportedOperationException()
   }
 
   public boolean addAll(int index, Collection<? extends V> c) {
-    throw new UnsupportedOperationException("addAll")
+    throw new UnsupportedOperationException()
   }
 
   // identity, as explained above: the list contract is deliberately not taken
@@ -407,7 +407,7 @@ class MapValueListIterator<K, V> implements ListIterator<V>, Iterator<V> {
   }
 
   public void remove() {
-    throw new UnsupportedOperationException("remove")
+    throw new UnsupportedOperationException()
   }
 
   public void set(V e) {
@@ -418,7 +418,7 @@ class MapValueListIterator<K, V> implements ListIterator<V>, Iterator<V> {
   }
 
   public void add(V e) {
-    throw new UnsupportedOperationException("add")
+    throw new UnsupportedOperationException()
   }
 }
 
@@ -515,11 +515,11 @@ class HashMapEntrySet<K, V> implements Set<Map.Entry<K, V>>, Collection<Map.Entr
   }
 
   public boolean add(Map.Entry<K, V> e) {
-    throw new UnsupportedOperationException("add")
+    throw new UnsupportedOperationException()
   }
 
   public boolean addAll(Collection<? extends Map.Entry<K, V>> c) {
-    throw new UnsupportedOperationException("addAll")
+    throw new UnsupportedOperationException()
   }
 
   public boolean equals(Object o) {
@@ -647,11 +647,11 @@ class LinkedHashMapIterator<K, V> implements ListIterator<Map.Entry<K, V>>, Iter
   }
 
   public void set(Map.Entry<K, V> e) {
-    throw new UnsupportedOperationException("set")
+    throw new UnsupportedOperationException()
   }
 
   public void add(Map.Entry<K, V> e) {
-    throw new UnsupportedOperationException("add")
+    throw new UnsupportedOperationException()
   }
 }
 
@@ -730,7 +730,7 @@ class SnapshotEntry<K, V> implements Map.Entry<K, V> {
   }
 
   public V setValue(V v) {
-    throw new UnsupportedOperationException("setValue")
+    throw new UnsupportedOperationException()
   }
 
   public boolean equals(Object o) {
@@ -1934,11 +1934,11 @@ class TreeEntrySet<K, V> implements Set<Map.Entry<K, V>>, Collection<Map.Entry<K
   }
 
   public boolean add(Map.Entry<K, V> e) {
-    throw new UnsupportedOperationException("add")
+    throw new UnsupportedOperationException()
   }
 
   public boolean addAll(Collection<? extends Map.Entry<K, V>> c) {
-    throw new UnsupportedOperationException("addAll")
+    throw new UnsupportedOperationException()
   }
 
   public boolean equals(Object o) {
@@ -2123,11 +2123,11 @@ class TreeKeySet<K, V> implements NavigableSet<K>, SortedSet<K>, Set<K>, Collect
   }
 
   public boolean add(K e) {
-    throw new UnsupportedOperationException("add")
+    throw new UnsupportedOperationException()
   }
 
   public boolean addAll(Collection<? extends K> c) {
-    throw new UnsupportedOperationException("addAll")
+    throw new UnsupportedOperationException()
   }
 
   public boolean equals(Object o) {

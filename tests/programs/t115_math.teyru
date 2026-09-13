@@ -1,0 +1,471 @@
+/* java.math: BigInteger, BigDecimal, MathContext and RoundingMode, exercised
+   against the JDK's own answers. This is the same program as the javac 25
+   program in this file's .expected, line for line, except for the semicolons
+   the language does not have and the byte casts Java's constant narrowing
+   makes unnecessary. Everything it prints -- the string a BigDecimal lays out,
+   the scale a division lands on, the way a tie rounds, the message an
+   exception carries -- is compared byte for byte against javac's output, so
+   the JDK's behaviour, not this runtime's reading of the documentation, is
+   what the library is held to.
+
+   Note the two places where Java and Teyru answer differently on purpose, both
+   outside the library: a BigDecimal is printed through its toString in both, so
+   the forms agree, and every exception message printed here is a message the
+   JDK chose (Teyru's class names carry a `teyru.` package where Java's carry
+   `java.math.`, which is why no test prints a whole exception). */
+
+package teyru
+
+class T115 {
+  static void p(String s) { System.out.println(s) }
+
+  static void bd(String label, BigDecimal d) {
+    p(label + " = " + d + " |s=" + d.scale() + "|p=" + d.precision() + "|u=" + d.unscaledValue())
+  }
+
+  static void bx(String label, BigInteger v) {
+    p(label + " = " + v + " |sign=" + v.signum() + "|bits=" + v.bitLength() + "/" + v.bitCount())
+  }
+
+  static String bytes(byte[] bs) {
+    StringBuilder sb = new StringBuilder()
+    for (int i = 0 : i < bs.length : i++) {
+      int v = bs[i] & 0xFF
+      if (i > 0) { sb.append(' ') }
+      sb.append("0123456789abcdef".charAt(v >> 4))
+      sb.append("0123456789abcdef".charAt(v & 0xF))
+    }
+    return sb.toString()
+  }
+
+  public static void main(String[] args) {
+    // ---------- BigInteger constants and valueOf ----------
+    p("consts " + BigInteger.ZERO + " " + BigInteger.ONE + " " + BigInteger.TWO + " " + BigInteger.TEN)
+    bx("valueOf0", BigInteger.valueOf(0))
+    bx("valueOf-1", BigInteger.valueOf(-1))
+    bx("valueOf-9999", BigInteger.valueOf(-9999))
+
+    // ---------- arithmetic ----------
+    BigInteger a = new BigInteger("123456789012345678901234567890")
+    BigInteger b = new BigInteger("-98765432109876543210")
+    bx("a", a)
+    bx("a+b", a.add(b))
+    bx("a-b", a.subtract(b))
+    bx("a*b", a.multiply(b))
+    bx("b*a", b.multiply(b))
+    bx("a*a", a.multiply(a))
+    bx("a.negate", a.negate())
+    bx("b.abs", b.abs())
+    bx("a-2a", a.subtract(a.add(a)))
+    p("a.min(b) " + a.min(b) + " a.max(b) " + a.max(b))
+    p("a.compareTo(b) " + a.compareTo(b) + " b.compareTo(a) " + b.compareTo(a) + " a.compareTo(a) " + a.compareTo(a))
+    p("a.equals(a) " + a.equals(a) + " a.equals(new) " + a.equals(new BigInteger(a.toString())))
+    p("a.equals(b) " + a.equals(b) + " BigInteger.ONE.equals(ONE) " + BigInteger.ONE.equals(BigInteger.ONE))
+    bx("a.pow(3)", a.pow(3))
+    bx("(-3).pow(5)", BigInteger.valueOf(-3).pow(5))
+    bx("(-3).pow(4)", BigInteger.valueOf(-3).pow(4))
+    bx("x.pow(0)", BigInteger.valueOf(7).pow(0))
+    bx("gcd", a.gcd(b))
+    bx("gcd(0,5)", BigInteger.ZERO.gcd(BigInteger.valueOf(5)))
+    bx("gcd(0,0)", BigInteger.ZERO.gcd(BigInteger.ZERO))
+
+    // ---------- division truncates toward zero ----------
+    BigInteger[] ds = { BigInteger.valueOf(7), BigInteger.valueOf(-7),
+                        BigInteger.valueOf(2), BigInteger.valueOf(-2) }
+    for (BigInteger x : ds) {
+      for (BigInteger y : ds) {
+        p("div " + x + "/" + y + " q=" + x.divide(y) + " r=" + x.remainder(y))
+      }
+    }
+    BigInteger[][] bigs = { { a, b }, { b, a }, { a, BigInteger.valueOf(3) } }
+    for (BigInteger[] pair : bigs) {
+      BigInteger[] qr = pair[0].divideAndRemainder(pair[1])
+      p("qr " + pair[0] + "/" + pair[1] + " -> " + qr[0] + " , " + qr[1])
+      p("qr len " + qr.length)
+    }
+    bx("a.mod(7)", a.mod(BigInteger.valueOf(7)))
+    bx("b.mod(7)", b.mod(BigInteger.valueOf(7)))
+    bx("b.remainder(7)", b.remainder(BigInteger.valueOf(7)))
+    bx("modPow", BigInteger.valueOf(3).modPow(BigInteger.valueOf(100), BigInteger.valueOf(1000000007)))
+    bx("modPow0", BigInteger.valueOf(3).modPow(BigInteger.ZERO, BigInteger.valueOf(7)))
+    bx("modPow m=1", BigInteger.valueOf(3).modPow(BigInteger.valueOf(5), BigInteger.ONE))
+    bx("modPow neg base", BigInteger.valueOf(-3).modPow(BigInteger.valueOf(3), BigInteger.valueOf(7)))
+    bx("modInverse", BigInteger.valueOf(3).modInverse(BigInteger.valueOf(11)))
+    try { p("modInverse2 " + new BigInteger("240").modInverse(new BigInteger("46"))) }
+    catch (ArithmeticException e) { p("modInverse2 " + e.getMessage()) }
+    try { p("modInverse fail " + BigInteger.valueOf(2).modInverse(BigInteger.valueOf(4))) }
+    catch (ArithmeticException e) { p("modInverse fail " + e.getMessage()) }
+    try { p("modInverse m=0 " + BigInteger.ONE.modInverse(BigInteger.ZERO)) }
+    catch (ArithmeticException e) { p("modInverse m=0 " + e.getMessage()) }
+    try { p("modInverse m=1 " + BigInteger.ONE.modInverse(BigInteger.ONE)) }
+    catch (ArithmeticException e) { p("modInverse m=1 " + e.getMessage()) }
+
+    // ---------- shifts and bits ----------
+    BigInteger h = new BigInteger("1234567890123456789012345678901234567890")
+    bx("h", h)
+    bx("h<<64", h.shiftLeft(64))
+    bx("h>>64", h.shiftRight(64))
+    bx("h>>200", h.shiftRight(200))
+    BigInteger nh = h.negate()
+    bx("-h<<5", nh.shiftLeft(5))
+    bx("-h>>5", nh.shiftRight(5))
+    bx("-h>>200", nh.shiftRight(200))
+    BigInteger t = new BigInteger("255")
+    p("255 & 85 = " + t.and(BigInteger.valueOf(85)))
+    p("255 | 85 = " + t.or(BigInteger.valueOf(85)))
+    p("255 ^ 85 = " + t.xor(BigInteger.valueOf(85)))
+    p("~255 = " + t.not())
+    p("~0 = " + BigInteger.ZERO.not())
+    p("255 &~ 85 = " + t.andNot(BigInteger.valueOf(85)))
+    p("-255 & 85 = " + t.negate().and(BigInteger.valueOf(85)))
+    p("-255 | 85 = " + t.negate().or(BigInteger.valueOf(85)))
+    p("-255 ^ 85 = " + t.negate().xor(BigInteger.valueOf(85)))
+    p("-255 &~ 85 = " + t.negate().andNot(BigInteger.valueOf(85)))
+    p("big & -big = " + h.and(nh) + " | " + h.or(nh) + " | " + h.xor(nh))
+    p("testBit 0..3 of 255 " + t.testBit(0) + t.testBit(1) + t.testBit(2) + t.testBit(3) + t.testBit(8))
+    p("bitLength 0 " + BigInteger.ZERO.bitLength() + " 1 " + BigInteger.ONE.bitLength() +
+      " 255 " + t.bitLength() + " 256 " + BigInteger.valueOf(256).bitLength())
+    p("bitCount -1 " + BigInteger.valueOf(-1).bitCount() + " -2 " + BigInteger.valueOf(-2).bitCount() +
+      " -256 " + BigInteger.valueOf(-256).bitCount() + " 255 " + t.bitCount())
+    bx("setBit 100", t.setBit(100))
+    bx("clearBit 0", t.clearBit(0))
+
+    // ---------- strings ----------
+    p("toString16 " + t.toString(16) + " 2 " + t.toString(2) + " 36 " + new BigInteger("1234567890").toString(36))
+    p("toString neg " + nh.toString(16) + " " + nh.toString(10))
+    bx("parse hex", new BigInteger("ff", 16))
+    bx("parse 36", new BigInteger("zz", 36))
+    bx("parse +77", new BigInteger("+77"))
+    bx("parse -0", new BigInteger("-0"))
+    bx("parse leading zeros", new BigInteger("000012"))
+    try { p("parse empty " + new BigInteger("")) } catch (RuntimeException e) { p("parse empty " + e.getMessage()) }
+    try { p("parse bad " + new BigInteger("12x")) } catch (RuntimeException e) { p("parse bad " + e.getMessage()) }
+    try { p("parse bad16 " + new BigInteger("1g", 16)) } catch (RuntimeException e) { p("parse bad16 " + e.getMessage()) }
+    try { p("parse sign " + new BigInteger("+-3")) } catch (RuntimeException e) { p("parse sign " + e.getMessage()) }
+    try { p("parse mid " + new BigInteger("3+3")) } catch (RuntimeException e) { p("parse mid " + e.getMessage()) }
+    try { p("parse radix " + new BigInteger("3", 37)) } catch (RuntimeException e) { p("parse radix " + e.getMessage()) }
+    try { p("parse radix1 " + new BigInteger("3", 1)) } catch (RuntimeException e) { p("parse radix1 " + e.getMessage()) }
+
+    // ---------- byte arrays ----------
+    p("toByteArray 255 " + bytes(t.toByteArray()))
+    p("toByteArray 256 " + bytes(BigInteger.valueOf(256).toByteArray()))
+    p("toByteArray 0 " + bytes(BigInteger.ZERO.toByteArray()))
+    p("toByteArray -1 " + bytes(BigInteger.valueOf(-1).toByteArray()))
+    p("toByteArray -256 " + bytes(BigInteger.valueOf(-256).toByteArray()))
+    p("toByteArray big " + bytes(h.toByteArray()))
+    p("toByteArray -big " + bytes(nh.toByteArray()))
+    p("fromBytes 01 " + new BigInteger(new byte[] { (byte) 1 }))
+    p("fromBytes ff " + new BigInteger(new byte[] { (byte) 0xFF }))
+    p("fromBytes 0080 " + new BigInteger(new byte[] { (byte) 0, (byte) 0x80 }))
+    p("fromBytes empty-len " + new BigInteger(new byte[] { (byte) 0, (byte) 0 }))
+    p("fromBytes roundtrip " + new BigInteger(h.toByteArray()).equals(h))
+
+    // ---------- Number conversions ----------
+    p("intValue " + a.intValue() + " " + nh.intValue())
+    p("longValue " + h.longValue() + " " + nh.longValue())
+    p("doubleValue " + h.doubleValue())
+    p("floatValue " + h.floatValue())
+    p("shortValue " + a.shortValue() + " byteValue " + a.byteValue())
+    p("num " + ((Number) a).intValue())
+    p("toBigInteger-ish " + BigInteger.valueOf(5).doubleValue() + " " + BigInteger.valueOf(-5).intValue())
+
+    // ---------- BigInteger failures ----------
+    try { p("div0 " + BigInteger.ONE.divide(BigInteger.ZERO)) } catch (ArithmeticException e) { p("div0 " + e.getMessage()) }
+    try { p("rem0 " + BigInteger.ONE.remainder(BigInteger.ZERO)) } catch (ArithmeticException e) { p("rem0 " + e.getMessage()) }
+    try { p("powneg " + BigInteger.ONE.pow(-1)) } catch (ArithmeticException e) { p("powneg " + e.getMessage()) }
+    try { p("modpowneg " + BigInteger.ONE.modPow(BigInteger.valueOf(-1), BigInteger.TEN)) }
+    catch (ArithmeticException e) { p("modpowneg " + e.getMessage()) }
+    try { p("modpowm " + BigInteger.ONE.modPow(BigInteger.TEN, BigInteger.valueOf(-5))) }
+    catch (ArithmeticException e) { p("modpowm " + e.getMessage()) }
+    try { p("modm " + BigInteger.ONE.mod(BigInteger.valueOf(-5))) }
+    catch (ArithmeticException e) { p("modm " + e.getMessage()) }
+
+    // ---------- MathContext and RoundingMode ----------
+    p("mc " + MathContext.UNLIMITED + " | " + MathContext.DECIMAL32 + " | " + MathContext.DECIMAL64 +
+      " | " + MathContext.DECIMAL128)
+    p("mc get " + MathContext.DECIMAL32.getPrecision() + " " + MathContext.DECIMAL32.getRoundingMode())
+    p("mc new " + new MathContext(5) + " " + new MathContext(0, RoundingMode.CEILING))
+    p("rm values " + RoundingMode.values().length)
+    for (RoundingMode rm : RoundingMode.values()) {
+      p("rm " + rm.name() + " " + rm.ordinal() + " " + rm)
+    }
+    p("rm valueOf " + RoundingMode.valueOf("HALF_EVEN") + " " + RoundingMode.valueOf(3))
+    p("rm ceil floor " + RoundingMode.CEILING + " " + RoundingMode.FLOOR + " " + RoundingMode.UP + " " +
+      RoundingMode.DOWN + " " + RoundingMode.HALF_UP + " " + RoundingMode.HALF_DOWN + " " +
+      RoundingMode.HALF_EVEN + " " + RoundingMode.UNNECESSARY)
+
+    // ---------- BigDecimal basics ----------
+    p("bd consts " + BigDecimal.ZERO + " " + BigDecimal.ONE + " " + BigDecimal.TEN)
+    bd("valueOf long", BigDecimal.valueOf(123, 2))
+    bd("valueOf dbl", BigDecimal.valueOf(0.1))
+    bd("valueOf dbl2", BigDecimal.valueOf(12345.6789))
+    bd("valueOf neg0", BigDecimal.valueOf(0.0))
+    bd("new long", new BigDecimal(42L))
+    bd("new double", new BigDecimal(0.1))
+    bd("new str", new BigDecimal("123.4500"))
+    bd("new str neg", new BigDecimal("-0.000"))
+    bd("new str exp", new BigDecimal("1.23E+5"))
+    bd("new str exp2", new BigDecimal("1E-8"))
+    bd("new str plus", new BigDecimal("+7.5"))
+    bd("new bi", new BigDecimal(new BigInteger("123456789012345678901234567890")))
+    bd("new bi scale", new BigDecimal(new BigInteger("-98765432109876543210"), 4))
+    bd("new str mc", new BigDecimal("12345.6789", MathContext.DECIMAL32))
+
+    BigDecimal x = new BigDecimal("12.5")
+    BigDecimal y = new BigDecimal("0.4")
+    BigDecimal z = new BigDecimal("-3.000")
+    bd("x+y", x.add(y))
+    bd("x-y", x.subtract(y))
+    bd("x*y", x.multiply(y))
+    bd("x+z", x.add(z))
+    bd("x*z", x.multiply(z))
+    bd("z*y", z.multiply(y))
+    bd("x.abs", x.abs())
+    bd("z.abs", z.abs())
+    bd("z.negate", z.negate())
+    bd("z.negate.negate", z.negate())
+    p("x.signum " + x.signum() + " z.signum " + z.signum() + " zero.signum " + BigDecimal.ZERO.signum())
+    p("x.compareTo new(x) " + x.compareTo(new BigDecimal("12.5000")) +
+      " equals " + x.equals(new BigDecimal("12.5000")))
+    p("hash equal " + new BigDecimal("2.0").equals(new BigDecimal("2.00")) + " " +
+      new BigDecimal("2.0").compareTo(new BigDecimal("2.00")))
+    bd("x.min y", x.min(y))
+    bd("x.max y", x.max(y))
+    bd("z.min x", z.min(x))
+    bd("z.scale/1", new BigDecimal("1E+3"))
+    bd("stripTrailing 600.0", new BigDecimal("600.0").stripTrailingZeros())
+    bd("stripTrailing 0.000", new BigDecimal("0.000").stripTrailingZeros())
+    bd("stripTrailing 100", new BigDecimal("100").stripTrailingZeros())
+    bd("stripTrailing 12.5", new BigDecimal("12.500").stripTrailingZeros())
+    bd("movePointLeft 2", x.movePointLeft(2))
+    bd("movePointRight 2", x.movePointRight(2))
+    bd("movePointLeft 0", new BigDecimal("1E+3").movePointLeft(0))
+    bd("movePointRight neg", x.movePointRight(-2))
+    bd("movePointLeft big", new BigDecimal("1E+3").movePointRight(5))
+    bd("setScale up", x.setScale(5))
+    bd("setScale down", new BigDecimal("12.345").setScale(2, RoundingMode.HALF_UP))
+    try { p("setScale down2 " + new BigDecimal("12.345").setScale(2)) }
+    catch (ArithmeticException e) { p("setScale down2 " + e.getMessage()) }
+    bd("setScale 0", new BigDecimal("12.5").setScale(0, RoundingMode.DOWN))
+    bd("setScale up2", x.setScale(1))
+    p("toBigInteger " + new BigDecimal("-12.999").toBigInteger() + " " +
+      new BigDecimal("12.999").toBigInteger() + " " + new BigDecimal("0.000").toBigInteger())
+    try { p("toBigIntegerExact fail " + new BigDecimal("-12.999").toBigIntegerExact()) }
+    catch (ArithmeticException e) { p("toBigIntegerExact fail " + e.getMessage()) }
+    p("bd intValue " + new BigDecimal("12.999").intValue() + " longValue " +
+      new BigDecimal("12345678901.9").longValue() + " doubleValue " + new BigDecimal("0.5").doubleValue())
+    p("bd doubleValue big " + new BigDecimal("1E+400").doubleValue())
+
+    // ---------- BigDecimal division ----------
+    bd("1/2", BigDecimal.ONE.divide(new BigDecimal("2")))
+    bd("1.0/1.00", new BigDecimal("1.0").divide(new BigDecimal("1.00")))
+    bd("10/2", new BigDecimal("10").divide(new BigDecimal("2")))
+    bd("1/8", BigDecimal.ONE.divide(new BigDecimal("8")))
+    bd("100/10", new BigDecimal("100").divide(new BigDecimal("10")))
+    bd("1E+3/100", new BigDecimal("1E+3").divide(new BigDecimal("100")))
+    bd("0/5", BigDecimal.ZERO.divide(new BigDecimal("5")))
+    bd("0.00/5", new BigDecimal("0.00").divide(new BigDecimal("5")))
+    bd("7/2/2", new BigDecimal("7").divide(new BigDecimal("2")).divide(new BigDecimal("2")))
+    bd("-1/2", new BigDecimal("-1").divide(new BigDecimal("2")))
+    bd("12.5/0.4", x.divide(y))
+    try { p("1/3 " + BigDecimal.ONE.divide(new BigDecimal("3"))) }
+    catch (ArithmeticException e) { p("1/3 " + e.getMessage()) }
+    try { p("x/0 " + x.divide(BigDecimal.ZERO)) }
+    catch (ArithmeticException e) { p("x/0 " + e.getMessage()) }
+    try { p("0/0 " + BigDecimal.ZERO.divide(BigDecimal.ZERO)) }
+    catch (ArithmeticException e) { p("0/0 " + e.getMessage()) }
+    try { p("x/0 scale " + x.divide(BigDecimal.ZERO, 4, RoundingMode.HALF_UP)) }
+    catch (ArithmeticException e) { p("x/0 scale " + e.getMessage()) }
+    bd("1/2 s=0", BigDecimal.ONE.divide(new BigDecimal("2"), 0, RoundingMode.HALF_UP))
+    bd("1/2 s=0 DOWN", BigDecimal.ONE.divide(new BigDecimal("2"), 0, RoundingMode.DOWN))
+    bd("1/3 s=5", BigDecimal.ONE.divide(new BigDecimal("3"), 5, RoundingMode.HALF_UP))
+    bd("1/3 s=5 dup", BigDecimal.ONE.divide(new BigDecimal("3"), 5, RoundingMode.HALF_UP))
+    bd("2/3 s=5 halfup", new BigDecimal("2").divide(new BigDecimal("3"), 5, RoundingMode.HALF_UP))
+    bd("2/3 s=0 halfup", new BigDecimal("2").divide(new BigDecimal("3"), 0, RoundingMode.HALF_UP))
+    bd("-2/3 s=0 halfup", new BigDecimal("-2").divide(new BigDecimal("3"), 0, RoundingMode.HALF_UP))
+    bd("-2/3 s=0 ceiling", new BigDecimal("-2").divide(new BigDecimal("3"), 0, RoundingMode.CEILING))
+    bd("2/3 s=0 ceiling", new BigDecimal("2").divide(new BigDecimal("3"), 0, RoundingMode.CEILING))
+    bd("2/3 s=0 floor", new BigDecimal("2").divide(new BigDecimal("3"), 0, RoundingMode.FLOOR))
+    bd("-2/3 s=0 floor", new BigDecimal("-2").divide(new BigDecimal("3"), 0, RoundingMode.FLOOR))
+    bd("2.5/1 s=0 halfup", new BigDecimal("2.5").divide(BigDecimal.ONE, 0, RoundingMode.HALF_UP))
+    bd("2.5/1 s=0 halfdown", new BigDecimal("2.5").divide(BigDecimal.ONE, 0, RoundingMode.HALF_DOWN))
+    bd("2.5/1 s=0 halfeven", new BigDecimal("2.5").divide(BigDecimal.ONE, 0, RoundingMode.HALF_EVEN))
+    bd("3.5/1 s=0 halfeven", new BigDecimal("3.5").divide(BigDecimal.ONE, 0, RoundingMode.HALF_EVEN))
+    bd("2.5/1 s=0 up", new BigDecimal("2.5").divide(BigDecimal.ONE, 0, RoundingMode.UP))
+    bd("1/8 s=1 halfup", BigDecimal.ONE.divide(new BigDecimal("8"), 1, RoundingMode.HALF_UP))
+    try { p("1/8 s=1 unnec " + BigDecimal.ONE.divide(new BigDecimal("8"), 1, RoundingMode.UNNECESSARY)) }
+    catch (ArithmeticException e) { p("1/8 s=1 unnec " + e.getMessage()) }
+    bd("1/2 s=1 unnec", BigDecimal.ONE.divide(new BigDecimal("2"), 1, RoundingMode.UNNECESSARY))
+    bd("1/2 mc", BigDecimal.ONE.divide(new BigDecimal("2"), MathContext.DECIMAL32))
+    bd("1/3 mc32", BigDecimal.ONE.divide(new BigDecimal("3"), MathContext.DECIMAL32))
+    bd("1/3 mc64", BigDecimal.ONE.divide(new BigDecimal("3"), MathContext.DECIMAL64))
+    bd("1/3 mc128", BigDecimal.ONE.divide(new BigDecimal("3"), MathContext.DECIMAL128))
+    try { p("1/3 mc unlim " + BigDecimal.ONE.divide(new BigDecimal("3"), MathContext.UNLIMITED)) }
+    catch (ArithmeticException e) { p("1/3 mc unlim " + e.getMessage()) }
+    bd("2/3 mc32", new BigDecimal("2").divide(new BigDecimal("3"), MathContext.DECIMAL32))
+    bd("123456789/1 mc32", new BigDecimal("123456789").divide(BigDecimal.ONE, MathContext.DECIMAL32))
+    bd("0.000001234/1 mc32", new BigDecimal("0.000001234").divide(BigDecimal.ONE, MathContext.DECIMAL32))
+    bd("1E+10/1 mc32", new BigDecimal("1E+10").divide(BigDecimal.ONE, MathContext.DECIMAL32))
+
+    // ---------- divideToIntegralValue and remainder ----------
+    bd("dti 7/2", new BigDecimal("7").divideToIntegralValue(new BigDecimal("2")))
+    bd("dti -7/2", new BigDecimal("-7").divideToIntegralValue(new BigDecimal("2")))
+    bd("dti 7/-2", new BigDecimal("7").divideToIntegralValue(new BigDecimal("-2")))
+    bd("dti -7/-2", new BigDecimal("-7").divideToIntegralValue(new BigDecimal("-2")))
+    bd("dti 2/7", new BigDecimal("2").divideToIntegralValue(new BigDecimal("7")))
+    bd("dti 7.5/2", new BigDecimal("7.5").divideToIntegralValue(new BigDecimal("2")))
+    bd("dti 10/2", new BigDecimal("10").divideToIntegralValue(new BigDecimal("2")))
+    bd("dti 100/10", new BigDecimal("100").divideToIntegralValue(new BigDecimal("10")))
+    bd("dti 5.5/1.1", new BigDecimal("5.5").divideToIntegralValue(new BigDecimal("1.1")))
+    bd("dti 5.5/1.10", new BigDecimal("5.5").divideToIntegralValue(new BigDecimal("1.10")))
+    bd("dti 0.00/5", new BigDecimal("0.00").divideToIntegralValue(new BigDecimal("5")))
+    bd("rem 7/2", new BigDecimal("7").remainder(new BigDecimal("2")))
+    bd("rem -7/2", new BigDecimal("-7").remainder(new BigDecimal("2")))
+    bd("rem 7.5/2", new BigDecimal("7.5").remainder(new BigDecimal("2")))
+    bd("rem 5.5/1.1", new BigDecimal("5.5").remainder(new BigDecimal("1.1")))
+    BigDecimal[] qr = new BigDecimal("7.5").divideAndRemainder(new BigDecimal("2"))
+    p("qr-bd " + qr[0] + " " + qr[1] + " len " + qr.length)
+
+    // ---------- pow, round, engineering ----------
+    bd("2.5 pow 3", new BigDecimal("2.5").pow(3))
+    bd("2.5 pow 0", new BigDecimal("2.5").pow(0))
+    bd("-2 pow 3", new BigDecimal("-2").pow(3))
+    bd("0.10 pow 2", new BigDecimal("0.10").pow(2))
+    try { p("2 pow -1 " + new BigDecimal("2").pow(-1)) } catch (ArithmeticException e) { p("2 pow -1 " + e.getMessage()) }
+    bd("round 12345 mc3", new BigDecimal("12345").round(new MathContext(3, RoundingMode.HALF_UP)))
+    bd("round 12.345 mc3", new BigDecimal("12.345").round(new MathContext(3, RoundingMode.HALF_UP)))
+    bd("round 12.345 mc2 down", new BigDecimal("12.345").round(new MathContext(2, RoundingMode.DOWN)))
+    bd("round 999.9 mc3", new BigDecimal("999.9").round(new MathContext(3, RoundingMode.HALF_UP)))
+    bd("round 999.9 mc2", new BigDecimal("999.9").round(new MathContext(2, RoundingMode.HALF_UP)))
+    bd("round 0.000123 mc2", new BigDecimal("0.000123").round(new MathContext(2, RoundingMode.HALF_UP)))
+    bd("round unlim", new BigDecimal("12.345").round(MathContext.UNLIMITED))
+    bd("round neg", new BigDecimal("-12345").round(new MathContext(3, RoundingMode.HALF_EVEN)))
+    bd("plain 1E+3", new BigDecimal("1E+3"))
+    p("plainStr " + new BigDecimal("1E+3").toPlainString() + " " + new BigDecimal("0.00123").toPlainString())
+    p("plainStr neg " + new BigDecimal("1E+3").negate().toPlainString() + " " +
+      new BigDecimal("1E+3").negate().movePointLeft(0).toPlainString())
+    p("eng 1E+3 " + new BigDecimal("1E+3").toEngineeringString())
+    p("eng 123 " + new BigDecimal("123").toEngineeringString())
+    p("eng 1234 " + new BigDecimal("1234").toEngineeringString())
+    p("eng 12345 " + new BigDecimal("12345").toEngineeringString())
+    p("eng 1E+5 " + new BigDecimal("1E+5").toEngineeringString())
+    p("eng 1.23E+5 " + new BigDecimal("1.23E+5").toEngineeringString())
+    p("eng 1.23E-8 " + new BigDecimal("1.23E-8").toEngineeringString())
+    p("eng 0.0000001 " + new BigDecimal("0.0000001").toEngineeringString())
+    p("eng 0E+7 " + new BigDecimal("0E+7").toEngineeringString())
+    p("str 0.0000001 " + new BigDecimal("0.0000001"))
+    p("str 1E+3 " + new BigDecimal("1E+3"))
+    p("str 123E-4 " + new BigDecimal("0.0123"))
+    p("str neg exp " + new BigDecimal("-1.23E-10"))
+    p("str precision " + new BigDecimal("0.000").precision() + " " + new BigDecimal("0").precision() +
+      " " + new BigDecimal("123.4500").precision())
+    p("str cache " + new BigDecimal("1E+3"))
+
+    /* The second pass: the corners of the same API. */
+        BigInteger mn = BigInteger.valueOf(Long.MIN_VALUE)
+        bx("TWO", BigInteger.TWO)
+        bx("valueOf max", BigInteger.valueOf(Long.MAX_VALUE))
+        bx("valueOf min", mn)
+        bx("min negate", mn.negate())
+        bx("min abs", mn.abs())
+        bx("min plus one", mn.add(BigInteger.ONE))
+        bx("min minus one", mn.subtract(BigInteger.ONE))
+        bx("min times min", mn.multiply(mn))
+        bx("min divided min", mn.divide(mn))
+        bx("min mod 7", mn.mod(BigInteger.valueOf(7)))
+        bx("min shifted", mn.shiftLeft(1).shiftRight(63))
+        p("minmax " + BigInteger.TEN.min(BigInteger.ONE) + " " + BigInteger.TEN.max(BigInteger.ONE))
+        p("eq " + BigInteger.TEN.equals(BigInteger.valueOf(10)) + " " + BigInteger.TEN.equals(BigInteger.valueOf(11)) +
+          " " + BigInteger.TEN.equals(new BigInteger("10")) + " " + BigInteger.TEN.equals(null))
+        p("lowbit " + BigInteger.ZERO.getLowestSetBit() + " " + BigInteger.valueOf(96).getLowestSetBit() +
+          " " + BigInteger.TEN.negate().getLowestSetBit() + " " + BigInteger.TEN.shiftLeft(40).getLowestSetBit())
+        bx("not 0", BigInteger.ZERO.not())
+        bx("not 1", BigInteger.ONE.not())
+        bx("not -2", BigInteger.valueOf(-2).not())
+        bx("clearBit on zero", BigInteger.ZERO.clearBit(5))
+        bx("setBit 0", BigInteger.ZERO.setBit(0))
+        bx("setBit 64", BigInteger.ZERO.setBit(64))
+        bx("shiftLeft -2", BigInteger.TEN.shiftLeft(-2))
+        bx("shiftRight -2", BigInteger.TEN.shiftRight(-2))
+        bx("shiftLeft 30", BigInteger.ONE.shiftLeft(30))
+        bx("shiftLeft 31", BigInteger.ONE.shiftLeft(31))
+        bx("shiftLeft 300", BigInteger.ONE.shiftLeft(300))
+        bx("shiftRight 300", BigInteger.ONE.shiftLeft(300).shiftRight(300))
+        bx("shiftRight all", BigInteger.ONE.shiftLeft(300).shiftRight(301))
+        bx("neg shiftRight all", BigInteger.ONE.shiftLeft(300).negate().shiftRight(301))
+        bx("pow 0", BigInteger.TEN.pow(0))
+        bx("pow 13", BigInteger.valueOf(7).pow(13))
+        bx("pow 1", BigInteger.valueOf(-3).pow(1))
+        bx("pow 2", BigInteger.valueOf(-3).pow(2))
+        try { p("pow -1 " + BigInteger.TEN.pow(-1)) } catch (ArithmeticException e) { p("pow -1 " + e.getMessage()) }
+        try { p("mod zero " + BigInteger.TEN.mod(BigInteger.ZERO)) } catch (ArithmeticException e) { p("mod zero " + e.getMessage()) }
+        bx("mod neg", BigInteger.TEN.negate().mod(BigInteger.valueOf(3)))
+        try { p("mod neg divisor " + BigInteger.TEN.mod(BigInteger.valueOf(-3))) } catch (ArithmeticException e) { p("mod neg divisor " + e.getMessage()) }
+        try { p("modPow neg exp " + BigInteger.TEN.modPow(BigInteger.ONE.negate(), BigInteger.valueOf(7))) }
+        catch (ArithmeticException e) { p("modPow neg exp " + e.getMessage()) }
+        bx("modPow exp0", BigInteger.valueOf(5).modPow(BigInteger.ZERO, BigInteger.valueOf(7)))
+        bx("modPow mod1", BigInteger.TEN.modPow(BigInteger.TEN, BigInteger.ONE))
+        bx("modPow big", BigInteger.valueOf(3).modPow(BigInteger.valueOf(100), BigInteger.valueOf(1000000007)))
+        bx("ctor radix", new BigInteger("-ff", 16))
+        bx("ctor radix 2", new BigInteger("101010", 2))
+        bx("ctor bytes", new BigInteger(new byte[] { (byte) 0x80, (byte) 0x7f }))
+        try { p("ctor radix 1 " + new BigInteger("0", 1)) } catch (NumberFormatException e) { p("ctor radix 1 " + e.getMessage()) }
+        bx("xor chain", BigInteger.valueOf(255).xor(BigInteger.valueOf(85)).andNot(BigInteger.valueOf(240)))
+
+        bd("consts", BigDecimal.ZERO.add(BigDecimal.ONE).add(BigDecimal.TEN))
+        bd("valueOf(li)", BigDecimal.valueOf(12345, 2))
+        bd("valueOf(li) negscale", BigDecimal.valueOf(5, -2))
+        bd("valueOf(li) zero", BigDecimal.valueOf(0, 3))
+        bd("valueOf(l)", BigDecimal.valueOf(-7))
+        bd("valueOf(d)", BigDecimal.valueOf(2.5))
+        bd("valueOf(d)2", BigDecimal.valueOf(1234.5678))
+        bd("new d", new BigDecimal(0.5))
+        bd("new d2", new BigDecimal(-1.25e-10))
+        bd("new str mc", new BigDecimal("12345.6789", new MathContext(4, RoundingMode.DOWN)))
+        bd("new str mc2", new BigDecimal("99999", new MathContext(3)))
+        bd("new str mc3", new BigDecimal("1.5", new MathContext(1)))
+        p("mc " + MathContext.UNLIMITED + " | " + MathContext.DECIMAL32 + " | " + MathContext.DECIMAL64 +
+          " | " + MathContext.DECIMAL128)
+        p("mc eq " + new MathContext(4).equals(MathContext.DECIMAL32) + " " + new MathContext(7, RoundingMode.FLOOR) +
+          " " + MathContext.UNLIMITED.getPrecision() + " " + MathContext.UNLIMITED.getRoundingMode())
+        bd("abs", new BigDecimal("-12.30").abs())
+        bd("negate", new BigDecimal("12.30").negate())
+        bd("min", BigDecimal.ONE.min(BigDecimal.TEN))
+        bd("max", BigDecimal.ONE.max(BigDecimal.TEN))
+        try { bd("setScale neg", new BigDecimal("1234.5").setScale(-2, RoundingMode.HALF_UP)) } catch (ArithmeticException e) { p("setScale neg " + e.getMessage()) }
+        bd("setScale neg dn", new BigDecimal("1250").setScale(-2, RoundingMode.DOWN))
+        bd("setScale neg ex", new BigDecimal("1200").setScale(-2))
+        bd("setScale neg up", new BigDecimal("20").setScale(-1))
+        bd("movePointLeft -2", new BigDecimal("12.5").movePointLeft(-2))
+        bd("strip 0.0000", new BigDecimal("0.0000").stripTrailingZeros())
+        bd("strip 1E+3", new BigDecimal("1E+3").stripTrailingZeros())
+        bd("strip 123.4500", new BigDecimal("123.4500").stripTrailingZeros())
+        bd("zero", new BigDecimal("0.0000"))
+        bd("div mc", BigDecimal.ONE.divide(new BigDecimal("3"), new MathContext(5)))
+        bd("div mc32", new BigDecimal("12.5").divide(new BigDecimal("3"), MathContext.DECIMAL32))
+        bd("div mc unlim", new BigDecimal("12.5").divide(new BigDecimal("4"), MathContext.UNLIMITED))
+        bd("div mc32 exact", new BigDecimal("1.0").divide(new BigDecimal("8"), MathContext.DECIMAL32))
+        bd("div rm", new BigDecimal("12.5").divide(new BigDecimal("3"), RoundingMode.HALF_UP))
+        bd("div scale0", new BigDecimal("12.5").divide(new BigDecimal("3"), 0, RoundingMode.HALF_UP))
+        bd("dti mc", new BigDecimal("12.5").divideToIntegralValue(new BigDecimal("3"), new MathContext(2)))
+        bd("rem mc", new BigDecimal("12.5").remainder(new BigDecimal("3"), new MathContext(2)))
+        try { bd("pow -1", new BigDecimal("2").pow(-1)) } catch (ArithmeticException e) { p("pow -1 " + e.getMessage()) }
+        bd("pow mc", new BigDecimal("1.23456789").pow(3, new MathContext(4)))
+        bd("pow mc2", new BigDecimal("0.1").pow(2, new MathContext(1)))
+        bd("pow 0", new BigDecimal("12.5").pow(0))
+        bd("round mc", new BigDecimal("12345.6789").round(new MathContext(4, RoundingMode.DOWN)))
+        p("exact int " + new BigDecimal("12.000").intValueExact() + " " + new BigDecimal("-2147483648").intValueExact())
+        try { p("exact int o " + new BigDecimal("2147483648").intValueExact()) }
+        catch (ArithmeticException e) { p("exact int o " + e.getMessage()) }
+        try { p("exact int f " + new BigDecimal("1.5").intValueExact()) }
+        catch (ArithmeticException e) { p("exact int f " + e.getMessage()) }
+        p("exact long " + new BigDecimal("9223372036854775807").longValueExact())
+        try { p("exact long o " + new BigDecimal("9223372036854775808").longValueExact()) }
+        catch (ArithmeticException e) { p("exact long o " + e.getMessage()) }
+        try { p("exact long f " + new BigDecimal("1.5").longValueExact()) }
+        catch (ArithmeticException e) { p("exact long f " + e.getMessage()) }
+        bx("toBigIntegerExact", new BigDecimal("123.000").toBigIntegerExact())
+        p("bd double " + new BigDecimal("0.1").doubleValue() + " " + new BigDecimal("1E+400").doubleValue() +
+          " " + new BigDecimal("-1E+400").doubleValue())
+  }
+}

@@ -310,7 +310,7 @@ func (c *Checker) declareClass(f *ast.File, cd *ast.ClassDecl, outer *ast.Class)
 		// packages may each declare Widget (JLS 7.7), and only the qualified
 		// name is unique. The default package and the prelude keep their names
 		// global, which is what makes `List` and `String` usable unqualified.
-		if pkg := f.Package; pkg != "" && !cl.Builtin {
+		if pkg := f.Package; pkg != "" {
 			m := c.byPkg[pkg]
 			if m == nil {
 				m = map[string]*ast.Class{}
@@ -320,6 +320,17 @@ func (c *Checker) declareClass(f *ast.File, cd *ast.ClassDecl, outer *ast.Class)
 				c.errf(cd.Pos, "TY-TYP-0001", "duplicate type %s (also declared at %s)", cd.Name, prev.Decl.Pos)
 			} else {
 				m[cd.Name] = cl
+			}
+			// The prelude's names are global as well as packaged. A file in
+			// `package teyru` finds its own package first, which is what keeps
+			// a user's `class Node` in the default package from breaking the
+			// standard library's own references to its Node; the global entry
+			// is what makes `List` and `String` usable unqualified from a file
+			// that belongs to no package at all.
+			if cl.Builtin {
+				if prev := c.global[cd.Name]; prev == nil || prev.Builtin {
+					c.global[cd.Name] = cl
+				}
 			}
 		} else {
 			if prev := c.global[cd.Name]; prev != nil {
@@ -479,7 +490,18 @@ func (c *Checker) lookupClassName(env *typeEnv, name string) *ast.Class {
 	if cl := c.fileClass(env, name); cl != nil {
 		return cl
 	}
-	return c.global[name]
+	cl := c.global[name]
+	if cl == nil {
+		return nil
+	}
+	// A named package cannot see the default package (JLS 7.4.2). Without
+	// this the reference lands on whatever the default package happens to
+	// hold under that name, and a user's `class Node` silently becomes the
+	// `Node` the standard library's regex engine means.
+	if f := envFile(env); f != nil && f.Package != "" && !cl.Builtin && cl.File != nil && cl.File.Package == "" {
+		return nil
+	}
+	return cl
 }
 
 // fileClass resolves a simple name through the compilation unit it is written

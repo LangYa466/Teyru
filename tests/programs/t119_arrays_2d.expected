@@ -1,0 +1,39 @@
+== rectangular ==
+9
+2 3
+[0,0,0]
+[0,0,9]
+== ragged from an initializer ==
+[1,2]
+[3,4,5]
+[]
+3 3 0
+== elements built by hand ==
+[7,8]
+[9]
+8
+== the Java shorthand with no `new` ==
+[10,20]
+[30]
+== a dimension left open ==
+2
+true
+6
+== three deep ==
+4
+2
+3 2 0
+== reference elements ==
+bc
+2 2 1
+boxed
+true
+== an array as a type argument ==
+3
+3
+1
+2
+3
+1
+== an empty array ==
+0 0

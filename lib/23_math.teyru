@@ -1,0 +1,2625 @@
+package teyru
+
+/* java.math, in the JDK's shape: RoundingMode, MathContext, BigInteger and
+   BigDecimal. The JDK's algorithms are translated rather than reinvented,
+   because almost everything these classes do is observable -- the string a
+   BigDecimal prints, the scale a division leaves behind, the way a tie rounds
+   -- and a program that prints one of them should print what javac prints.
+
+   Representation. Both classes carry the JDK's own fields. A BigInteger is a
+   sign in {-1,0,1} and a magnitude of base-2^30 limbs, most significant first,
+   with no leading zero limb, empty exactly when the sign is zero. That is the
+   JDK's layout with the limb narrowed by two bits: 30+30 bits still leave room
+   in a signed long for a whole multiply-accumulate step, so add, subtract and
+   multiply are plain long arithmetic with no carry tricks, and the places the
+   JDK counts in 32-bit words -- bitLength, bitCount, toByteArray, hashCode --
+   are computed from the value rather than from the limb array. A BigDecimal is
+   the (unscaled value, scale) pair the JDK documents, with the unscaled value
+   always a BigInteger; the JDK's parallel intCompact representation changes no
+   arithmetic result and is not reproduced -- the one place it is observable at
+   all is the message a divide by zero carries, and that is asked of the
+   BigInteger by `compact()` where the JDK would have asked intCompact.
+
+   Verifying this file. tests/programs/t115_math.teyru is the same program as
+   the javac 25 program in tests/programs/t115_math.java.ref, whose output is
+   tests/programs/t115_math.expected, so every printed value here is the JDK's
+   own. What the test cannot reach is noted where it lives: hashCode (nothing in
+   the JDK's contract fixes a value outside a running JVM, and no test prints
+   one), and the messages of the parse failures a Teyru program cannot
+   provoke. */
+
+enum RoundingMode {
+  UP, DOWN, CEILING, FLOOR, HALF_UP, HALF_DOWN, HALF_EVEN, UNNECESSARY
+
+  :
+  /* The enum machinery synthesizes valueOf(String), name(), ordinal(), values()
+     and toString(). The JDK's RoundingMode also has a valueOf(int); nothing
+     synthesizes that one, so it is written here, beside its overload. */
+  public static RoundingMode valueOf(int i) {
+    RoundingMode[] all = RoundingMode.values()
+    if (i < 0 || i >= all.length) {
+      throw new IllegalArgumentException("No enum constant java.math.RoundingMode." + i)
+    }
+    return all[i]
+  }
+}
+
+class MathContext extends Object {
+  public static final MathContext UNLIMITED = new MathContext(0, RoundingMode.HALF_UP)
+  public static final MathContext DECIMAL32 = new MathContext(7, RoundingMode.HALF_EVEN)
+  public static final MathContext DECIMAL64 = new MathContext(16, RoundingMode.HALF_EVEN)
+  public static final MathContext DECIMAL128 = new MathContext(34, RoundingMode.HALF_EVEN)
+
+  /* The JDK keeps these private and reads them through getPrecision and
+     getRoundingMode; BigDecimal, in the same package, reads them directly. */
+  public final int precision
+  public final RoundingMode roundingMode
+
+  public MathContext(int setPrecision) {
+    if (setPrecision < 0) {
+      throw new IllegalArgumentException("Digits < 0")
+    }
+    precision = setPrecision
+    roundingMode = RoundingMode.HALF_UP
+  }
+  public MathContext(int setPrecision, RoundingMode setRoundingMode) {
+    if (setPrecision < 0) {
+      throw new IllegalArgumentException("Digits < 0")
+    }
+    if (setRoundingMode == null) {
+      throw new NullPointerException("null RoundingMode")
+    }
+    precision = setPrecision
+    roundingMode = setRoundingMode
+  }
+  public int getPrecision() {
+    return precision
+  }
+  public RoundingMode getRoundingMode() {
+    return roundingMode
+  }
+  public boolean equals(Object x) {
+    if (!(x instanceof MathContext)) {
+      return false
+    }
+    MathContext mc = (MathContext) x
+    return precision == mc.precision && roundingMode == mc.roundingMode
+  }
+  public int hashCode() {
+    return (precision << 3) | roundingMode.ordinal()
+  }
+  public String toString() {
+    return "precision=" + precision + " roundingMode=" + roundingMode
+  }
+}
+
+class BigInteger extends Number implements Comparable<BigInteger> {
+  public static final BigInteger ZERO = new BigInteger(new int[0], 0)
+  public static final BigInteger ONE = valueOf(1)
+  public static final BigInteger TWO = valueOf(2)
+  public static final BigInteger TEN = valueOf(10)
+
+  private static final int LIMB_BITS = 30
+  private static final int MASK = 1073741823
+  private static final long MASK_L = 1073741823L
+  /* 64 - 2 * LIMB_BITS: the top limb of a long's three holds only this many. */
+  private static final long TOP_LIMB_MASK_L = 15L
+
+  /* A magnitude of base-2^30 limbs, most significant first, with no leading
+     zero limb; empty exactly when signum is zero. */
+  private int[] mag
+  private int signum
+
+  /* ---------------------------------------------------------------- set-up */
+
+  /* The JDK's constructor trusts its callers to hand it a normalized magnitude;
+     this one normalizes anyway, so that "mag is empty exactly when signum is
+     zero" is an invariant of every BigInteger that exists rather than a rule
+     its callers have to remember. */
+  private BigInteger(int[] magnitude, int signum) {
+    int[] m = stripZeros(magnitude)
+    if (signum < -1 || signum > 1) {
+      throw new NumberFormatException("Invalid signum value")
+    }
+    if (m.length == 0 && signum != 0) {
+      throw new NumberFormatException("signum-magnitude mismatch")
+    }
+    mag = m
+    this.signum = (m.length == 0 ? 0 : signum)
+  }
+
+  public BigInteger(String val) {
+    BigInteger v = parse(val, 10)
+    mag = v.mag
+    signum = v.signum
+  }
+  public BigInteger(String val, int radix) {
+    BigInteger v = parse(val, radix)
+    mag = v.mag
+    signum = v.signum
+  }
+  public BigInteger(byte[] val) {
+    BigInteger v = parseBytes(val, 0, val.length)
+    mag = v.mag
+    signum = v.signum
+  }
+  public BigInteger(byte[] val, int off, int len) {
+    BigInteger v = parseBytes(val, off, len)
+    mag = v.mag
+    signum = v.signum
+  }
+  /* The JDK's other byte[] constructor: the bytes are an unsigned magnitude
+     rather than a two's complement, and the sign is given separately. */
+  public BigInteger(int signum, byte[] magnitude) {
+    int[] b = new int[magnitude.length]
+    for (int i = 0 : i < magnitude.length : i++) {
+      b[i] = magnitude[i] & 0xFF
+    }
+    int[] m = bytesToMag(b, b.length)
+    if (m.length == 0 && signum != 0) {
+      throw new NumberFormatException("signum-magnitude mismatch")
+    }
+    this.mag = m
+    this.signum = (m.length == 0 ? 0 : signum)
+    if (signum < -1 || signum > 1) {
+      throw new NumberFormatException("Invalid signum value")
+    }
+  }
+
+  public static BigInteger valueOf(long val) {
+    if (val == 0) {
+      return ZERO
+    }
+    /* The negation here wraps for -2^63 rather than overflowing, so the value
+       comes back out of it as itself and magOfLong reads it unsigned -- which
+       is what a long's magnitude means for that one value. */
+    int sign = val < 0 ? -1 : 1
+    long a = val < 0 ? -val : val
+    return new BigInteger(magOfLong(a), sign)
+  }
+
+  /* ------------------------------------------------------------- numbers */
+
+  public BigInteger add(BigInteger val) {
+    if (val.signum == 0) {
+      return this
+    }
+    if (signum == 0) {
+      return val
+    }
+    if (signum == val.signum) {
+      return new BigInteger(addMag(mag, val.mag), signum)
+    }
+    int cmp = cmpMag(mag, val.mag)
+    if (cmp == 0) {
+      return ZERO
+    }
+    if (cmp > 0) {
+      return new BigInteger(subMag(mag, val.mag), signum)
+    }
+    return new BigInteger(subMag(val.mag, mag), val.signum)
+  }
+
+  public BigInteger subtract(BigInteger val) {
+    if (val.signum == 0) {
+      return this
+    }
+    if (signum == 0) {
+      return val.negate()
+    }
+    if (signum != val.signum) {
+      return new BigInteger(addMag(mag, val.mag), signum)
+    }
+    int cmp = cmpMag(mag, val.mag)
+    if (cmp == 0) {
+      return ZERO
+    }
+    if (cmp > 0) {
+      return new BigInteger(subMag(mag, val.mag), signum)
+    }
+    return new BigInteger(subMag(val.mag, mag), -signum)
+  }
+
+  public BigInteger multiply(BigInteger val) {
+    if (val.signum == 0 || signum == 0) {
+      return ZERO
+    }
+    return new BigInteger(mulMag(mag, val.mag), signum == val.signum ? 1 : -1)
+  }
+
+  public BigInteger negate() {
+    if (signum == 0) {
+      return ZERO
+    }
+    return new BigInteger(mag, -signum)
+  }
+
+  public BigInteger abs() {
+    return signum >= 0 ? this : negate()
+  }
+
+  public int signum() {
+    return signum
+  }
+
+  /* Java's division truncates toward zero and its remainder takes the sign of
+     the dividend; mod, below, is the one that does not. */
+  public BigInteger divide(BigInteger val) {
+    if (val.signum == 0) {
+      throw new ArithmeticException("BigInteger divide by zero")
+    }
+    if (signum == 0) {
+      return ZERO
+    }
+    if (cmpMag(mag, val.mag) < 0) {
+      return ZERO
+    }
+    int qsign = signum == val.signum ? 1 : -1
+    int[][] qr = divRem(mag, val.mag)
+    if (qr[0].length == 0) {
+      return ZERO
+    }
+    return new BigInteger(qr[0], qsign)
+  }
+
+  public BigInteger remainder(BigInteger val) {
+    if (val.signum == 0) {
+      throw new ArithmeticException("BigInteger divide by zero")
+    }
+    if (signum == 0) {
+      return ZERO
+    }
+    if (cmpMag(mag, val.mag) < 0) {
+      return this
+    }
+    int[][] qr = divRem(mag, val.mag)
+    if (qr[1].length == 0) {
+      return ZERO
+    }
+    return new BigInteger(qr[1], signum)
+  }
+
+  /* Slower than divide plus multiply and subtract, and it is what the JDK's own
+     divideAndRemainder does not do -- the JDK returns both halves of one
+     division. Both ways agree; this one divides once. */
+  public BigInteger[] divideAndRemainder(BigInteger val) {
+    if (val.signum == 0) {
+      throw new ArithmeticException("BigInteger divide by zero")
+    }
+    BigInteger[] r = new BigInteger[2]
+    if (signum == 0) {
+      r[0] = ZERO
+      r[1] = ZERO
+      return r
+    }
+    if (cmpMag(mag, val.mag) < 0) {
+      r[0] = ZERO
+      r[1] = this
+      return r
+    }
+    int qsign = signum == val.signum ? 1 : -1
+    int[][] qr = divRem(mag, val.mag)
+    r[0] = qr[0].length == 0 ? ZERO : new BigInteger(qr[0], qsign)
+    r[1] = qr[1].length == 0 ? ZERO : new BigInteger(qr[1], signum)
+    return r
+  }
+
+  public BigInteger mod(BigInteger m) {
+    if (m.signum <= 0) {
+      throw new ArithmeticException("BigInteger: modulus not positive")
+    }
+    BigInteger result = remainder(m)
+    return result.signum >= 0 ? result : result.add(m)
+  }
+
+  public BigInteger pow(int exponent) {
+    if (exponent < 0) {
+      throw new ArithmeticException("Negative exponent")
+    }
+    if (signum == 0) {
+      return exponent == 0 ? ONE : this
+    }
+    BigInteger result = ONE
+    BigInteger base = abs()
+    int e = exponent
+    while (e > 0) {
+      if ((e & 1) != 0) {
+        result = result.multiply(base)
+      }
+      e = e >> 1
+      if (e > 0) {
+        base = base.multiply(base)
+      }
+    }
+    if (signum < 0 && (exponent & 1) != 0) {
+      return result.negate()
+    }
+    return result
+  }
+
+  public BigInteger gcd(BigInteger val) {
+    if (val.signum == 0) {
+      return abs()
+    }
+    if (signum == 0) {
+      return val.abs()
+    }
+    BigInteger a = abs()
+    BigInteger b = val.abs()
+    while (b.signum != 0) {
+      BigInteger t = a.remainder(b)
+      a = b
+      b = t
+    }
+    return a
+  }
+
+  public BigInteger modInverse(BigInteger m) {
+    if (m.signum != 1) {
+      throw new ArithmeticException("BigInteger: modulus not positive")
+    }
+    if (m.equals(ONE)) {
+      return ZERO
+    }
+    BigInteger a = this
+    if (a.signum < 0 || a.compareMagnitude(m) >= 0) {
+      a = a.mod(m)
+    }
+    if (a.equals(ONE)) {
+      return ONE
+    }
+    /* The extended Euclid of the JDK's MutableBigInteger, written over
+       BigIntegers: r0/r1 walk down to the gcd while t0/t1 carry the
+       coefficient of this. */
+    BigInteger r0 = m
+    BigInteger r1 = a
+    BigInteger t0 = ZERO
+    BigInteger t1 = ONE
+    while (r1.signum != 0) {
+      BigInteger q = r0.divide(r1)
+      BigInteger r2 = r0.subtract(q.multiply(r1))
+      BigInteger t2 = t0.subtract(q.multiply(t1))
+      r0 = r1
+      r1 = r2
+      t0 = t1
+      t1 = t2
+    }
+    if (!r0.equals(ONE)) {
+      throw new ArithmeticException("BigInteger not invertible.")
+    }
+    if (t0.signum < 0) {
+      t0 = t0.add(m)
+    }
+    return t0
+  }
+
+  /* Square and multiply over the bits of the exponent, reducing at every step.
+     The JDK's sliding window computes the same residue faster; the special
+     cases in front of it are the observable part and are kept in its order:
+     an exponent of zero answers ONE even for a modulus of one, a base of ONE
+     answers before the sign of the exponent is looked at, and a negative
+     exponent inverts the result at the end. */
+  public BigInteger modPow(BigInteger exponent, BigInteger m) {
+    if (m.signum <= 0) {
+      throw new ArithmeticException("BigInteger: modulus not positive")
+    }
+    if (exponent.signum == 0) {
+      return m.equals(ONE) ? ZERO : ONE
+    }
+    if (equals(ONE)) {
+      return m.equals(ONE) ? ZERO : ONE
+    }
+    if (signum == 0 && exponent.signum >= 0) {
+      return ZERO
+    }
+    boolean invertResult = exponent.signum < 0
+    BigInteger exp = invertResult ? exponent.negate() : exponent
+    BigInteger base = this
+    if (base.signum < 0 || base.compareMagnitude(m) >= 0) {
+      base = base.mod(m)
+    }
+    if (base.signum == 0) {
+      return ZERO
+    }
+    BigInteger result = ONE
+    BigInteger sq = base
+    int bits = exp.bitLength()
+    for (int i = 0 : i < bits : i++) {
+      if (exp.testBit(i)) {
+        result = result.multiply(sq).mod(m)
+      }
+      sq = sq.multiply(sq).mod(m)
+    }
+    if (invertResult) {
+      /* x^-e mod m is the inverse of x^e mod m, so the inverse comes last --
+         the JDK inverts the finished power rather than folding an inverse of
+         the base into it. */
+      result = result.modInverse(m)
+    }
+    return result
+  }
+
+  /* ------------------------------------------------------------ shifting */
+
+  public BigInteger shiftLeft(int n) {
+    if (signum == 0) {
+      return ZERO
+    }
+    if (n == 0) {
+      return this
+    }
+    if (n < 0) {
+      return shiftRight(-n)
+    }
+    return new BigInteger(shiftLeftMag(mag, n), signum)
+  }
+
+  /* An arithmetic shift: the JDK's shiftRight rounds a negative value toward
+     negative infinity, so the bits shifted out of a negative magnitude are
+     what decides whether the result needs one more. */
+  public BigInteger shiftRight(int n) {
+    if (signum == 0) {
+      return ZERO
+    }
+    if (n == 0) {
+      return this
+    }
+    if (n < 0) {
+      return shiftLeft(-n)
+    }
+    int[] q = shiftRightMag(mag, n)
+    if (signum > 0) {
+      /* Everything was shifted off the end, so the answer is zero and there is
+         no magnitude left to carry the sign -- the (mag, signum) constructor
+         would refuse a positive sign on an empty magnitude. */
+      if (q.length == 0) {
+        return ZERO
+      }
+      return new BigInteger(q, 1)
+    }
+    if (lowBitsNonZero(mag, n)) {
+      q = addMag(q, ONE_MAG)
+    }
+    return new BigInteger(q, -1)
+  }
+
+  /* --------------------------------------------------------- bit twiddling */
+
+  public boolean testBit(int n) {
+    if (n < 0) {
+      throw new ArithmeticException("Negative bit address")
+    }
+    return bitAt(this, n) != 0
+  }
+
+  public BigInteger setBit(int n) {
+    if (n < 0) {
+      throw new ArithmeticException("Negative bit address")
+    }
+    return or(ONE.shiftLeft(n))
+  }
+
+  public BigInteger clearBit(int n) {
+    if (n < 0) {
+      throw new ArithmeticException("Negative bit address")
+    }
+    return and(ONE.shiftLeft(n).not())
+  }
+
+  public BigInteger and(BigInteger val) {
+    return bitwise(this, val, 0)
+  }
+  public BigInteger or(BigInteger val) {
+    return bitwise(this, val, 1)
+  }
+  public BigInteger xor(BigInteger val) {
+    return bitwise(this, val, 2)
+  }
+  /* The JDK defines not() as -(this)-1, which is what the identity in two's
+     complement says it is. */
+  public BigInteger not() {
+    return add(ONE).negate()
+  }
+  public BigInteger andNot(BigInteger val) {
+    return and(val.not())
+  }
+
+  public int bitLength() {
+    if (signum == 0) {
+      return 0
+    }
+    int magBits = bitLenMag(mag)
+    if (signum > 0) {
+      return magBits
+    }
+    /* For a negative value the JDK answers the bit length of |v|-1, which is
+       one less than |v|'s exactly when |v| is a power of two. */
+    boolean pow2 = Integer.bitCount(mag[0]) == 1
+    int i = 1
+    while (i < mag.length && pow2) {
+      pow2 = mag[i] == 0
+      i++
+    }
+    return pow2 ? magBits - 1 : magBits
+  }
+
+  public int bitCount() {
+    int[] m = mag
+    if (signum < 0) {
+      m = abs().subtract(ONE).mag
+    }
+    int sum = 0
+    for (int i = 0 : i < m.length : i++) {
+      sum += Integer.bitCount(m[i])
+    }
+    return sum
+  }
+
+  public int getLowestSetBit() {
+    if (signum == 0) {
+      return -1
+    }
+    int n = mag.length
+    for (int i = 0 : i < n : i++) {
+      int limb = mag[n - 1 - i]
+      if (limb != 0) {
+        return i * LIMB_BITS + Integer.numberOfTrailingZeros(limb)
+      }
+    }
+    return -1
+  }
+
+  /* --------------------------------------------------------------- bytes */
+
+  public byte[] toByteArray() {
+    int byteLen = bitLength() / 8 + 1
+    byte[] r = new byte[byteLen]
+    int n = mag.length
+    int bitpos = 0
+    for (int i = 0 : i < byteLen : i++) {
+      int b = 0
+      for (int k = 0 : k < 8 : k++) {
+        int p = bitpos + k
+        int limb = p / LIMB_BITS
+        if (limb < n && ((mag[n - 1 - limb] >> (p % LIMB_BITS)) & 1) != 0) {
+          b |= 1 << k
+        }
+      }
+      r[byteLen - 1 - i] = (byte) b
+      bitpos += 8
+    }
+    if (signum < 0) {
+      for (int i = 0 : i < byteLen : i++) {
+        r[i] = (byte) (~(r[i] & 0xFF) & 0xFF)
+      }
+      int carry = 1
+      for (int i = byteLen - 1 : i >= 0 : i--) {
+        int s = (r[i] & 0xFF) + carry
+        r[i] = (byte) (s & 0xFF)
+        carry = s >> 8
+      }
+    }
+    return r
+  }
+
+  /* ------------------------------------------------------------- strings */
+
+  public String toString() {
+    return toString(10)
+  }
+
+  /* Out-of-range radices are not an error here: the JDK falls back to ten, and
+     a program that asks for base 37 gets base 10 back. */
+  public String toString(int radix) {
+    if (signum == 0) {
+      return "0"
+    }
+    if (radix < 2 || radix > 36) {
+      radix = 10
+    }
+    int per = digitsPerInt(radix)
+    long radixPow = powSmall(radix, per)
+    StringBuilder sb = new StringBuilder()
+    int[] m = mag
+    long[] remBox = new long[1]
+    while (m.length > 0) {
+      m = divRemSmall(m, radixPow, remBox)
+      String g = digitsOf(remBox[0], radix)
+      int pad = 0
+      if (m.length != 0) {
+        pad = per - g.length()
+      }
+      /* Least significant group first: the digits are written backwards into
+         the builder and the whole thing is reversed at the end, which is what
+         makes the padding zeros of an interior group land in front of it. */
+      for (int i = g.length() - 1 : i >= 0 : i--) {
+        sb.append(g.charAt(i))
+      }
+      for (int i = 0 : i < pad : i++) {
+        sb.append('0')
+      }
+    }
+    String body = sb.reverse().toString()
+    return signum < 0 ? "-" + body : body
+  }
+
+  /* --------------------------------------------------------- comparisons */
+
+  public int compareTo(BigInteger val) {
+    if (signum == val.signum) {
+      if (signum == 0) {
+        return 0
+      }
+      int cmp = cmpMag(mag, val.mag)
+      return signum > 0 ? cmp : -cmp
+    }
+    return signum > val.signum ? 1 : -1
+  }
+
+  public int compareMagnitude(BigInteger val) {
+    return cmpMag(mag, val.mag)
+  }
+
+  public boolean equals(Object x) {
+    if (this == x) {
+      return true
+    }
+    if (!(x instanceof BigInteger)) {
+      return false
+    }
+    BigInteger v = (BigInteger) x
+    if (v.signum != signum) {
+      return false
+    }
+    if (v.mag.length != mag.length) {
+      return false
+    }
+    for (int i = 0 : i < mag.length : i++) {
+      if (v.mag[i] != mag[i]) {
+        return false
+      }
+    }
+    return true
+  }
+
+  /* The JDK folds the magnitude 32 bits at a time with 31 as the multiplier,
+     then multiplies by the sign. Its limbs are 32 bits wide and this class's
+     are 30, so the words are cut out of the value rather than read off the
+     array -- the fold, and the number it produces, are the JDK's. */
+  public int hashCode() {
+    int words = (bitLenMag(mag) + 31) / 32
+    int h = 0
+    for (int i = 0 : i < words : i++) {
+      h = (int) (31 * h + magWord(mag, i))
+    }
+    return h * signum
+  }
+
+  public BigInteger min(BigInteger val) {
+    return compareTo(val) <= 0 ? this : val
+  }
+
+  public BigInteger max(BigInteger val) {
+    return compareTo(val) >= 0 ? this : val
+  }
+
+  /* ----------------------------------------------------------- conversions */
+
+  public int intValue() {
+    return (int) longValue()
+  }
+
+  /* The low 64 bits of the two's complement, which for a magnitude is its low
+     three limbs with the sign applied afterwards. */
+  public long longValue() {
+    long r = 0
+    int n = mag.length
+    if (n == 0) {
+      return 0
+    }
+    r = mag[n - 1]
+    if (n >= 2) {
+      r |= ((long) mag[n - 2]) << 30
+    }
+    if (n >= 3) {
+      r |= ((long) mag[n - 3]) << 60
+    }
+    return signum < 0 ? -r : r
+  }
+
+  /* Java answers the correctly rounded double (or infinity), which is what its
+     own reader of a decimal string gives; the runtime's reader is strtod,
+     which is correctly rounded too, so the round trip through the decimal form
+     is the JDK's answer and not an approximation of it. */
+  public double doubleValue() {
+    if (signum == 0) {
+      return 0.0
+    }
+    return Double.parseDouble(toString())
+  }
+
+  public float floatValue() {
+    if (signum == 0) {
+      return 0.0f
+    }
+    return Float.parseFloat(toString())
+  }
+
+  public long longValueExact() {
+    if (bitLength() > 63) {
+      throw new ArithmeticException("BigInteger out of long range")
+    }
+    return longValue()
+  }
+
+  public int intValueExact() {
+    if (bitLength() > 31) {
+      throw new ArithmeticException("BigInteger out of int range")
+    }
+    return intValue()
+  }
+
+  public short shortValueExact() {
+    if (bitLength() > 15) {
+      throw new ArithmeticException("BigInteger out of short range")
+    }
+    return shortValue()
+  }
+
+  public byte byteValueExact() {
+    if (bitLength() > 7) {
+      throw new ArithmeticException("BigInteger out of byte range")
+    }
+    return byteValue()
+  }
+
+  public byte byteValue() {
+    return (byte) intValue()
+  }
+
+  public short shortValue() {
+    return (short) intValue()
+  }
+
+  /* --------------------------------------------------- magnitude plumbing */
+
+  /* The value one, as a magnitude: the bit operations and the negative shift
+     want a one and not a BigInteger. */
+  private static final int[] ONE_MAG = { 1 }
+
+  private static int[] stripZeros(int[] a) {
+    int n = 0
+    while (n < a.length && a[n] == 0) {
+      n++
+    }
+    if (n == 0) {
+      return a
+    }
+    if (n == a.length) {
+      return new int[0]
+    }
+    int[] r = new int[a.length - n]
+    System.arraycopy(a, n, r, 0, r.length)
+    return r
+  }
+
+  /* The magnitude of a long, taken unsigned: a long holds 64 bits and the
+     limbs below hold 30 each, so the top one carries the four that are left
+     over and nothing above them -- which is why the top limb is masked to four
+     bits rather than thirty. Masking it to thirty would take the sign bits an
+     arithmetic shift brings down, and the one long that needs the unsigned
+     reading is -2^63: its magnitude is itself, and the only way to reach it is
+     through the wrapping negation in valueOf above. */
+  private static int[] magOfLong(long v) {
+    int[] m = new int[3]
+    m[2] = (int) (v & MASK_L)
+    m[1] = (int) ((v >> LIMB_BITS) & MASK_L)
+    m[0] = (int) ((v >> (2 * LIMB_BITS)) & TOP_LIMB_MASK_L)
+    return stripZeros(m)
+  }
+
+  private static int cmpMag(int[] x, int[] y) {
+    if (x.length != y.length) {
+      return x.length > y.length ? 1 : -1
+    }
+    for (int i = 0 : i < x.length : i++) {
+      if (x[i] != y[i]) {
+        return x[i] > y[i] ? 1 : -1
+      }
+    }
+    return 0
+  }
+
+  private static int bitLenMag(int[] m) {
+    if (m.length == 0) {
+      return 0
+    }
+    return (m.length - 1) * LIMB_BITS + 32 - Integer.numberOfLeadingZeros(m[0])
+  }
+
+  private static int[] addMag(int[] x, int[] y) {
+    int xlen = x.length
+    int ylen = y.length
+    int rlen = (xlen > ylen ? xlen : ylen) + 1
+    int[] r = new int[rlen]
+    int carry = 0
+    int xi = xlen - 1
+    int yi = ylen - 1
+    for (int i = rlen - 1 : i >= 0 : i--) {
+      int sum = carry
+      if (xi >= 0) {
+        sum += x[xi]
+        xi--
+      }
+      if (yi >= 0) {
+        sum += y[yi]
+        yi--
+      }
+      r[i] = sum & MASK
+      carry = sum >> LIMB_BITS
+    }
+    return stripZeros(r)
+  }
+
+  /* Requires x >= y, which every caller has already established. */
+  private static int[] subMag(int[] x, int[] y) {
+    int xlen = x.length
+    int[] r = new int[xlen]
+    int borrow = 0
+    int yi = y.length - 1
+    for (int i = xlen - 1 : i >= 0 : i--) {
+      int d = x[i] - borrow
+      if (yi >= 0) {
+        d -= y[yi]
+        yi--
+      }
+      if (d < 0) {
+        d += 1 << LIMB_BITS
+        borrow = 1
+      } else {
+        borrow = 0
+      }
+      r[i] = d
+    }
+    return stripZeros(r)
+  }
+
+  private static int[] mulMag(int[] x, int[] y) {
+    int xlen = x.length
+    int ylen = y.length
+    if (xlen == 0 || ylen == 0) {
+      return new int[0]
+    }
+    int[] r = new int[xlen + ylen]
+    for (int i = xlen - 1 : i >= 0 : i--) {
+      long carry = 0L
+      long xi = x[i]
+      for (int j = ylen - 1 : j >= 0 : j--) {
+        int k = i + j + 1
+        long cur = r[k] + xi * y[j] + carry
+        r[k] = (int) (cur & MASK_L)
+        carry = cur >> LIMB_BITS
+      }
+      r[i] = (int) carry
+    }
+    return stripZeros(r)
+  }
+
+  /* m << n. The limbs move up by n / 30 places, and the leftover n % 30 bits
+     are then carried from the least significant end upward -- each limb keeps
+     its own low bits and hands its high bits to the limb above it. */
+  private static int[] shiftLeftMag(int[] m, int n) {
+    int nlimbs = n / LIMB_BITS
+    int nbits = n % LIMB_BITS
+    int len = m.length
+    int[] r = new int[len + nlimbs + 1]
+    for (int i = 0 : i < len : i++) {
+      r[i + 1] = m[i]
+    }
+    if (nbits != 0) {
+      long carry = 0L
+      for (int i = r.length - 1 : i >= 0 : i--) {
+        long v = (long) r[i]
+        r[i] = (int) (((v << nbits) | carry) & MASK_L)
+        carry = v >> (LIMB_BITS - nbits)
+      }
+    }
+    return stripZeros(r)
+  }
+
+  /* Truncating: the bits that fall off the bottom are gone, whatever the sign
+     of the value they came from. */
+  private static int[] shiftRightMag(int[] m, int n) {
+    int nlimbs = n / LIMB_BITS
+    int nbits = n % LIMB_BITS
+    int len = m.length
+    if (nlimbs >= len) {
+      return new int[0]
+    }
+    int[] tmp = new int[len]
+    System.arraycopy(m, 0, tmp, 0, len)
+    if (nbits != 0) {
+      for (int i = len - 1 : i >= 1 : i--) {
+        long cur = (((long) tmp[i - 1]) << LIMB_BITS) | (long) tmp[i]
+        tmp[i] = (int) ((cur >> nbits) & MASK_L)
+      }
+      tmp[0] = tmp[0] >> nbits
+    }
+    int[] r = new int[len - nlimbs]
+    System.arraycopy(tmp, 0, r, 0, r.length)
+    return stripZeros(r)
+  }
+
+  private static boolean lowBitsNonZero(int[] m, int n) {
+    int len = m.length
+    if (n >= len * LIMB_BITS) {
+      return true
+    }
+    int nlimbs = n / LIMB_BITS
+    int nbits = n % LIMB_BITS
+    for (int i = 0 : i < nlimbs : i++) {
+      if (m[len - 1 - i] != 0) {
+        return true
+      }
+    }
+    if (nbits > 0 && (m[len - 1 - nlimbs] & ((1 << nbits) - 1)) != 0) {
+      return true
+    }
+    return false
+  }
+
+  private static int bitOfMag(int[] m, int i) {
+    int limb = i / LIMB_BITS
+    if (limb >= m.length) {
+      return 0
+    }
+    return (m[m.length - 1 - limb] >> (i % LIMB_BITS)) & 1
+  }
+
+  /* Bit n of the value in two's complement, which is what testBit and the
+     shift-and-subtract division below both ask for. For a negative value
+     -x the bit is the complement of the same bit of x-1. */
+  private static int bitAt(BigInteger v, int n) {
+    if (v.signum == 0) {
+      return 0
+    }
+    if (v.signum > 0) {
+      return bitOfMag(v.mag, n)
+    }
+    return 1 - bitOfMag(v.abs().subtract(ONE).mag, n)
+  }
+
+  /* Long division, one bit at a time. The JDK runs Knuth's algorithm D on
+     32-bit limbs; this is the same quotient, reached by the shift-and-subtract
+     that the algorithm is a shortcut for, which is a great deal easier to see
+     is right and fast enough for numbers a program writes down. */
+  private static int[][] divRem(int[] x, int[] y) {
+    if (cmpMag(x, y) < 0) {
+      return new int[][] { new int[0], x }
+    }
+    if (y.length == 1) {
+      long[] remBox = new long[1]
+      int[] q = divRemSmall(x, y[0], remBox)
+      return new int[][] { q, magOfLong(remBox[0]) }
+    }
+    /* Schoolbook long division, one bit of the quotient at a time: the partial
+       remainder collects the next bit of x, and every time it reaches y a
+       quotient bit is set. Quadratic in the bit length, but it only ever needs
+       the shift, compare, add and subtract helpers that are already here, and
+       the divide-and-conquer or Knuth-D divisions would each need their own
+       carefully tested magnitude code on top. */
+    int xbits = bitLenMag(x)
+    int qlen = (xbits + LIMB_BITS - 1) / LIMB_BITS
+    int[] q = new int[qlen]
+    int[] r = new int[0]
+    for (int i = xbits - 1 : i >= 0 : i--) {
+      r = shiftLeftOne(r)
+      if (bitOfMag(x, i) != 0) {
+        r = addMag(r, ONE_MAG)
+      }
+      if (cmpMag(r, y) >= 0) {
+        r = subMag(r, y)
+        int limb = i / LIMB_BITS
+        q[qlen - 1 - limb] |= 1 << (i % LIMB_BITS)
+      }
+    }
+    return new int[][] { stripZeros(q), r }
+  }
+
+  private static int[] shiftLeftOne(int[] m) {
+    int len = m.length
+    int[] r = new int[len + 1]
+    int carry = 0
+    for (int i = len - 1 : i >= 0 : i--) {
+      r[i + 1] = ((m[i] << 1) | carry) & MASK
+      carry = (m[i] >> (LIMB_BITS - 1)) & 1
+    }
+    r[0] = carry
+    return stripZeros(r)
+  }
+
+  /* Division by a single limb-sized value, with the remainder handed back
+     through remBox because a Teyru method returns one value. */
+  private static int[] divRemSmall(int[] m, long v, long[] remBox) {
+    int[] q = new int[m.length]
+    long rem = 0
+    for (int i = 0 : i < m.length : i++) {
+      long cur = (rem << LIMB_BITS) | m[i]
+      q[i] = (int) (cur / v)
+      rem = cur % v
+    }
+    remBox[0] = rem
+    return stripZeros(q)
+  }
+
+  /* this * mul + add, for the parser, which accumulates a digit group at a
+     time. mul may be as large as a whole limb's worth (2^30, for radix 2), so
+     the carry can outgrow one limb and the result keeps two spare limbs for
+     it. */
+  private static int[] mulAddSmall(int[] m, long mul, long add) {
+    int len = m.length
+    int[] r = new int[len + 2]
+    long carry = add
+    for (int i = len - 1 : i >= 0 : i--) {
+      long cur = ((long) m[i]) * mul + carry
+      r[i + 2] = (int) (cur & MASK_L)
+      carry = cur >> LIMB_BITS
+    }
+    r[1] = (int) (carry & MASK_L)
+    r[0] = (int) (carry >> LIMB_BITS)
+    return stripZeros(r)
+  }
+
+  /* ------------------------------------------------------- two's complement */
+
+  /* The value in len limbs of two's complement, sign-extended. len is always
+     one more than the longest operand, so no value that reaches here wraps. */
+  private static int[] twosComplement(BigInteger v, int len) {
+    int[] r = new int[len]
+    int n = v.mag.length
+    for (int i = 0 : i < n : i++) {
+      r[len - n + i] = v.mag[i]
+    }
+    if (v.signum < 0) {
+      for (int i = 0 : i < len : i++) {
+        r[i] = (~r[i]) & MASK
+      }
+      int carry = 1
+      for (int i = len - 1 : i >= 0 : i--) {
+        int s = r[i] + carry
+        r[i] = s & MASK
+        carry = s >> LIMB_BITS
+      }
+    }
+    return r
+  }
+
+  private static BigInteger fromTwos(int[] a) {
+    if ((a[0] & (1 << (LIMB_BITS - 1))) == 0) {
+      /* An all-zero result comes back from the caller's private constructor as
+         the mismatch of a positive sign on an empty magnitude, so the zeros come
+         off first and zero is answered by the constant. */
+      int[] m = stripZeros(a)
+      return m.length == 0 ? ZERO : new BigInteger(m, 1)
+    }
+    int[] r = new int[a.length]
+    for (int i = 0 : i < a.length : i++) {
+      r[i] = (~a[i]) & MASK
+    }
+    int carry = 1
+    for (int i = a.length - 1 : i >= 0 : i--) {
+      int s = r[i] + carry
+      r[i] = s & MASK
+      carry = s >> LIMB_BITS
+    }
+    return new BigInteger(stripZeros(r), -1)
+  }
+
+  private static BigInteger bitwise(BigInteger a, BigInteger b, int op) {
+    int len = (a.mag.length > b.mag.length ? a.mag.length : b.mag.length) + 1
+    int[] x = twosComplement(a, len)
+    int[] y = twosComplement(b, len)
+    int[] z = new int[len]
+    for (int i = 0 : i < len : i++) {
+      if (op == 0) {
+        z[i] = x[i] & y[i]
+      } else if (op == 1) {
+        z[i] = x[i] | y[i]
+      } else {
+        z[i] = x[i] ^ y[i]
+      }
+    }
+    return fromTwos(z)
+  }
+
+  private static long magWord(int[] m, int k) {
+    int lo = k * 32 / LIMB_BITS
+    int shift = k * 32 % LIMB_BITS
+    int n = m.length
+    long lobits = lo < n ? m[n - 1 - lo] : 0
+    long hibits = lo + 1 < n ? m[n - 2 - lo] : 0
+    long v = (lobits >> shift) | (hibits << (LIMB_BITS - shift))
+    return v & 4294967295L
+  }
+
+  /* ----------------------------------------------------------- byte arrays */
+
+  /* b holds unsigned bytes, most significant first. */
+  private static int[] bytesToMag(int[] b, int len) {
+    int nlimbs = (len * 8 + LIMB_BITS - 1) / LIMB_BITS
+    int[] m = new int[nlimbs]
+    for (int i = 0 : i < len : i++) {
+      long v = b[len - 1 - i] & 0xFF
+      int bitpos = i * 8
+      int limb = bitpos / LIMB_BITS
+      int shift = bitpos % LIMB_BITS
+      m[nlimbs - 1 - limb] |= (int) ((v << shift) & MASK_L)
+      if (shift + 8 > LIMB_BITS) {
+        m[nlimbs - 2 - limb] |= (int) (v >> (LIMB_BITS - shift))
+      }
+    }
+    return stripZeros(m)
+  }
+
+  private static BigInteger parseBytes(byte[] val, int off, int len) {
+    if (len == 0) {
+      throw new NumberFormatException("Zero length BigInteger")
+    }
+    int[] b = new int[len]
+    for (int i = 0 : i < len : i++) {
+      b[i] = val[off + i] & 0xFF
+    }
+    if (val[off] < 0) {
+      for (int i = 0 : i < len : i++) {
+        b[i] = (~b[i]) & 0xFF
+      }
+      int carry = 1
+      for (int i = len - 1 : i >= 0 : i--) {
+        int s = b[i] + carry
+        b[i] = s & 0xFF
+        carry = s >> 8
+      }
+      return new BigInteger(bytesToMag(b, len), -1)
+    }
+    /* An all-zero byte array is the number zero, not a sign with an empty
+       magnitude: this constructor normalizes a zero magnitude to a zero signum
+       the way the JDK's byte[] path does, where the (signum, magnitude)
+       constructor above it would refuse. */
+    int[] m = bytesToMag(b, len)
+    return new BigInteger(m, m.length == 0 ? 0 : 1)
+  }
+
+  /* -------------------------------------------------------------- parsing */
+
+  /* The digits of v in the given radix, most significant first. v is one digit
+     group's worth, so it is smaller than the radix to the power of the group
+     length and fits in the long it arrives as. */
+  private static String digitsOf(long v, int radix) {
+    if (v == 0) {
+      return "0"
+    }
+    StringBuilder sb = new StringBuilder()
+    while (v > 0) {
+      sb.append(digitChar((int) (v % radix)))
+      v = v / radix
+    }
+    return sb.reverse().toString()
+  }
+
+  private static char digitChar(int d) {
+    if (d < 10) {
+      return (char) ('0' + d)
+    }
+    return (char) ('a' + d - 10)
+  }
+
+  /* The largest k with radix^k <= Integer.MAX_VALUE, which is the JDK's
+     digitsPerInt table computed rather than written out. A group of that many
+     digits is one the int parser beside it can read. */
+  private static int digitsPerInt(int radix) {
+    int d = 0
+    int p = 1
+    while (p <= 2147483647 / radix) {
+      p = p * radix
+      d++
+    }
+    return d
+  }
+
+  private static long powSmall(int radix, int n) {
+    long r = 1L
+    for (int i = 0 : i < n : i++) {
+      r = r * radix
+    }
+    return r
+  }
+
+  private static int digitValue(char c, int radix) {
+    if (c >= '0' && c <= '9') {
+      int d = c - '0'
+      return d < radix ? d : -1
+    }
+    if (c >= 'a' && c <= 'z') {
+      int d = c - 'a' + 10
+      return d < radix ? d : -1
+    }
+    if (c >= 'A' && c <= 'Z') {
+      int d = c - 'A' + 10
+      return d < radix ? d : -1
+    }
+    return -1
+  }
+
+  /* The JDK's String constructor, group of digits at a time: the sign is
+     found by searching for it (which is what makes "+-3" and "3+3" illegal
+     sign characters rather than digits), the leading zeros are skipped, and
+     each group is handed to the int parser, whose NumberFormatException is
+     then the one a bad digit produces -- the JDK's message, character for
+     character, because the JDK reaches Integer.parseInt here too. */
+  private static BigInteger parse(String val, int radix) {
+    if (radix < 2 || radix > 36) {
+      throw new NumberFormatException("Radix out of range")
+    }
+    int len = val.length()
+    if (len == 0) {
+      throw new NumberFormatException("Zero length BigInteger")
+    }
+    int sign = 1
+    int cursor = 0
+    int minus = val.lastIndexOf('-')
+    int plus = val.lastIndexOf('+')
+    if (minus >= 0) {
+      if (minus != 0 || plus >= 0) {
+        throw new NumberFormatException("Illegal embedded sign character")
+      }
+      sign = -1
+      cursor = 1
+    } else if (plus >= 0) {
+      if (plus != 0) {
+        throw new NumberFormatException("Illegal embedded sign character")
+      }
+      cursor = 1
+    }
+    if (cursor == len) {
+      throw new NumberFormatException("Zero length BigInteger")
+    }
+    while (cursor < len && digitValue(val.charAt(cursor), radix) == 0) {
+      cursor++
+    }
+    if (cursor == len) {
+      return ZERO
+    }
+    int numDigits = len - cursor
+    int per = digitsPerInt(radix)
+    int firstLen = numDigits % per
+    if (firstLen == 0) {
+      firstLen = per
+    }
+    int[] m = magOfLong(Integer.parseInt(val.substring(cursor, cursor + firstLen), radix))
+    cursor += firstLen
+    long radixPow = powSmall(radix, per)
+    while (cursor < len) {
+      int g = Integer.parseInt(val.substring(cursor, cursor + per), radix)
+      m = mulAddSmall(m, radixPow, g)
+      cursor += per
+    }
+    return new BigInteger(m, sign)
+  }
+}
+
+/* ============================================================== BigDecimal
+
+   A BigDecimal is a BigInteger and an int scale. The JDK also gives it a
+   second, parallel representation -- intCompact, a long holding the unscaled
+   value whenever that value has at most eighteen digits -- and writes most of
+   its arithmetic twice, once for each. That is an optimization: both shapes
+   hold the same number, print the same string, and round the same way. This
+   port therefore keeps one representation and implements the JDK's
+   BigInteger-backed branch of every method, which is the branch the JDK itself
+   falls back to when the compact value does not fit.
+
+   The consequence worth naming: this class only ever calls BigInteger's public
+   surface (divideAndRemainder, compareMagnitude, shiftLeft, testBit, ...), never
+   the private magnitude machinery the JDK shares inside one package. Two JDK
+   helpers are re-expressed rather than ported:
+
+     - MutableBigInteger.compareHalf, the half-way test of a division, is
+       `2*|r| vs |d|` here: a shiftLeft and a compareMagnitude.
+     - bigDigitLength, the digit count, is the length of the decimal string.
+
+   Both compute what the JDK's versions compute.
+
+   Verified against javac 25: tests/programs/t115_math.teyru is this file's
+   customer and tests/programs/t115_math.expected is the JDK's own output for
+   the same program. */
+
+class BigDecimal extends Number implements Comparable<BigDecimal> {
+  private BigInteger intVal
+  private int scale
+
+  /* The bounds longValueExact checks against, as BigIntegers. */
+  private static final BigInteger LONGMIN = BigInteger.valueOf(Long.MIN_VALUE)
+  private static final BigInteger LONGMAX = BigInteger.valueOf(Long.MAX_VALUE)
+
+  /* The cache the JDK keeps for the values a program writes most often. Only
+     identity is affected by it, never a printed value. It is declared before
+     ZERO, ONE and TEN because those are its elements. */
+  private static final BigDecimal[] ZERO_THROUGH_TEN = {
+      new BigDecimal(BigInteger.ZERO, 0),
+      new BigDecimal(BigInteger.ONE, 0),
+      new BigDecimal(BigInteger.TWO, 0),
+      new BigDecimal(BigInteger.valueOf(3), 0),
+      new BigDecimal(BigInteger.valueOf(4), 0),
+      new BigDecimal(BigInteger.valueOf(5), 0),
+      new BigDecimal(BigInteger.valueOf(6), 0),
+      new BigDecimal(BigInteger.valueOf(7), 0),
+      new BigDecimal(BigInteger.valueOf(8), 0),
+      new BigDecimal(BigInteger.valueOf(9), 0),
+      new BigDecimal(BigInteger.TEN, 0) }
+
+  public static final BigDecimal ZERO = ZERO_THROUGH_TEN[0]
+  public static final BigDecimal ONE = ZERO_THROUGH_TEN[1]
+  public static final BigDecimal TEN = ZERO_THROUGH_TEN[10]
+
+  /* ------------------------------------------------------------- plumbing */
+
+  /* The number of decimal digits in a BigInteger: what the JDK calls
+     bigDigitLength, with its floating-point estimate of log10(2) replaced by
+     asking the number for its digits. Zero has one digit. */
+  private static int digitLength(BigInteger b) {
+    if (b.signum() == 0) {
+      return 1
+    }
+    return b.abs().toString().length()
+  }
+
+  private static BigInteger tenPow(int n) {
+    return BigInteger.TEN.pow(n)
+  }
+
+  /* val * 10^n for a BigInteger: the JDK's bigMultiplyPowerTen, in the shape
+     both of its callers use. */
+  private static BigInteger bigMultiplyPowerTen(BigInteger val, int n) {
+    if (n <= 0) {
+      return val
+    }
+    return val.multiply(tenPow(n))
+  }
+
+  /* The scale, as an int, if it fits. An int that does not fit is a scale this
+     class cannot hold; that is Overflow or Underflow, and only when the value
+     is nonzero -- a zero may carry any scale, and gets the saturated one. */
+  private static int checkScale(BigInteger intVal, long val) {
+    int asInt = (int) val
+    if (((long) asInt) != val) {
+      asInt = val > 2147483647L ? 2147483647 : -2147483648
+      if (intVal.signum() != 0) {
+        throw new ArithmeticException(asInt > 0 ? "Underflow" : "Overflow")
+      }
+    }
+    return asInt
+  }
+
+  private int checkScale(long val) {
+    return checkScale(this.intVal, val)
+  }
+
+  private static int checkScaleNonZero(long val) {
+    int asInt = (int) val
+    if (((long) asInt) != val) {
+      throw new ArithmeticException(asInt > 0 ? "Underflow" : "Overflow")
+    }
+    return asInt
+  }
+
+  private static int saturateLong(long s) {
+    int i = (int) s
+    return (((long) i) == s) ? i : (s < 0 ? -2147483648 : 2147483647)
+  }
+
+  private static BigDecimal zeroValueOf(int scale) {
+    return new BigDecimal(BigInteger.ZERO, scale)
+  }
+
+  /* The JDK carries every BigDecimal twice: as a long when the unscaled value
+     fits one, and as a BigInteger otherwise, with intCompact == INFLATED when
+     it does not. Teyru has no such field (again, see the note at the head of
+     this class), but a handful of places can be observed to depend on which
+     form the JDK would have chosen -- the message of a divide by zero is one of
+     them -- so the question is asked of the BigInteger instead. */
+  private boolean compact() {
+    return this.intVal.bitLength() <= 63
+  }
+
+  /* Remove trailing zeros until the preferred scale is reached or no more can
+     come off: the end of a division whose quotient turned out to be exact,
+     where the zeros are the scale the caller asked for rather than the scale
+     the division landed on. */
+  private static BigDecimal createAndStripZerosToMatchScale(BigInteger intVal, int scale, long preferredScale) {
+    BigInteger v = intVal
+    int scl = scale
+    while (v.abs().compareTo(BigInteger.TEN) >= 0 && scl > preferredScale) {
+      if (v.testBit(0)) {
+        break
+      }
+      BigInteger[] qr = v.divideAndRemainder(BigInteger.TEN)
+      if (qr[1].signum() != 0) {
+        break
+      }
+      v = qr[0]
+      scl = checkScale(v, (long) scl - 1)
+    }
+    return new BigDecimal(v, scl)
+  }
+
+  /* ------------------------------------------------------------- rounding */
+
+  /* Whether a quotient with a nonzero remainder has to step away from zero,
+     by the rounding mode. cmpHalf is the sign of 2*|r| - |d| and oddQuot says
+     whether the truncated quotient is odd.
+
+     The JDK passes the mode as its legacy int; this passes the enum, whose
+     ordinal is that int for all eight constants. */
+  private static boolean needIncrement(RoundingMode roundingMode, int qsign, int cmpHalf, boolean oddQuot) {
+    if (roundingMode == RoundingMode.UNNECESSARY) {
+      throw new ArithmeticException("Rounding necessary")
+    }
+    if (roundingMode == RoundingMode.UP) {
+      return true
+    }
+    if (roundingMode == RoundingMode.DOWN) {
+      return false
+    }
+    if (roundingMode == RoundingMode.CEILING) {
+      return qsign > 0
+    }
+    if (roundingMode == RoundingMode.FLOOR) {
+      return qsign < 0
+    }
+    if (cmpHalf < 0) {
+      return false
+    }
+    if (cmpHalf > 0) {
+      return true
+    }
+    if (roundingMode == RoundingMode.HALF_DOWN) {
+      return false
+    }
+    if (roundingMode == RoundingMode.HALF_UP) {
+      return true
+    }
+    return oddQuot
+  }
+
+  /* The quotient of two BigIntegers, rounded. The JDK divides magnitudes and
+     carries the sign separately; dividing the signed values and stepping the
+     quotient one away from zero when the test says so is the same number. */
+  private static BigInteger divideAndRound(BigInteger bdividend, BigInteger bdivisor, RoundingMode roundingMode) {
+    BigInteger[] qr = bdividend.divideAndRemainder(bdivisor)
+    BigInteger q = qr[0]
+    BigInteger r = qr[1]
+    if (r.signum() != 0) {
+      int qsign = (bdividend.signum() != bdivisor.signum()) ? -1 : 1
+      int cmpHalf = r.abs().shiftLeft(1).compareMagnitude(bdivisor.abs())
+      if (needIncrement(roundingMode, qsign, cmpHalf, q.testBit(0))) {
+        q = qsign < 0 ? q.subtract(BigInteger.ONE) : q.add(BigInteger.ONE)
+      }
+    }
+    return q
+  }
+
+  private static BigInteger divideAndRoundByTenPow(BigInteger intVal, int tenPow, RoundingMode roundingMode) {
+    return divideAndRound(intVal, tenPow(tenPow), roundingMode)
+  }
+
+  /* The same, but the result is a BigDecimal of the given scale, and a quotient
+     that came out exact is stripped down towards the preferred scale. */
+  private static BigDecimal divideAndRound(BigInteger bdividend, BigInteger bdivisor, int scale,
+                                           RoundingMode roundingMode, int preferredScale) {
+    BigInteger[] qr = bdividend.divideAndRemainder(bdivisor)
+    BigInteger q = qr[0]
+    BigInteger r = qr[1]
+    if (r.signum() != 0) {
+      int qsign = (bdividend.signum() != bdivisor.signum()) ? -1 : 1
+      int cmpHalf = r.abs().shiftLeft(1).compareMagnitude(bdivisor.abs())
+      if (needIncrement(roundingMode, qsign, cmpHalf, q.testBit(0))) {
+        q = qsign < 0 ? q.subtract(BigInteger.ONE) : q.add(BigInteger.ONE)
+      }
+      return new BigDecimal(q, scale)
+    }
+    if (preferredScale != scale) {
+      return createAndStripZerosToMatchScale(q, scale, preferredScale)
+    }
+    return new BigDecimal(q, scale)
+  }
+
+  /* The rounding half of the constructors and of round(): drop digits from the
+     right, one rounding at a time, until what is left fits the precision. Each
+     drop shortens the scale by exactly the number of digits removed, so a later
+     drop rounds a value that has already moved. */
+  private static BigDecimal rounded(BigInteger unscaledVal, int scale, MathContext mc) {
+    if (mc.precision <= 0) {
+      return new BigDecimal(unscaledVal, scale)
+    }
+    RoundingMode mode = mc.roundingMode
+    BigInteger v = unscaledVal
+    int scl = scale
+    int prec = digitLength(v)
+    int drop = prec - mc.precision
+    while (drop > 0) {
+      scl = checkScaleNonZero((long) scl - drop)
+      v = divideAndRoundByTenPow(v, drop, mode)
+      prec = digitLength(v)
+      drop = prec - mc.precision
+    }
+    return new BigDecimal(v, scl)
+  }
+
+  private static BigDecimal doRound(BigDecimal val, MathContext mc) {
+    if (mc.precision <= 0) {
+      return val
+    }
+    return rounded(val.intVal, val.scale, mc)
+  }
+
+  /* ------------------------------------------------------- scale alignment */
+
+  /* The JDK's static add: the two unscaled values are brought to a common
+     scale, and the result carries that scale. */
+  private static BigDecimal add(BigInteger fst, int scale1, BigInteger snd, int scale2) {
+    int sdiff = scale1 - scale2
+    if (sdiff == 0) {
+      return new BigDecimal(fst.add(snd), scale1)
+    }
+    if (sdiff < 0) {
+      BigInteger rb = bigMultiplyPowerTen(fst, -sdiff)
+      return new BigDecimal(rb.add(snd), scale2)
+    }
+    BigInteger rb = bigMultiplyPowerTen(snd, sdiff)
+    return new BigDecimal(fst.add(rb), scale1)
+  }
+
+  /* Condensation of the smaller operand of an add under a MathContext: when
+     the two operands' digit positions are disjoint and the small one cannot
+     reach the result's last digit, only its sign can matter, so it becomes a
+     one at the result's own scale. */
+  private BigDecimal[] preAlign(BigDecimal lhs, BigDecimal augend, long padding, MathContext mc) {
+    BigDecimal big
+    BigDecimal small
+    if (padding < 0) {
+      big = lhs
+      small = augend
+    } else {
+      big = augend
+      small = lhs
+    }
+    long estResultUlpScale = (long) big.scale - big.precision() + mc.precision
+    long smallHighDigitPos = (long) small.scale - small.precision() + 1
+    if (smallHighDigitPos > big.scale + 2 && smallHighDigitPos > estResultUlpScale + 2) {
+      int prefer = big.scale > estResultUlpScale ? big.scale : saturateLong(estResultUlpScale)
+      small = BigDecimal.valueOf(small.signum(), this.checkScale((long) prefer + 3))
+    }
+    BigDecimal[] result = { big, small }
+    return result
+  }
+
+  private static void matchScale(BigDecimal[] val) {
+    if (val[0].scale < val[1].scale) {
+      val[0] = val[0].setScale(val[1].scale, RoundingMode.UNNECESSARY)
+    } else if (val[1].scale < val[0].scale) {
+      val[1] = val[1].setScale(val[0].scale, RoundingMode.UNNECESSARY)
+    }
+  }
+
+  /* --------------------------------------------------------- the divisions */
+
+  /* Magnitudes compared as if both had been shifted into [0.1, 1): the JDK's
+     compareMagnitudeNormalized, which decides whether the divisor is scaled up
+     one more place before the quotient's scale is worked out. */
+  private static int compareMagnitudeNormalized(BigInteger xs, int xscale, BigInteger ys, int yscale) {
+    int sdiff = xscale - yscale
+    if (sdiff < 0) {
+      return bigMultiplyPowerTen(xs, -sdiff).compareMagnitude(ys)
+    }
+    return xs.compareMagnitude(bigMultiplyPowerTen(ys, sdiff))
+  }
+
+  /* divide(xs, ys) with the result rounded to a scale derived from the
+     MathContext. The two operands arrive as unscaled values with their digit
+     counts in place of their scales -- that is how the caller normalizes them
+     into [0.1, 1) -- and preferredScale is the scale the caller would like. */
+  private static BigDecimal divide(BigInteger xs, int xscale, BigInteger ys, int yscale,
+                                   long preferredScale, MathContext mc) {
+    if (compareMagnitudeNormalized(xs, xscale, ys, yscale) > 0) {
+      yscale -= 1
+    }
+    int mcp = mc.precision
+    RoundingMode mode = mc.roundingMode
+    int scl = checkScaleNonZero(preferredScale + yscale - xscale + mcp)
+    BigDecimal quotient
+    if (checkScaleNonZero((long) mcp + yscale - xscale) > 0) {
+      int raise = checkScaleNonZero((long) mcp + yscale - xscale)
+      BigInteger rb = bigMultiplyPowerTen(xs, raise)
+      quotient = divideAndRound(rb, ys, scl, mode, checkScaleNonZero(preferredScale))
+    } else {
+      int newScale = checkScaleNonZero((long) xscale - mcp)
+      int raise = checkScaleNonZero((long) newScale - yscale)
+      BigInteger rb = bigMultiplyPowerTen(ys, raise)
+      quotient = divideAndRound(xs, rb, scl, mode, checkScaleNonZero(preferredScale))
+    }
+    return doRound(quotient, mc)
+  }
+
+  /* divide(dividend, divisor) with the result at an explicitly given scale:
+     whatever the scale demands is multiplied into the dividend, or into the
+     divisor when the scale is low enough that the quotient is shortened. */
+  private static BigDecimal divide(BigInteger dividend, int dividendScale, BigInteger divisor, int divisorScale,
+                                   int scale, RoundingMode roundingMode) {
+    if (checkScale(dividend, (long) scale + divisorScale) > dividendScale) {
+      int newScale = scale + divisorScale
+      int raise = newScale - dividendScale
+      BigInteger scaledDividend = bigMultiplyPowerTen(dividend, raise)
+      return divideAndRound(scaledDividend, divisor, scale, roundingMode, scale)
+    }
+    int newScale = checkScale(divisor, (long) dividendScale - scale)
+    int raise = newScale - divisorScale
+    BigInteger scaledDivisor = bigMultiplyPowerTen(divisor, raise)
+    return divideAndRound(dividend, scaledDivisor, scale, roundingMode, scale)
+  }
+
+  /* -------------------------------------------------------- constructors */
+
+  public BigDecimal(BigInteger val) {
+    if (val == null) {
+      throw new NullPointerException("val == null")
+    }
+    this.intVal = val
+    this.scale = 0
+  }
+
+  public BigDecimal(BigInteger val, MathContext mc) {
+    if (val == null) {
+      throw new NullPointerException("val == null")
+    }
+    BigDecimal r = rounded(val, 0, mc)
+    this.intVal = r.intVal
+    this.scale = r.scale
+  }
+
+  public BigDecimal(BigInteger unscaledVal, int scale) {
+    if (unscaledVal == null) {
+      throw new NullPointerException("unscaledVal == null")
+    }
+    this.intVal = unscaledVal
+    this.scale = scale
+  }
+
+  public BigDecimal(BigInteger unscaledVal, int scale, MathContext mc) {
+    if (unscaledVal == null) {
+      throw new NullPointerException("unscaledVal == null")
+    }
+    BigDecimal r = rounded(unscaledVal, scale, mc)
+    this.intVal = r.intVal
+    this.scale = r.scale
+  }
+
+  public BigDecimal(int val) {
+    this.intVal = BigInteger.valueOf(val)
+    this.scale = 0
+  }
+
+  public BigDecimal(int val, MathContext mc) {
+    BigDecimal r = rounded(BigInteger.valueOf(val), 0, mc)
+    this.intVal = r.intVal
+    this.scale = r.scale
+  }
+
+  public BigDecimal(long val) {
+    this.intVal = BigInteger.valueOf(val)
+    this.scale = 0
+  }
+
+  public BigDecimal(long val, MathContext mc) {
+    BigDecimal r = rounded(BigInteger.valueOf(val), 0, mc)
+    this.intVal = r.intVal
+    this.scale = r.scale
+  }
+
+  /* The string form. The JDK parses a char[] with an offset and a length; this
+     parses the String, with the same grammar, the same scale arithmetic (every
+     digit after the point raises the scale, the exponent lowers it) and the
+     same refusals. */
+  public BigDecimal(String val) {
+    BigDecimal r = parseString(val, MathContext.UNLIMITED)
+    this.intVal = r.intVal
+    this.scale = r.scale
+  }
+
+  public BigDecimal(String val, MathContext mc) {
+    BigDecimal r = parseString(val, mc)
+    this.intVal = r.intVal
+    this.scale = r.scale
+  }
+
+  private static BigDecimal parseString(String val, MathContext mc) {
+    if (val == null) {
+      throw new NullPointerException("Cannot parse null string")
+    }
+    int len = val.length()
+    /* A zero-length string reaches for a character that is not there, and the
+       JDK answers that -- an empty message over an array-bounds cause -- rather
+       than reporting missing digits. */
+    if (len == 0) {
+      throw new NumberFormatException()
+    }
+    int i = 0
+    boolean isneg = false
+    char c = val.charAt(0)
+    if (c == '-') {
+      isneg = true
+      i = 1
+    } else if (c == '+') {
+      i = 1
+    }
+    /* The JDK keeps a value of at most eighteen digits in a long and parses
+       anything longer through a char[]. One thing only tells the two paths
+       apart: the message a stray character produces. */
+    boolean isCompact = (len - i) <= 18
+    StringBuilder digits = new StringBuilder()
+    boolean dot = false
+    long scl = 0
+    while (i < len) {
+      c = val.charAt(i)
+      if (c >= '0' && c <= '9') {
+        digits.append(c)
+        if (dot) {
+          scl += 1
+        }
+        i += 1
+      } else if (c == '.') {
+        if (dot) {
+          throw new NumberFormatException("Character array contains more than one decimal point.")
+        }
+        dot = true
+        i += 1
+      } else if (c == 'e' || c == 'E') {
+        scl -= parseExponent(val, i)
+        i = len
+      } else if (isCompact) {
+        throw new NumberFormatException("Character " + c
+            + " is neither a decimal digit number, decimal point, nor \"e\" notation exponential mark.")
+      } else {
+        throw new NumberFormatException("Character array is missing \"e\" notation exponential mark.")
+      }
+    }
+    if (digits.length() == 0) {
+      throw new NumberFormatException("No digits found.")
+    }
+    BigInteger unscaled = new BigInteger(digits.toString())
+    if (isneg) {
+      unscaled = unscaled.negate()
+    }
+    /* The scale stays a long until the very end: an exponent too large to hold
+       is the parse failure Java reports, not a rounding failure. */
+    if (mc.precision > 0) {
+      int prec = digitLength(unscaled)
+      int drop = prec - mc.precision
+      while (drop > 0) {
+        scl -= drop
+        unscaled = divideAndRoundByTenPow(unscaled, drop, mc.roundingMode)
+        prec = digitLength(unscaled)
+        drop = prec - mc.precision
+      }
+    }
+    if (((long) ((int) scl)) != scl) {
+      throw new NumberFormatException("Exponent overflow.")
+    }
+    return new BigDecimal(unscaled, (int) scl)
+  }
+
+  /* The JDK's parseExp, on a String. Its bounds are Java's: reading one past
+     the end is a caught exception with an empty message, which is what a
+     truncated exponent -- "1e", "1e+" -- reports in Java. */
+  private static long parseExponent(String val, int at) {
+    int len = val.length()
+    int offset = at + 1
+    long exp = 0
+    if (offset >= len) {
+      throw new NumberFormatException()
+    }
+    char c = val.charAt(offset)
+    int remain = len - offset
+    boolean negexp = (c == '-')
+    if (negexp || c == '+') {
+      offset += 1
+      if (offset >= len) {
+        throw new NumberFormatException()
+      }
+      c = val.charAt(offset)
+      remain -= 1
+    }
+    if (remain <= 0) {
+      throw new NumberFormatException("No exponent digits.")
+    }
+    while (remain > 10 && c == '0') {
+      offset += 1
+      c = val.charAt(offset)
+      remain -= 1
+    }
+    if (remain > 10) {
+      throw new NumberFormatException("Too many nonzero exponent digits.")
+    }
+    while (true) {
+      if (c < '0' || c > '9') {
+        throw new NumberFormatException("Not a digit.")
+      }
+      exp = exp * 10 + (c - '0')
+      if (remain == 1) {
+        break
+      }
+      offset += 1
+      c = val.charAt(offset)
+      remain -= 1
+    }
+    if (negexp) {
+      exp = -exp
+    }
+    return exp
+  }
+
+  /* A BigDecimal from a double's exact binary value: the JDK's
+     BigDecimal(double, MathContext), written for one representation. */
+  public BigDecimal(double val) {
+    BigDecimal r = fromDouble(val, MathContext.UNLIMITED)
+    this.intVal = r.intVal
+    this.scale = r.scale
+  }
+
+  public BigDecimal(double val, MathContext mc) {
+    BigDecimal r = fromDouble(val, mc)
+    this.intVal = r.intVal
+    this.scale = r.scale
+  }
+
+  private static BigDecimal fromDouble(double val, MathContext mc) {
+    if (Double.isInfinite(val) || Double.isNaN(val)) {
+      throw new NumberFormatException("Infinite or NaN")
+    }
+    long valBits = Double.doubleToLongBits(val)
+    int sign = ((valBits >> 63) == 0 ? 1 : -1)
+    int exponent = (int) ((valBits >> 52) & 0x7ffL)
+    long significand = (exponent == 0
+        ? ((valBits & ((1L << 52) - 1)) << 1)
+        : ((valBits & ((1L << 52) - 1)) | (1L << 52)))
+    exponent -= 1075
+    if (significand == 0) {
+      return new BigDecimal(BigInteger.ZERO, 0)
+    }
+    while ((significand & 1) == 0) {
+      significand >>= 1
+      exponent += 1
+    }
+    int scl = 0
+    long compactVal = sign * significand
+    BigInteger rb
+    if (exponent == 0) {
+      rb = BigInteger.valueOf(compactVal)
+    } else if (exponent < 0) {
+      rb = BigInteger.valueOf(5).pow(-exponent).multiply(BigInteger.valueOf(compactVal))
+      scl = -exponent
+    } else {
+      rb = BigInteger.TWO.pow(exponent).multiply(BigInteger.valueOf(compactVal))
+    }
+    if (mc.precision > 0) {
+      int prec = digitLength(rb)
+      int drop = prec - mc.precision
+      while (drop > 0) {
+        scl = checkScaleNonZero((long) scl - drop)
+        rb = divideAndRoundByTenPow(rb, drop, mc.roundingMode)
+        prec = digitLength(rb)
+        drop = prec - mc.precision
+      }
+    }
+    return new BigDecimal(rb, scl)
+  }
+
+  /* ------------------------------------------------------ static factories */
+
+  public static BigDecimal valueOf(long val) {
+    if (val >= 0 && val < ZERO_THROUGH_TEN.length) {
+      return ZERO_THROUGH_TEN[(int) val]
+    }
+    return new BigDecimal(BigInteger.valueOf(val), 0)
+  }
+
+  public static BigDecimal valueOf(long unscaledVal, int scale) {
+    if (scale == 0) {
+      return valueOf(unscaledVal)
+    }
+    if (unscaledVal == 0) {
+      return zeroValueOf(scale)
+    }
+    return new BigDecimal(BigInteger.valueOf(unscaledVal), scale)
+  }
+
+  /* The double is taken at its printed value, not at its exact binary one:
+     that is the whole difference between valueOf and the constructor. */
+  public static BigDecimal valueOf(double val) {
+    return new BigDecimal(Double.toString(val))
+  }
+
+  /* ----------------------------------------------------------- arithmetic */
+
+  public BigDecimal add(BigDecimal augend) {
+    return add(this.intVal, this.scale, augend.intVal, augend.scale)
+  }
+
+  public BigDecimal add(BigDecimal augend, MathContext mc) {
+    if (mc.precision == 0) {
+      return add(augend)
+    }
+    BigDecimal lhs = this
+    boolean lhsIsZero = lhs.signum() == 0
+    boolean augendIsZero = augend.signum() == 0
+    if (lhsIsZero || augendIsZero) {
+      int preferredScale = lhs.scale > augend.scale ? lhs.scale : augend.scale
+      if (lhsIsZero && augendIsZero) {
+        return zeroValueOf(preferredScale)
+      }
+      BigDecimal result = lhsIsZero ? doRound(augend, mc) : doRound(lhs, mc)
+      if (result.scale == preferredScale) {
+        return result
+      }
+      if (result.scale > preferredScale) {
+        return createAndStripZerosToMatchScale(result.intVal, result.scale, preferredScale)
+      }
+      int precisionDiff = mc.precision - result.precision()
+      int scaleDiff = preferredScale - result.scale
+      if (precisionDiff >= scaleDiff) {
+        return result.setScale(preferredScale)
+      }
+      return result.setScale(result.scale + precisionDiff)
+    }
+    long padding = (long) lhs.scale - augend.scale
+    if (padding != 0) {
+      BigDecimal[] arg = preAlign(lhs, augend, padding, mc)
+      matchScale(arg)
+      lhs = arg[0]
+      augend = arg[1]
+    }
+    return doRound(new BigDecimal(lhs.intVal.add(augend.intVal), lhs.scale), mc)
+  }
+
+  public BigDecimal subtract(BigDecimal subtrahend) {
+    return add(this.intVal, this.scale, subtrahend.intVal.negate(), subtrahend.scale)
+  }
+
+  public BigDecimal subtract(BigDecimal subtrahend, MathContext mc) {
+    if (mc.precision == 0) {
+      return subtract(subtrahend)
+    }
+    return add(subtrahend.negate(), mc)
+  }
+
+  public BigDecimal multiply(BigDecimal multiplicand) {
+    int productScale = checkScale((long) this.scale + multiplicand.scale)
+    return new BigDecimal(this.intVal.multiply(multiplicand.intVal), productScale)
+  }
+
+  public BigDecimal multiply(BigDecimal multiplicand, MathContext mc) {
+    if (mc.precision == 0) {
+      return multiply(multiplicand)
+    }
+    int productScale = checkScale((long) this.scale + multiplicand.scale)
+    return doRound(new BigDecimal(this.intVal.multiply(multiplicand.intVal), productScale), mc)
+  }
+
+  /* x / y at a given scale, with a given rounding mode. */
+  public BigDecimal divide(BigDecimal divisor, int scale, RoundingMode roundingMode) {
+    return divide(divisor, scale, roundingMode.ordinal())
+  }
+
+  public BigDecimal divide(BigDecimal divisor, int scale, int roundingMode) {
+    if (roundingMode < RoundingMode.UP.ordinal() || roundingMode > RoundingMode.UNNECESSARY.ordinal()) {
+      throw new IllegalArgumentException("Invalid rounding mode")
+    }
+    /* A zero divisor is refused one level down, and the message there depends on
+       which private divide the JDK would have taken: the long-by-long one lets
+       the JVM's own "/ by zero" escape, while the BigInteger ones name
+       BigInteger. The choice turns on whether the dividend is compact, and a
+       zero divisor is compact by construction, so only the dividend is asked. */
+    if (divisor.signum() == 0 && compact()) {
+      throw new ArithmeticException("/ by zero")
+    }
+    RoundingMode mode = RoundingMode.valueOf(roundingMode)
+    return divide(this.intVal, this.scale, divisor.intVal, divisor.scale, scale, mode)
+  }
+
+  public BigDecimal divide(BigDecimal divisor, RoundingMode roundingMode) {
+    return divide(divisor, this.scale, roundingMode.ordinal())
+  }
+
+  public BigDecimal divide(BigDecimal divisor, int roundingMode) {
+    return divide(divisor, this.scale, roundingMode)
+  }
+
+  /* The exact quotient: the one that throws when the decimal expansion does not
+     terminate. The precision handed to the divide below is the bound on how
+     many digits a terminating quotient can need, which is what makes the
+     UNNECESSARY rounding an exact test rather than a guess. */
+  public BigDecimal divide(BigDecimal divisor) {
+    if (divisor.signum() == 0) {
+      if (this.signum() == 0) {
+        throw new ArithmeticException("Division undefined")
+      }
+      throw new ArithmeticException("Division by zero")
+    }
+    int preferredScale = saturateLong((long) this.scale - divisor.scale)
+    if (this.signum() == 0) {
+      return zeroValueOf(preferredScale)
+    }
+    long maxl = (long) this.precision() + (10L * divisor.precision() + 2) / 3
+    MathContext mc = new MathContext(saturateLong(maxl), RoundingMode.UNNECESSARY)
+    BigDecimal quotient
+    try {
+      quotient = this.divide(divisor, mc)
+    } catch (ArithmeticException e) {
+      throw new ArithmeticException("Non-terminating decimal expansion; no exact representable decimal result.")
+    }
+    int quotientScale = quotient.scale
+    if (preferredScale > quotientScale) {
+      return quotient.setScale(preferredScale, RoundingMode.UNNECESSARY)
+    }
+    return quotient
+  }
+
+  public BigDecimal divide(BigDecimal divisor, MathContext mc) {
+    int mcp = mc.precision
+    if (mcp == 0) {
+      return divide(divisor)
+    }
+    BigDecimal dividend = this
+    long preferredScale = (long) dividend.scale - divisor.scale
+    if (divisor.signum() == 0) {
+      if (dividend.signum() == 0) {
+        throw new ArithmeticException("Division undefined")
+      }
+      throw new ArithmeticException("Division by zero")
+    }
+    if (dividend.signum() == 0) {
+      return zeroValueOf(saturateLong(preferredScale))
+    }
+    /* Each operand's digit count stands in for its scale here: the callee
+       compares and shifts them as values normalized into [0.1, 1). */
+    int xscale = dividend.precision()
+    int yscale = divisor.precision()
+    return divide(dividend.intVal, xscale, divisor.intVal, yscale, preferredScale, mc)
+  }
+
+  public BigDecimal divideToIntegralValue(BigDecimal divisor) {
+    int preferredScale = saturateLong((long) this.scale - divisor.scale)
+    if (this.compareMagnitude(divisor) < 0) {
+      return zeroValueOf(preferredScale)
+    }
+    if (this.signum() == 0 && divisor.signum() != 0) {
+      return this.setScale(preferredScale, RoundingMode.UNNECESSARY)
+    }
+    long gaps = this.scale > divisor.scale
+        ? (long) this.scale - divisor.scale
+        : (long) divisor.scale - this.scale
+    int maxDigits = saturateLong((long) this.precision() + (10L * divisor.precision() + 2) / 3 + gaps + 2)
+    BigDecimal quotient = this.divide(divisor, new MathContext(maxDigits, RoundingMode.DOWN))
+    if (quotient.scale > 0) {
+      quotient = quotient.setScale(0, RoundingMode.DOWN)
+      quotient = createAndStripZerosToMatchScale(quotient.intVal, quotient.scale, preferredScale)
+    }
+    if (quotient.scale < preferredScale) {
+      quotient = quotient.setScale(preferredScale, RoundingMode.UNNECESSARY)
+    }
+    return quotient
+  }
+
+  public BigDecimal divideToIntegralValue(BigDecimal divisor, MathContext mc) {
+    if (mc.precision == 0 || this.compareMagnitude(divisor) < 0) {
+      return divideToIntegralValue(divisor)
+    }
+    int preferredScale = saturateLong((long) this.scale - divisor.scale)
+    BigDecimal result = this.divide(divisor, new MathContext(mc.precision, RoundingMode.DOWN))
+    if (result.scale < 0) {
+      /* An integer result: if the quotient really is the whole integer part,
+         the remainder it implies is smaller than the divisor. */
+      BigDecimal product = result.multiply(divisor)
+      if (this.subtract(product).compareMagnitude(divisor) >= 0) {
+        throw new ArithmeticException("Division impossible")
+      }
+    } else if (result.scale > 0) {
+      result = result.setScale(0, RoundingMode.DOWN)
+    }
+    int precisionDiff = mc.precision - result.precision()
+    if (preferredScale > result.scale && precisionDiff > 0) {
+      int room = preferredScale - result.scale
+      int step = precisionDiff < room ? precisionDiff : room
+      return result.setScale(result.scale + step)
+    }
+    return createAndStripZerosToMatchScale(result.intVal, result.scale, preferredScale)
+  }
+
+  public BigDecimal remainder(BigDecimal divisor) {
+    BigDecimal[] divrem = this.divideAndRemainder(divisor)
+    return divrem[1]
+  }
+
+  public BigDecimal remainder(BigDecimal divisor, MathContext mc) {
+    BigDecimal[] divrem = this.divideAndRemainder(divisor, mc)
+    return divrem[1]
+  }
+
+  public BigDecimal[] divideAndRemainder(BigDecimal divisor) {
+    BigDecimal[] result = new BigDecimal[2]
+    result[0] = this.divideToIntegralValue(divisor)
+    result[1] = this.subtract(result[0].multiply(divisor))
+    return result
+  }
+
+  public BigDecimal[] divideAndRemainder(BigDecimal divisor, MathContext mc) {
+    if (mc.precision == 0) {
+      return divideAndRemainder(divisor)
+    }
+    BigDecimal[] result = new BigDecimal[2]
+    result[0] = this.divideToIntegralValue(divisor, mc)
+    result[1] = this.subtract(result[0].multiply(divisor))
+    return result
+  }
+
+  public BigDecimal pow(int n) {
+    if (n < 0 || n > 999999999) {
+      throw new ArithmeticException("Invalid operation")
+    }
+    int newScale = checkScale((long) this.scale * n)
+    return new BigDecimal(this.intVal.pow(n), newScale)
+  }
+
+  /* The ANSI X3.274-1996 algorithm the JDK documents: square and multiply into
+     an accumulator at a working precision a few digits wider than the one asked
+     for, then round once at the end. The bits of |n| are read from the top, so
+     the accumulator only starts to grow at the first set bit. */
+  public BigDecimal pow(int n, MathContext mc) {
+    if (mc.precision == 0) {
+      return pow(n)
+    }
+    if (n < -999999999 || n > 999999999) {
+      throw new ArithmeticException("Invalid operation")
+    }
+    if (n == 0) {
+      return ONE
+    }
+    BigDecimal lhs = this
+    int mag = n < 0 ? -n : n
+    int elength = BigInteger.valueOf(mag).toString().length()
+    if (elength > mc.precision) {
+      throw new ArithmeticException("Invalid operation")
+    }
+    MathContext workmc = new MathContext(mc.precision + elength + 1, mc.roundingMode)
+    BigDecimal acc = ONE
+    boolean seenbit = false
+    for (int i = 1 : i <= 31 : i++) {
+      mag += mag
+      if (mag < 0) {
+        seenbit = true
+        acc = acc.multiply(lhs, workmc)
+      }
+      if (i == 31) {
+        break
+      }
+      if (seenbit) {
+        acc = acc.multiply(acc, workmc)
+      }
+    }
+    if (n < 0) {
+      acc = ONE.divide(acc, workmc)
+    }
+    return doRound(acc, mc)
+  }
+
+  /* ------------------------------------------------------------- rounding */
+
+  public BigDecimal abs() {
+    return signum() < 0 ? negate() : this
+  }
+
+  public BigDecimal abs(MathContext mc) {
+    return signum() < 0 ? negate(mc) : plus(mc)
+  }
+
+  public BigDecimal negate() {
+    return new BigDecimal(this.intVal.negate(), this.scale)
+  }
+
+  public BigDecimal negate(MathContext mc) {
+    return negate().plus(mc)
+  }
+
+  public BigDecimal plus() {
+    return this
+  }
+
+  public BigDecimal plus(MathContext mc) {
+    if (mc.precision == 0) {
+      return this
+    }
+    return doRound(this, mc)
+  }
+
+  public BigDecimal round(MathContext mc) {
+    return plus(mc)
+  }
+
+  public int signum() {
+    return this.intVal.signum()
+  }
+
+  public int scale() {
+    return this.scale
+  }
+
+  public int precision() {
+    return digitLength(this.intVal)
+  }
+
+  public BigInteger unscaledValue() {
+    return this.intVal
+  }
+
+  /* setScale: raising the scale multiplies the unscaled value out, lowering it
+     divides and rounds. */
+  public BigDecimal setScale(int newScale, RoundingMode roundingMode) {
+    return setScale(newScale, roundingMode.ordinal())
+  }
+
+  public BigDecimal setScale(int newScale, int roundingMode) {
+    if (roundingMode < RoundingMode.UP.ordinal() || roundingMode > RoundingMode.UNNECESSARY.ordinal()) {
+      throw new IllegalArgumentException("Invalid rounding mode")
+    }
+    RoundingMode mode = RoundingMode.valueOf(roundingMode)
+    int oldScale = this.scale
+    if (newScale == oldScale) {
+      return this
+    }
+    if (this.signum() == 0) {
+      return zeroValueOf(newScale)
+    }
+    if (newScale > oldScale) {
+      int raise = checkScale((long) newScale - oldScale)
+      BigInteger rb = bigMultiplyPowerTen(this.intVal, raise)
+      return new BigDecimal(rb, newScale)
+    }
+    int drop = checkScale((long) oldScale - newScale)
+    return divideAndRound(this.intVal, tenPow(drop), newScale, mode, newScale)
+  }
+
+  public BigDecimal setScale(int newScale) {
+    return setScale(newScale, RoundingMode.UNNECESSARY.ordinal())
+  }
+
+  public BigDecimal movePointLeft(int n) {
+    if (n == 0 && this.scale >= 0) {
+      return this
+    }
+    int newScale = checkScale((long) this.scale + n)
+    BigDecimal num = new BigDecimal(this.intVal, newScale)
+    return num.scale < 0 ? num.setScale(0, RoundingMode.UNNECESSARY) : num
+  }
+
+  public BigDecimal movePointRight(int n) {
+    if (n == 0 && this.scale >= 0) {
+      return this
+    }
+    int newScale = checkScale((long) this.scale - n)
+    BigDecimal num = new BigDecimal(this.intVal, newScale)
+    return num.scale < 0 ? num.setScale(0, RoundingMode.UNNECESSARY) : num
+  }
+
+  public BigDecimal scaleByPowerOfTen(int n) {
+    return new BigDecimal(this.intVal, checkScale((long) this.scale - n))
+  }
+
+  /* Zero loses its scale here -- BigDecimal.ZERO, not a zero with a scale, is
+     what comes back -- which is Java's documented behaviour. */
+  public BigDecimal stripTrailingZeros() {
+    if (this.intVal.signum() == 0) {
+      return BigDecimal.ZERO
+    }
+    return createAndStripZerosToMatchScale(this.intVal, this.scale, -9223372036854775808L)
+  }
+
+  /* ---------------------------------------------------------- comparison */
+
+  public int compareTo(BigDecimal val) {
+    if (this.scale == val.scale) {
+      return this.intVal.compareTo(val.intVal)
+    }
+    int xsign = this.signum()
+    int ysign = val.signum()
+    if (xsign != ysign) {
+      return xsign > ysign ? 1 : -1
+    }
+    if (xsign == 0) {
+      return 0
+    }
+    int cmp = this.compareMagnitude(val)
+    return xsign > 0 ? cmp : -cmp
+  }
+
+  /* compareTo with the signs already known to be equal: the digit positions to
+     the left of the point are compared first, which answers most cases without
+     touching a magnitude, and the operands are brought to a common scale only
+     when those are equal. */
+  private int compareMagnitude(BigDecimal val) {
+    if (this.intVal.signum() == 0) {
+      return val.intVal.signum() == 0 ? 0 : -1
+    }
+    if (val.intVal.signum() == 0) {
+      return 1
+    }
+    long sdiff = (long) this.scale - val.scale
+    if (sdiff != 0) {
+      long xae = (long) this.precision() - this.scale
+      long yae = (long) val.precision() - val.scale
+      if (xae < yae) {
+        return -1
+      }
+      if (xae > yae) {
+        return 1
+      }
+      if (sdiff < 0) {
+        if (sdiff > -2147483648L) {
+          BigInteger rb = bigMultiplyPowerTen(this.intVal, (int) -sdiff)
+          return rb.compareMagnitude(val.intVal)
+        }
+      } else {
+        if (sdiff <= 2147483647L) {
+          BigInteger rb = bigMultiplyPowerTen(val.intVal, (int) sdiff)
+          return this.intVal.compareMagnitude(rb)
+        }
+      }
+    }
+    return this.intVal.compareMagnitude(val.intVal)
+  }
+
+  /* equals is about representation, compareTo about value: 2.0 and 2.00
+     compare equal and are not equal. */
+  public boolean equals(Object x) {
+    if (!(x instanceof BigDecimal)) {
+      return false
+    }
+    BigDecimal xDec = (BigDecimal) x
+    if (x == this) {
+      return true
+    }
+    if (this.scale != xDec.scale) {
+      return false
+    }
+    return this.intVal.equals(xDec.intVal)
+  }
+
+  public int hashCode() {
+    return 31 * this.intVal.hashCode() + this.scale
+  }
+
+  public BigDecimal min(BigDecimal val) {
+    return compareTo(val) <= 0 ? this : val
+  }
+
+  public BigDecimal max(BigDecimal val) {
+    return compareTo(val) >= 0 ? this : val
+  }
+
+  /* ------------------------------------------------------------- printing */
+
+  public String toString() {
+    return layoutChars(true)
+  }
+
+  public String toEngineeringString() {
+    return layoutChars(false)
+  }
+
+  /* The string with no exponent: a negative scale is that many zeros appended,
+     since the digits all sit above the point. */
+  public String toPlainString() {
+    if (this.scale == 0) {
+      return this.intVal.toString()
+    }
+    if (this.scale < 0) {
+      if (signum() == 0) {
+        return "0"
+      }
+      int trailingZeros = checkScaleNonZero(-(long) this.scale)
+      StringBuilder buf = new StringBuilder()
+      buf.append(this.intVal.toString())
+      for (int i = 0 : i < trailingZeros : i++) {
+        buf.append('0')
+      }
+      return buf.toString()
+    }
+    return getValueString(signum(), this.intVal.abs().toString(), this.scale)
+  }
+
+  private static String getValueString(int signum, String intString, int scale) {
+    int insertionPoint = intString.length() - scale
+    if (insertionPoint == 0) {
+      return (signum < 0 ? "-0." : "0.") + intString
+    }
+    if (insertionPoint > 0) {
+      StringBuilder buf = new StringBuilder(intString)
+      buf.insert(insertionPoint, '.')
+      if (signum < 0) {
+        buf.insert(0, '-')
+      }
+      return buf.toString()
+    }
+    StringBuilder buf = new StringBuilder()
+    buf.append(signum < 0 ? "-0." : "0.")
+    for (int i = 0 : i < -insertionPoint : i++) {
+      buf.append('0')
+    }
+    buf.append(intString)
+    return buf.toString()
+  }
+
+  /* Java's canonical string: plain notation while the scale is not negative and
+     the adjusted exponent is at least -6, exponential otherwise. With sci false
+     the exponent is made a multiple of three -- engineering notation -- which is
+     the only difference between the two methods. */
+  private String layoutChars(boolean sci) {
+    int sgn = signum()
+    if (this.scale == 0) {
+      return this.intVal.toString()
+    }
+    StringBuilder buf = new StringBuilder()
+    String coeff = this.intVal.abs().toString()
+    if (sgn < 0) {
+      buf.append('-')
+    }
+    int coeffLen = coeff.length()
+    long adjusted = -(long) this.scale + (coeffLen - 1)
+    if (this.scale >= 0 && adjusted >= -6) {
+      int pad = this.scale - coeffLen
+      if (pad >= 0) {
+        buf.append('0')
+        buf.append('.')
+        for (int i = 0 : i < pad : i++) {
+          buf.append('0')
+        }
+        buf.append(coeff)
+      } else {
+        buf.append(coeff.substring(0, -pad))
+        buf.append('.')
+        buf.append(coeff.substring(-pad))
+      }
+    } else {
+      if (sci) {
+        buf.append(coeff.charAt(0))
+        if (coeffLen > 1) {
+          buf.append('.')
+          buf.append(coeff.substring(1))
+        }
+      } else {
+        int sig = (int) (adjusted % 3)
+        if (sig < 0) {
+          sig += 3
+        }
+        adjusted -= sig
+        sig += 1
+        if (sgn == 0) {
+          if (sig == 1) {
+            buf.append('0')
+          } else if (sig == 2) {
+            buf.append("0.00")
+            adjusted += 3
+          } else {
+            buf.append("0.0")
+            adjusted += 3
+          }
+        } else if (sig >= coeffLen) {
+          buf.append(coeff)
+          for (int i = sig - coeffLen : i > 0 : i--) {
+            buf.append('0')
+          }
+        } else {
+          buf.append(coeff.substring(0, sig))
+          buf.append('.')
+          buf.append(coeff.substring(sig))
+        }
+      }
+      if (adjusted != 0) {
+        buf.append('E')
+        if (adjusted > 0) {
+          buf.append('+')
+        }
+        buf.append(adjusted)
+      }
+    }
+    return buf.toString()
+  }
+
+  /* ---------------------------------------------------------- conversions */
+
+  public BigInteger toBigInteger() {
+    return this.setScale(0, RoundingMode.DOWN).intVal
+  }
+
+  public BigInteger toBigIntegerExact() {
+    return this.setScale(0, RoundingMode.UNNECESSARY).intVal
+  }
+
+  public int intValue() {
+    return (int) longValue()
+  }
+
+  public long longValue() {
+    return toBigInteger().longValue()
+  }
+
+  /* The JDK's own fallback for both of these is to parse the printed form, and
+     that conversion is correctly rounded; so is the runtime's. */
+  public double doubleValue() {
+    return Double.parseDouble(this.toString())
+  }
+
+  public float floatValue() {
+    return Float.parseFloat(this.toString())
+  }
+
+  public short shortValue() {
+    return (short) intValue()
+  }
+
+  public byte byteValue() {
+    return (byte) intValue()
+  }
+
+  public long longValueExact() {
+    if (this.signum() == 0) {
+      return 0
+    }
+    if (this.precision() <= this.scale) {
+      throw new ArithmeticException("Rounding necessary")
+    }
+    if (this.precision() - 19 > this.scale) {
+      throw new ArithmeticException("Overflow")
+    }
+    BigDecimal num = this.setScale(0, RoundingMode.UNNECESSARY)
+    if (num.precision() >= 19) {
+      BigInteger v = num.intVal
+      if (v.compareTo(LONGMIN) < 0 || v.compareTo(LONGMAX) > 0) {
+        throw new ArithmeticException("Overflow")
+      }
+    }
+    return num.intVal.longValue()
+  }
+
+  public int intValueExact() {
+    long num = this.longValueExact()
+    if (((int) num) != num) {
+      throw new ArithmeticException("Overflow")
+    }
+    return (int) num
+  }
+
+  public short shortValueExact() {
+    long num = this.longValueExact()
+    if (num < -32768 || num > 32767) {
+      throw new ArithmeticException("Overflow")
+    }
+    return (short) num
+  }
+
+  public byte byteValueExact() {
+    long num = this.longValueExact()
+    if (num < -128 || num > 127) {
+      throw new ArithmeticException("Overflow")
+    }
+    return (byte) num
+  }
+}

@@ -322,6 +322,9 @@ and checked together with every program. Package names follow Java's, so
 | `java.io` | `File`, `Path`/`Paths`, `Files` |
 | `java.util.regex` | `Pattern`/`Matcher` |
 | `java.net` | `ServerSocket`, `Socket` and their streams |
+| `java.util.stream` | `Stream`/`IntStream`/`LongStream`/`DoubleStream`, `Collectors`, `Collector`, `Spliterator`; lazy, entered through `Collection.stream()` |
+| `java.math` | `BigInteger`, `BigDecimal`, `MathContext`, `RoundingMode` |
+| `java.text` | `NumberFormat`/`DecimalFormat` (the full pattern language), `DateFormat`/`SimpleDateFormat`, `DateTimeFormatter`, `MessageFormat`; ROOT/en-US only, `format` takes an `Instant` |
 | `com.google.gson` | Gson's tree API plus a compiler-generated object binding ([docs/json.md](docs/json.md)) |
 | framework | A Spring-shaped container and web layer ([docs/framework.md](docs/framework.md)) |
 

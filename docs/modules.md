@@ -77,16 +77,13 @@ require (
 
 ```
 import example.com/greeting/text   // 模組的拼法
-import example.com.greeting.text   // 剖析器讀得懂的拼法
+import example.com.greeting.text   // 點的拼法
 ```
 
-剖析器沿用 Java 的匯入語法，只讀用點分隔的識別字。所以建置在解析之前會把
-`/` 換成 `.`（`mod.RewriteImportPaths`），再在解析之後把符合模組路徑的匯入換
-回有斜線的模組路徑。這個轉換**長度不變**（一位元組換一位元組），詞法分析器
-與診斷算出來的行列位置因此仍然指著磁碟上同一個字元。
-
-> 這是權宜之計：真正的修法是讓剖析器接受 `/`（以及識別字不接受的 `-`）。
-> 在那之前，`RewriteImportPaths` 就是兩種拼法的接面。
+剖析器沿用的是 Java 的匯入語法，只是路徑段接受 `/` 與 `-`，所以
+`example.com/greeting/my-util` 是一個合法路徑，會正規化成套件名
+`example.com.greeting.my-util`。診斷算出來的行列位置因此指著磁碟上真正的
+字元，不必先改寫原始碼再解析。
 
 `import static example.com.dep.pkg.Widget` 匯入套件裡的單一成員；沒有尾綴的
 `import example.com/dep/pkg` 匯入整個套件。

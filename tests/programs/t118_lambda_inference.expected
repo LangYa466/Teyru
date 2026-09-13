@@ -1,0 +1,20 @@
+== the body settles the variable ==
+5
+10
+HELLO
+h
+true
+== and through a chain ==
+[4, 5, 3]
+[PEAR, APPLE, FIG]
+[true, true, false]
+[pear, apple]
+[p, a, f]
+[apple]
+== a named lambda still works ==
+5
+[4, 5, 3]
+== comparator over ? super T ==
+fig
+apple
+3

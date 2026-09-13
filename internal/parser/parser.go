@@ -1579,6 +1579,15 @@ func (p *parser) tryCast() ast.Expr {
 		if isPrim && typ.Dims == 0 {
 			return true
 		}
+		// A cast and a parenthesised expression are the same tokens until the
+		// token after the `)` is read, and there is no symbol table here to ask
+		// whether what is inside the parentheses names a type. A line break
+		// settles it instead: an expression ends at the newline, so nothing on
+		// the next line can be the operand of a cast. Without this, `a = (b)`
+		// followed by another statement was read as the cast `(b) <statement>`.
+		if p.lineBreak() {
+			return false
+		}
 		n := p.tok()
 		switch n.Kind {
 		case lexer.Ident, lexer.IntLit, lexer.LongLit, lexer.FloatLit, lexer.DoubleLit, lexer.CharLit, lexer.StringLit:

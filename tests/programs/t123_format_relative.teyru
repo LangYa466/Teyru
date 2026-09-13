@@ -1,0 +1,27 @@
+/* Java's `%<`: the conversion uses the argument the previous one used, and the
+   running count does not move. It was answered with "Conversion = '<'" before,
+   which Java never says. Expected output is javac 25's. */
+
+package teyru
+
+class T123 {
+  static void p(String s) { System.out.println("[" + s + "]") }
+
+  public static void main(String[] args) {
+    p(String.format("%s %<s", "a"))
+    p(String.format("%s-%<s-%s", "a", "b"))
+    p(String.format("%2$s %<s", "a", "b"))
+    p(String.format("[%5s][%<5s]", "x"))
+    p(String.format("%d %<d", 7))
+    p(String.format("%s %1$s %<s", "z"))
+    p(String.format("%s %<s %<S", "hi"))
+    p(String.format("%.2f %<.3f", 1.23456))
+    p(String.format("%x %<X %<#x", 255))
+    p(String.format("%c%<c%<c", 'q'))
+    p(String.format("%b %<b", true))
+    System.out.println("== errors ==")
+    try { p(String.format("%<s", "a")) } catch (Exception e) { p(e.getMessage()) }
+    try { p(String.format("%d", 1)) } catch (Exception e) { p(e.getMessage()) }
+    try { p(String.format("%s %<d", "a")) } catch (Exception e) { p(e.getMessage()) }
+  }
+}

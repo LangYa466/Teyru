@@ -207,7 +207,12 @@ func Compile(paths []string, opts Options) (*Result, error) {
 		return res, nil
 	}
 	exe := opts.Out
-	base := []string{opt, "-std=gnu11", "-fno-strict-aliasing", "-w", "-I", rtDir, cfile}
+	// -fwrapv: Java's integer arithmetic wraps, and C's is undefined on
+	// overflow, which a compiler is free to fold away. It did: `Integer.MIN_VALUE
+	// * -1` printed 2147483648 and `-Long.MIN_VALUE` printed 0, because the
+	// optimiser answered a question the language says has an answer. Telling the
+	// compiler that signed overflow wraps is the same rule Java states.
+	base := []string{opt, "-std=gnu11", "-fwrapv", "-fno-strict-aliasing", "-w", "-I", rtDir, cfile}
 	base = append(base, strings.Fields(rtC)...)
 	base = append(base, opts.Native...)
 	base = append(base, "-o", exe, "-lm", "-lpthread")
@@ -253,7 +258,7 @@ func writeLLVMIR(cc, opt, cfile, rtDir, out string) error {
 	if out == "" {
 		return nil
 	}
-	irArgs := []string{"-S", "-emit-llvm", "-std=gnu11", "-fno-strict-aliasing", "-w",
+	irArgs := []string{"-S", "-emit-llvm", "-std=gnu11", "-fwrapv", "-fno-strict-aliasing", "-w",
 		"-I", rtDir, cfile, "-o", out}
 	if opt != "" {
 		irArgs = append(irArgs, opt)

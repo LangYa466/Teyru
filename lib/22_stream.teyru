@@ -1,0 +1,3295 @@
+package teyru
+
+/* java.util.stream, in Teyru.
+ *
+ * Stream, IntStream, LongStream, DoubleStream, Collectors, Collector,
+ * Spliterator, Spliterators, StreamSupport -- the sequential half of the
+ * package. There is no parallelism anywhere in this dialect (no threads), so
+ * `parallel`, `parallelStream` and `StreamSupport.stream(.., true)` all hand
+ * back a sequential stream and `isParallel()` is false. Everything else is the
+ * JDK's contract, including laziness, which is not a detail here: a stream is
+ * a pull pipeline, an intermediate operation only wraps the iterator the
+ * previous stage opens, and nothing at all happens until a terminal operation
+ * starts asking. `Stream.iterate(1, n -> n * 2).limit(5)` terminates because of
+ * that, and so does `generate(..).findFirst()`.
+ *
+ * ------------------------------------------------------------------ the shape
+ *
+ * `list.stream()` is declared where Java declares it, on Collection, in
+ * lib/08_collections.teyru; that default method calls `Streams.of(this)`,
+ * which is this file's door in. `Streams` also spells the two entry points
+ * Java reads off a collection and this dialect cannot reach that way:
+ * `Streams.of(collection)` and `Streams.parallelStream(collection)` (the
+ * second hands back a sequential stream, like everything here). Every other
+ * entry point the JDK has (Stream.of, IntStream.range, StreamSupport,
+ * Arrays.stream) is here under its own name.
+ *
+ * ------------------------------------------------------ the two extra members
+ *
+ * Stream is an interface with two members the JDK does not have -- source(),
+ * state() -- and one nested type that it does (Stream.Builder). They are the
+ * seam the default methods are written against: a stream is "a way to open an
+ * iterator" plus the shared state of one pipeline, and every operation in this
+ * file is a default method over those two. Without them the whole file would
+ * be a second copy of itself, because Teyru has no way to declare a method on
+ * someone else's interface and no mixin to hang one on.
+ *
+ * StreamState carries Java's consume-once rule. Every stream derived from one
+ * source shares the state object, so consuming a derived stream consumes the
+ * source too -- exactly what the JDK does, and the reason
+ * `s.filter(..).count()` followed by `s.count()` throws IllegalStateException.
+ *
+ * ------------------------------------------------------- wildcards, in and out
+ *
+ * Stream's own signatures are written the way the JDK writes them, wildcards
+ * included (`Predicate<? super T>`, `Function<? super T, ? extends R>`). A
+ * lambda as an argument type-checks against those the way Java does, which is
+ * the point. Inside the implementations the wildcards are cast away to the
+ * invariant spelling once, at the top of the operation (`Predicate<T> p =
+ * (Predicate<T>) predicate`), because a wildcard capture that stays live
+ * through five levels of generic plumbing is where this dialect stops being
+ * able to follow you. The cast costs nothing: both are the same erased type.
+ *
+ * Collectors is written the JDK's way too (`Function<? super T, ? extends K>`,
+ * `Collector<? super T, A, R>`), with one thing left to know: a lambda
+ * argument loses its parameter type when a sibling argument is an inline
+ * generic call, so the two-argument groupingBy wants its downstream collector
+ * in a variable first:
+ *
+ *     Collector<String, LongAccumulator, Long> countOf = Collectors.<String>counting()
+ *     s.collect(Collectors.<String, Integer, LongAccumulator, Long>groupingBy(x -> x.length(), countOf))
+ *
+ * The same goes for a lambda whose own return type is an inferred generic call
+ * (`w -> Stream.of(w.split(" "))` wants a `Function<String, Stream<String>>`
+ * around it). Neither is a signature problem -- the JDK's spelling is what is
+ * declared -- and both are one variable away from the Java text.
+ *
+ * ------------------------------------------------------- what this file cannot do
+ *
+ * Teyru does not infer a generic method's type arguments from a lambda's body
+ * (docs/language.md §13), and a generic method whose type parameter appears
+ * only in its return type has nothing to infer from at all. So
+ * `Collectors.toList()` needs the type witness Java only needs when it is
+ * ambiguous:
+ *
+ *     Stream<String> s = ...
+ *     s.collect(Collectors.<String>toList())     // not Collectors.toList()
+ *     s.collect(Collectors.<String, Integer>groupingBy(x -> x.length()))
+ *
+ * The same call without the witness is legal Java, so a Java program that uses
+ * one is still a Teyru program -- it just spells out what javac was guessing.
+ * Stream.toList() (Java 16) is here as well and needs no witness at all.
+ *
+ * Collectors' return types are spelled with the accumulator made concrete
+ * (`Collector<T, List<T>, List<T>>` where the JDK has `Collector<T, ?, List<T>>`)
+ * for the same reason: `collect(Collector<? super T, A, R>)` infers A and R
+ * from the argument, and a `?` there would leave the inference with nothing to
+ * resolve against. A collector that was written to the JDK's spelling still
+ * works with `collect`; only a caller who names the accumulator type sees the
+ * difference.
+ *
+ * The primitive streams are final classes rather than interfaces (nothing
+ * implements IntStream, here or usefully anywhere) and their elements are boxed
+ * Integer/Long/Double inside a Stream, so `IntStream.sum()` unboxes per
+ * element. Correct and lazy; not what a JIT-compiled primitive pipeline costs.
+ *
+ * --------------------------------------------------------- other differences
+ *
+ *   - Comparator belongs to lib/09_functional.teyru, not to this file. The
+ *     comparator-taking methods here (`sorted(cmp)`, `min(cmp)`, `max(cmp)`,
+ *     `minBy(cmp)`, `maxBy(cmp)`) hand on whatever comparator they are given,
+ *     and the factories a caller writes -- `Comparator.naturalOrder()`,
+ *     `Comparator.comparing(..)` -- are declared there.
+ *   - No stage of a pipeline reports SIZED or SUBSIZED. A spliterator taken
+ *     from a stream is ORDERED and nothing else, and its estimateSize() is
+ *     Long.MAX_VALUE: a stage cannot know how many elements are coming without
+ *     consuming the source underneath it, which is the one thing a lazy
+ *     pipeline may not do. Spliterators.spliterator(..) does report the size
+ *     and the flags it was handed.
+ *   - trySplit() returns null everywhere, with or without SIZED. There is one
+ *     thread here, so there is nothing a split would be for.
+ *   - DoubleStream.sum() is a plain sum. Java's is Kahan-compensated, so a
+ *     pipeline whose additions lose bits can differ in the last place.
+ */
+
+// ------------------------------------------ java.util.function, the rest of it
+
+/* The functional interfaces java.util.stream is declared over and
+   lib/09_functional.teyru does not have. They are here rather than there
+   because that file is another file's to edit, which is the same reason
+   lib/14_util_objects.teyru declares BiConsumer.
+
+   UnaryOperator and BinaryOperator extend Function and BiFunction, as in the
+   JDK, so a UnaryOperator<T> is a Function<T, T>. A lambda written against
+   either one still sees the substituted parameter type -- `UnaryOperator<T>`
+   passes T down to `Function<T, T>`, and a lambda assigned to
+   `UnaryOperator<Integer>` sees Integer -- which is what makes the ordinary
+   `iterate(0, n -> n + 1)` type-check. */
+interface UnaryOperator<T> extends Function<T, T> {
+}
+
+interface BinaryOperator<T> extends BiFunction<T, T, T> {
+}
+
+interface ToIntFunction<T> {
+  int applyAsInt(T value)
+}
+
+interface ToLongFunction<T> {
+  long applyAsLong(T value)
+}
+
+interface ToDoubleFunction<T> {
+  double applyAsDouble(T value)
+}
+
+interface IntPredicate {
+  boolean test(int value)
+}
+
+interface IntUnaryOperator {
+  int applyAsInt(int operand)
+}
+
+interface IntBinaryOperator {
+  int applyAsInt(int left, int right)
+}
+
+interface IntConsumer {
+  void accept(int value)
+}
+
+interface IntFunction<R> {
+  R apply(int value)
+}
+
+interface IntSupplier {
+  int getAsInt()
+}
+
+interface LongPredicate {
+  boolean test(long value)
+}
+
+interface LongUnaryOperator {
+  long applyAsLong(long operand)
+}
+
+interface LongBinaryOperator {
+  long applyAsLong(long left, long right)
+}
+
+interface LongConsumer {
+  void accept(long value)
+}
+
+interface LongFunction<R> {
+  R apply(long value)
+}
+
+interface LongSupplier {
+  long getAsLong()
+}
+
+interface DoublePredicate {
+  boolean test(double value)
+}
+
+interface DoubleUnaryOperator {
+  double applyAsDouble(double operand)
+}
+
+interface DoubleBinaryOperator {
+  double applyAsDouble(double left, double right)
+}
+
+interface DoubleConsumer {
+  void accept(double value)
+}
+
+interface DoubleFunction<R> {
+  R apply(double value)
+}
+
+interface DoubleSupplier {
+  double getAsDouble()
+}
+
+// ------------------------------------------------------ java.util.Spliterator
+
+/* The half of Spliterator that means anything without parallelism. trySplit
+   always answers null -- the JDK's own answer for "this one cannot be split",
+   and the only truthful one here -- and every characteristic is a constant on
+   this interface, exactly as in the JDK, so `Spliterator.SIZED | ORDERED`
+   reads the same in both languages. */
+interface Spliterator<T> {
+  int DISTINCT = 0x00000001
+  int SORTED = 0x00000004
+  int ORDERED = 0x00000010
+  int SIZED = 0x00000040
+  int NONNULL = 0x00000100
+  int IMMUTABLE = 0x00000400
+  int CONCURRENT = 0x00001000
+  int SUBSIZED = 0x00004000
+
+  boolean tryAdvance(Consumer<? super T> action)
+
+  default void forEachRemaining(Consumer<? super T> action) {
+    while (tryAdvance(action)) {
+    }
+  }
+
+  Spliterator<T> trySplit()
+
+  long estimateSize()
+
+  default long getExactSizeIfKnown() {
+    return (characteristics() & SIZED) == 0 ? -1 : estimateSize()
+  }
+
+  int characteristics()
+
+  default boolean hasCharacteristics(int characteristics) {
+    return (characteristics() & characteristics) == characteristics
+  }
+
+  /* Java's answer for a spliterator whose SORTED characteristic is not set,
+     and for one that is sorted in the natural order. */
+  default Comparator<? super T> getComparator() {
+    if (hasCharacteristics(SORTED)) {
+      return null
+    }
+    throw new IllegalStateException()
+  }
+}
+
+// -------------------------------------------- java.util.stream.Stream, and it
+//
+// Declared before the classes that implement it and before the primitive
+// streams it returns, because the C backend writes a class's interface table
+// next to the class and every supertype has to be in hand by then.
+
+interface Stream<T> extends AutoCloseable {
+  /* The seam: how to open this pipeline's elements, and the state the whole
+     pipeline shares. Not part of the JDK; see the header. */
+  Supplier<Iterator<T>> source()
+
+  StreamState state()
+
+  // ------------------------------------------------------------ the sources
+
+  static <T> Stream.Builder<T> builder() {
+    return new StreamBuilder<T>()
+  }
+
+  static <T> Stream<T> empty() {
+    return new StreamImpl<T>(() -> new EmptyIterator<T>(), new StreamState())
+  }
+
+  static <T> Stream<T> of(T t) {
+    return Streams.of(Collections.singletonList(t))
+  }
+
+  /* Java has both of(T) and of(T...); so does this, and a one-argument call
+     picks the first, which is what javac does too. The array is copied into a
+     list rather than viewed through Arrays.asList, because a stream reads its
+     source once and never writes it: the two are the same stream. */
+  static <T> Stream<T> of(T... values) {
+    List<T> xs = new ArrayList<T>(values.length)
+    for (int i = 0 : i < values.length : i++) {
+      xs.add(values[i])
+    }
+    return Streams.of(xs)
+  }
+
+  static <T> Stream<T> ofNullable(T t) {
+    if (t == null) {
+      return Stream.empty()
+    }
+    return Stream.of(t)
+  }
+
+  /* The infinite one. Java's two-argument iterate has no hasNext, so its only
+     use is with limit/takeWhile/findFirst: this is a stream that answers true
+     from hasNext forever, and the operations downstream of it are what stop
+     the walk. */
+  static <T> Stream<T> iterate(T seed, UnaryOperator<T> f) {
+    return new StreamImpl<T>(() -> new StreamIterateIterator<T>(seed, f), new StreamState())
+  }
+
+  static <T> Stream<T> iterate(T seed, Predicate<? super T> hasNext, UnaryOperator<T> next) {
+    Predicate<T> stop = (Predicate<T>) hasNext
+    return new StreamImpl<T>(() -> new StreamIterateWhileIterator<T>(seed, stop, next), new StreamState())
+  }
+
+  static <T> Stream<T> generate(Supplier<? extends T> s) {
+    Supplier<T> sup = (Supplier<T>) s
+    return new StreamImpl<T>(() -> new StreamGenerateIterator<T>(sup), new StreamState())
+  }
+
+  static <T> Stream<T> concat(Stream<T> a, Stream<T> b) {
+    Supplier<Iterator<T>> first = a.source()
+    Supplier<Iterator<T>> second = b.source()
+    StreamState shared = new StreamState()
+    /* Both sides are consumed by the concatenation, which is what Java does:
+       the result's close() closes both. */
+    a.state().markUsed()
+    b.state().markUsed()
+    return new StreamImpl<T>(() -> new StreamConcatIterator<T>(first.get(), second.get()), shared)
+  }
+
+  // ------------------------------------------------- intermediate operations
+
+  default Stream<T> filter(Predicate<? super T> predicate) {
+    Predicate<T> p = (Predicate<T>) predicate
+    Supplier<Iterator<T>> up = source()
+    return new StreamImpl<T>(() -> new StreamFilterIterator<T>(up.get(), p), state())
+  }
+
+  default <R> Stream<R> map(Function<? super T, ? extends R> mapper) {
+    Function<T, R> m = (Function<T, R>) mapper
+    Supplier<Iterator<T>> up = source()
+    return new StreamImpl<R>(() -> new StreamMapIterator<T, R>(up.get(), m), state())
+  }
+
+  default IntStream mapToInt(ToIntFunction<? super T> mapper) {
+    ToIntFunction<T> m = (ToIntFunction<T>) mapper
+    return new IntStream(map(mapperOfInt(m)))
+  }
+
+  default LongStream mapToLong(ToLongFunction<? super T> mapper) {
+    ToLongFunction<T> m = (ToLongFunction<T>) mapper
+    return new LongStream(map(mapperOfLong(m)))
+  }
+
+  default DoubleStream mapToDouble(ToDoubleFunction<? super T> mapper) {
+    ToDoubleFunction<T> m = (ToDoubleFunction<T>) mapper
+    return new DoubleStream(map(mapperOfDouble(m)))
+  }
+
+  default <R> Stream<R> flatMap(Function<? super T, ? extends Stream<? extends R>> mapper) {
+    Function<T, Stream<R>> m = (Function<T, Stream<R>>) mapper
+    Supplier<Iterator<T>> up = source()
+    return new StreamImpl<R>(() -> new StreamFlatMapIterator<T, R>(up.get(), m), state())
+  }
+
+  default Stream<T> distinct() {
+    Supplier<Iterator<T>> up = source()
+    return new StreamImpl<T>(() -> new StreamDistinctIterator<T>(up.get()), state())
+  }
+
+  /* Both arities buffer the whole upstream before the first element comes out,
+     which is what makes them stateful and lazy at once: nothing is read until
+     a terminal operation asks for the first element. */
+  default Stream<T> sorted() {
+    return sorted(new NaturalOrderComparator<T>())
+  }
+
+  default Stream<T> sorted(Comparator<? super T> comparator) {
+    Comparator<T> c = (Comparator<T>) comparator
+    Supplier<Iterator<T>> up = source()
+    return new StreamImpl<T>(() -> new StreamSortedIterator<T>(up.get(), c), state())
+  }
+
+  default Stream<T> peek(Consumer<? super T> action) {
+    Consumer<T> a = (Consumer<T>) action
+    Supplier<Iterator<T>> up = source()
+    return new StreamImpl<T>(() -> new StreamPeekIterator<T>(up.get(), a), state())
+  }
+
+  default Stream<T> limit(long maxSize) {
+    if (maxSize < 0) {
+      throw new IllegalArgumentException(Long.toString(maxSize))
+    }
+    Supplier<Iterator<T>> up = source()
+    return new StreamImpl<T>(() -> new StreamLimitIterator<T>(up.get(), maxSize), state())
+  }
+
+  default Stream<T> skip(long n) {
+    if (n < 0) {
+      throw new IllegalArgumentException(Long.toString(n))
+    }
+    Supplier<Iterator<T>> up = source()
+    return new StreamImpl<T>(() -> new StreamSkipIterator<T>(up.get(), n), state())
+  }
+
+  default Stream<T> takeWhile(Predicate<? super T> predicate) {
+    Predicate<T> p = (Predicate<T>) predicate
+    Supplier<Iterator<T>> up = source()
+    return new StreamImpl<T>(() -> new StreamTakeWhileIterator<T>(up.get(), p), state())
+  }
+
+  default Stream<T> dropWhile(Predicate<? super T> predicate) {
+    Predicate<T> p = (Predicate<T>) predicate
+    Supplier<Iterator<T>> up = source()
+    return new StreamImpl<T>(() -> new StreamDropWhileIterator<T>(up.get(), p), state())
+  }
+
+  // --------------------------------------------------- terminal operations
+
+  default void forEach(Consumer<? super T> action) {
+    Consumer<T> a = (Consumer<T>) action
+    Iterator<T> it = iterator()
+    while (it.hasNext()) {
+      a.accept(it.next())
+    }
+  }
+
+  /* The same walk. There is no encounter order to lose without parallelism,
+     so the two methods are one implementation, as they are in the JDK for a
+     sequential stream. */
+  default void forEachOrdered(Consumer<? super T> action) {
+    forEach(action)
+  }
+
+  default Object[] toArray() {
+    List<Object> out = new ArrayList<Object>()
+    Iterator<T> it = iterator()
+    while (it.hasNext()) {
+      out.add(it.next())
+    }
+    return out.toArray()
+  }
+
+  /* Java 16's Stream.toList: a snapshot, unmodifiable. Java's own contract is
+     "an unmodifiable List", and it allows nulls, unlike toUnmodifiableList. */
+  default List<T> toList() {
+    List<T> out = new ArrayList<T>()
+    Iterator<T> it = iterator()
+    while (it.hasNext()) {
+      out.add(it.next())
+    }
+    return Collections.unmodifiableList(out)
+  }
+
+  default T reduce(T identity, BinaryOperator<T> accumulator) {
+    T result = identity
+    Iterator<T> it = iterator()
+    while (it.hasNext()) {
+      result = accumulator.apply(result, it.next())
+    }
+    return result
+  }
+
+  default Optional<T> reduce(BinaryOperator<T> accumulator) {
+    Iterator<T> it = iterator()
+    if (!it.hasNext()) {
+      return Optional.<T>empty()
+    }
+    T result = it.next()
+    while (it.hasNext()) {
+      result = accumulator.apply(result, it.next())
+    }
+    return Optional.<T>of(result)
+  }
+
+  /* The combiner is never called: it exists for the parallel case, and there
+     is no parallel case here. Java's sequential implementation does exactly
+     this and no more. */
+  default <U> U reduce(U identity, BiFunction<U, ? super T, U> accumulator, BinaryOperator<U> combiner) {
+    BiFunction<U, T, U> acc = (BiFunction<U, T, U>) accumulator
+    U result = identity
+    Iterator<T> it = iterator()
+    while (it.hasNext()) {
+      result = acc.apply(result, it.next())
+    }
+    return result
+  }
+
+  /* Same story: supplier and accumulator run, the combiner is the parallel
+     case's. */
+  default <R> R collect(Supplier<R> supplier, BiConsumer<R, ? super T> accumulator, BiConsumer<R, R> combiner) {
+    BiConsumer<R, T> acc = (BiConsumer<R, T>) accumulator
+    R container = supplier.get()
+    Iterator<T> it = iterator()
+    while (it.hasNext()) {
+      acc.accept(container, it.next())
+    }
+    return container
+  }
+
+  default <A, R> R collect(Collector<? super T, A, R> collector) {
+    Supplier<A> supplier = collector.supplier()
+    BiConsumer<A, ? super T> sink = collector.accumulator()
+    A container = supplier.get()
+    Iterator<T> it = iterator()
+    while (it.hasNext()) {
+      sink.accept(container, it.next())
+    }
+    return collector.finisher().apply(container)
+  }
+
+  default long count() {
+    long n = 0
+    Iterator<T> it = iterator()
+    while (it.hasNext()) {
+      it.next()
+      n++
+    }
+    return n
+  }
+
+  default Optional<T> min(Comparator<? super T> comparator) {
+    return extremum((Comparator<T>) comparator, -1)
+  }
+
+  default Optional<T> max(Comparator<? super T> comparator) {
+    return extremum((Comparator<T>) comparator, 1)
+  }
+
+  default Optional<T> findFirst() {
+    Iterator<T> it = iterator()
+    if (it.hasNext()) {
+      return Optional.<T>of(it.next())
+    }
+    return Optional.<T>empty()
+  }
+
+  /* The same element as findFirst, and the same one Java's sequential streams
+     pick. */
+  default Optional<T> findAny() {
+    return findFirst()
+  }
+
+  default boolean anyMatch(Predicate<? super T> predicate) {
+    Predicate<T> p = (Predicate<T>) predicate
+    Iterator<T> it = iterator()
+    while (it.hasNext()) {
+      if (p.test(it.next())) {
+        return true
+      }
+    }
+    return false
+  }
+
+  default boolean allMatch(Predicate<? super T> predicate) {
+    Predicate<T> p = (Predicate<T>) predicate
+    Iterator<T> it = iterator()
+    while (it.hasNext()) {
+      if (!p.test(it.next())) {
+        return false
+      }
+    }
+    return true
+  }
+
+  default boolean noneMatch(Predicate<? super T> predicate) {
+    Predicate<T> p = (Predicate<T>) predicate
+    Iterator<T> it = iterator()
+    while (it.hasNext()) {
+      if (p.test(it.next())) {
+        return false
+      }
+    }
+    return true
+  }
+
+  // -------------------------------------------- BaseStream, minus parallelism
+
+  /* Consuming the pipeline is what makes the second call throw, and it happens
+     here rather than in each terminal operation: they all come through here. */
+  default Iterator<T> iterator() {
+    state().consume()
+    return source().get()
+  }
+
+  default Spliterator<T> spliterator() {
+    state().consume()
+    return new IteratorSpliterator<T>(source().get(), Spliterator.ORDERED)
+  }
+
+  default boolean isParallel() {
+    return false
+  }
+
+  default Stream<T> sequential() {
+    return this
+  }
+
+  /* Answers a stream that is still sequential: there are no threads in this
+     dialect, so there is nothing else it could answer truthfully. The method
+     is here because a program that says `parallel()` should run, not fail. */
+  default Stream<T> parallel() {
+    return this
+  }
+
+  default Stream<T> unordered() {
+    return this
+  }
+
+  default Stream<T> onClose(Runnable closeHandler) {
+    state().addCloser(closeHandler)
+    return this
+  }
+
+  default void close() {
+    state().close()
+  }
+
+  // --------------------------------------------------------- the small print
+
+  private Optional<T> extremum(Comparator<T> comparator, int sign) {
+    Iterator<T> it = iterator()
+    if (!it.hasNext()) {
+      return Optional.<T>empty()
+    }
+    T best = it.next()
+    while (it.hasNext()) {
+      T e = it.next()
+      int c = comparator.compare(e, best)
+      // strictly better only, so the first of equals wins, as in Java
+      if (sign < 0 ? c < 0 : c > 0) {
+        best = e
+      }
+    }
+    return Optional.<T>of(best)
+  }
+
+  private Function<T, Integer> mapperOfInt(ToIntFunction<T> f) {
+    return t -> Integer.valueOf(f.applyAsInt(t))
+  }
+
+  private Function<T, Long> mapperOfLong(ToLongFunction<T> f) {
+    return t -> Long.valueOf(f.applyAsLong(t))
+  }
+
+  private Function<T, Double> mapperOfDouble(ToDoubleFunction<T> f) {
+    return t -> Double.valueOf(f.applyAsDouble(t))
+  }
+
+  // ------------------------------------------------------------ Stream.Builder
+
+  /* Java's Builder is a Consumer whose accept means add, and build() is the
+     terminal step. It is a nested interface in the JDK, so it is one here. */
+  interface Builder<T> extends Consumer<T> {
+    default Builder<T> add(T t) {
+      accept(t)
+      return this
+    }
+
+    Stream<T> build()
+  }
+}
+
+/* The state one pipeline shares: Java's consume-once rule, and the close
+   handlers. Every stream an operation derives shares the state of the stream
+   it came from, which is what makes
+   `s.filter(..).count()` followed by `s.count()` throw, exactly as in the JDK.
+
+   Not part of java.util.stream; see the header for why Stream needs it. */
+class StreamState {
+  private boolean used
+  private List<Runnable> closers = new ArrayList<Runnable>()
+
+  /* Marks the pipeline consumed, or throws if it already was. Java's message
+     and Java's rule: the second terminal operation on one pipeline dies. */
+  public void consume() {
+    if (used) {
+      throw new IllegalStateException("stream has already been operated upon or closed")
+    }
+    used = true
+  }
+
+  /* For concat, which consumes both of its inputs up front the way the JDK's
+     does, without the exception a second terminal operation would raise. */
+  public void markUsed() {
+    used = true
+  }
+
+  public void addCloser(Runnable action) {
+    closers.add(action)
+  }
+
+  /* Java's close: every handler runs, in registration order, and the pipeline
+     is consumed whether or not it was before. It does not throw on a stream
+     that was already consumed -- only the terminal operations do. */
+  public void close() {
+    used = true
+    for (int i = 0 : i < closers.size() : i++) {
+      closers.get(i).run()
+    }
+  }
+}
+
+/* The one class that implements the seam. Every operation in Stream returns
+   one of these wrapped around a supplier that opens the next stage's
+   iterator. */
+class StreamImpl<T> implements Stream<T> {
+  private Supplier<Iterator<T>> src
+  private StreamState shared
+
+  public StreamImpl(Supplier<Iterator<T>> source, StreamState state) {
+    src = source
+    shared = state
+  }
+
+  public Supplier<Iterator<T>> source() {
+    return src
+  }
+
+  public StreamState state() {
+    return shared
+  }
+}
+
+/* Stream.Builder's implementation. */
+class StreamBuilder<T> implements Stream.Builder<T>, Consumer<T> {
+  private List<T> xs = new ArrayList<T>()
+
+  public void accept(T t) {
+    xs.add(t)
+  }
+
+  public Stream<T> build() {
+    return Streams.of(xs)
+  }
+}
+
+/* Spliterators over an iterator. `characteristics` is whatever the factory
+   that made it said; nothing here ever splits, so estimateSize is the size the
+   caller claimed or the JDK's "unknown" sentinel. */
+class IteratorSpliterator<T> implements Spliterator<T> {
+  private Iterator<T> it
+  private int chars
+  private long size
+
+  public IteratorSpliterator(Iterator<T> iterator, int characteristics) {
+    it = iterator
+    chars = characteristics
+    size = Long.MAX_VALUE
+  }
+
+  public IteratorSpliterator(Iterator<T> iterator, long estimated, int characteristics) {
+    it = iterator
+    chars = characteristics
+    size = estimated
+  }
+
+  public boolean tryAdvance(Consumer<? super T> action) {
+    if (!it.hasNext()) {
+      return false
+    }
+    action.accept(it.next())
+    return true
+  }
+
+  /* null is the JDK's answer for "this spliterator cannot be split", and with
+     no threads there is nothing to split for. */
+  public Spliterator<T> trySplit() {
+    return null
+  }
+
+  public long estimateSize() {
+    return size
+  }
+
+  public int characteristics() {
+    return chars
+  }
+}
+
+// ------------------------------------------------------- java.util.Spliterators
+
+final class Spliterators {
+  private Spliterators() {
+  }
+
+  public static <T> Spliterator<T> emptySpliterator() {
+    return new IteratorSpliterator<T>(new EmptyIterator<T>(), 0)
+  }
+
+  public static <T> Spliterator<T> spliterator(Iterator<T> iterator, long size, int characteristics) {
+    return new IteratorSpliterator<T>(iterator, size, characteristics)
+  }
+
+  public static <T> Spliterator<T> spliteratorUnknownSize(Iterator<T> iterator, int characteristics) {
+    return new IteratorSpliterator<T>(iterator, characteristics)
+  }
+
+  public static <T> Spliterator<T> spliterator(Object[] array, int characteristics) {
+    return new IteratorSpliterator<T>(Spliterators.<T>iteratorsOf(array), array.length, characteristics)
+  }
+
+  public static <T> Spliterator<T> spliterator(Object[] array, int fromIndex, int toIndex, int characteristics) {
+    return new IteratorSpliterator<T>(Spliterators.<T>iteratorsOf(array, fromIndex, toIndex), toIndex - fromIndex, characteristics)
+  }
+
+  /* Java 9's Spliterators.iterator: the spliterator becomes an iterator. Each
+     call to next() is one tryAdvance with a one-slot consumer, which is the
+     same thing written the long way round. */
+  public static <T> Iterator<T> iterator(Spliterator<T> spliterator) {
+    return new SpliteratorIterator<T>(spliterator)
+  }
+
+  private static <T> Iterator<T> iteratorsOf(Object[] array) {
+    List<T> xs = new ArrayList<T>(array.length)
+    for (int i = 0 : i < array.length : i++) {
+      xs.add((T) array[i])
+    }
+    return xs.iterator()
+  }
+
+  private static <T> Iterator<T> iteratorsOf(Object[] array, int from, int to) {
+    List<T> xs = new ArrayList<T>(to - from)
+    for (int i = from : i < to : i++) {
+      xs.add((T) array[i])
+    }
+    return xs.iterator()
+  }
+}
+
+class SpliteratorIterator<T> implements Iterator<T> {
+  private Spliterator<T> src
+  private boolean ready
+  private T current
+
+  public SpliteratorIterator(Spliterator<T> spliterator) {
+    src = spliterator
+  }
+
+  public boolean hasNext() {
+    if (!ready) {
+      current = null
+      ready = src.tryAdvance(new SpliteratorSink<T>(this))
+    }
+    return ready
+  }
+
+  public T next() {
+    if (!hasNext()) {
+      throw new NoSuchElementException("no more elements")
+    }
+    ready = false
+    return current
+  }
+
+  void offer(T value) {
+    current = value
+  }
+}
+
+/* The one-slot consumer SpliteratorIterator hands to tryAdvance. */
+class SpliteratorSink<T> implements Consumer<T> {
+  private SpliteratorIterator<T> owner
+
+  public SpliteratorSink(SpliteratorIterator<T> target) {
+    owner = target
+  }
+
+  public void accept(T t) {
+    owner.offer(t)
+  }
+}
+
+// ------------------------------------------------------- java.util.stream.StreamSupport
+
+final class StreamSupport {
+  private StreamSupport() {
+  }
+
+  public static <T> Stream<T> stream(Spliterator<T> spliterator, boolean parallel) {
+    return new StreamImpl<T>(() -> Spliterators.iterator(spliterator), new StreamState())
+  }
+
+  /* The supplier form exists so that the spliterator (and whatever it holds
+     open) is not built until something asks for an element. */
+  public static <T> Stream<T> stream(Supplier<Spliterator<T>> supplier, int characteristics, boolean parallel) {
+    return new StreamImpl<T>(() -> Spliterators.iterator(supplier.get()), new StreamState())
+  }
+
+  public static IntStream intStream(Spliterator<Integer> spliterator, boolean parallel) {
+    return new IntStream(StreamSupport.stream(spliterator, parallel))
+  }
+
+  public static LongStream longStream(Spliterator<Long> spliterator, boolean parallel) {
+    return new LongStream(StreamSupport.stream(spliterator, parallel))
+  }
+
+  public static DoubleStream doubleStream(Spliterator<Double> spliterator, boolean parallel) {
+    return new DoubleStream(StreamSupport.stream(spliterator, parallel))
+  }
+}
+
+// ------------------------------------------------------------ the entry points
+
+/* What `collection.stream()` would be if this file could add a method to
+   java.util.Collection. It cannot -- lib/08_collections.teyru declares that
+   interface and this file does not own it -- so the call site is
+   Streams.of(list). parallelStream is here under the JDK's name and answers a
+   sequential stream, which is the only kind there is. */
+final class Streams {
+  private Streams() {
+  }
+
+  public static <T> Stream<T> of(Collection<T> c) {
+    return StreamSupport.stream(() -> Spliterators.spliteratorUnknownSize(c.iterator(), Spliterator.ORDERED | Spliterator.SIZED | Spliterator.SUBSIZED), 0, false)
+  }
+
+  /* The array is copied into a list for the same reason Stream.of copies: a
+     stream never writes its source, so a view and a copy are one stream. */
+  public static <T> Stream<T> of(T[] array) {
+    List<T> xs = new ArrayList<T>(array.length)
+    for (int i = 0 : i < array.length : i++) {
+      xs.add(array[i])
+    }
+    return of(xs)
+  }
+
+  public static <T> Stream<T> parallelStream(Collection<T> c) {
+    return of(c)
+  }
+}
+
+// ------------------------------------------------ java.util.OptionalInt and friends
+
+/* The primitive optionals. Not a class of Java's, but the four methods every
+   client of IntStream.max() uses, with Java's text: `OptionalInt[3]` and
+   `OptionalInt.empty`. */
+final class OptionalInt {
+  private static final OptionalInt EMPTY = new OptionalInt(false, 0)
+
+  private final boolean present
+  private final int value
+
+  private OptionalInt(boolean present, int value) {
+    this.present = present
+    this.value = value
+  }
+
+  public static OptionalInt empty() {
+    return EMPTY
+  }
+
+  public static OptionalInt of(int v) {
+    return new OptionalInt(true, v)
+  }
+
+  public int getAsInt() {
+    if (!present) {
+      throw new NoSuchElementException("No value present")
+    }
+    return value
+  }
+
+  public boolean isPresent() {
+    return present
+  }
+
+  public boolean isEmpty() {
+    return !present
+  }
+
+  public void ifPresent(IntConsumer action) {
+    if (present) {
+      action.accept(value)
+    }
+  }
+
+  public void ifPresentOrElse(IntConsumer action, Runnable emptyAction) {
+    if (present) {
+      action.accept(value)
+    } else {
+      emptyAction.run()
+    }
+  }
+
+  public int orElse(int other) {
+    return present ? value : other
+  }
+
+  public int orElseGet(IntSupplier supplier) {
+    return present ? value : supplier.getAsInt()
+  }
+
+  public int orElseThrow() {
+    if (!present) {
+      throw new NoSuchElementException("No value present")
+    }
+    return value
+  }
+
+  public boolean equals(Object o) {
+    if (o == this) {
+      return true
+    }
+    if (!(o instanceof OptionalInt)) {
+      return false
+    }
+    OptionalInt other = (OptionalInt) o
+    return present == other.isPresent() && (!present || value == other.getAsInt())
+  }
+
+  public int hashCode() {
+    return present ? Integer.hashCode(value) : 0
+  }
+
+  public String toString() {
+    return present ? "OptionalInt[" + value + "]" : "OptionalInt.empty"
+  }
+}
+
+final class OptionalLong {
+  private static final OptionalLong EMPTY = new OptionalLong(false, 0L)
+
+  private final boolean present
+  private final long value
+
+  private OptionalLong(boolean present, long value) {
+    this.present = present
+    this.value = value
+  }
+
+  public static OptionalLong empty() {
+    return EMPTY
+  }
+
+  public static OptionalLong of(long v) {
+    return new OptionalLong(true, v)
+  }
+
+  public long getAsLong() {
+    if (!present) {
+      throw new NoSuchElementException("No value present")
+    }
+    return value
+  }
+
+  public boolean isPresent() {
+    return present
+  }
+
+  public boolean isEmpty() {
+    return !present
+  }
+
+  public void ifPresent(LongConsumer action) {
+    if (present) {
+      action.accept(value)
+    }
+  }
+
+  public void ifPresentOrElse(LongConsumer action, Runnable emptyAction) {
+    if (present) {
+      action.accept(value)
+    } else {
+      emptyAction.run()
+    }
+  }
+
+  public long orElse(long other) {
+    return present ? value : other
+  }
+
+  public long orElseGet(LongSupplier supplier) {
+    return present ? value : supplier.getAsLong()
+  }
+
+  public long orElseThrow() {
+    if (!present) {
+      throw new NoSuchElementException("No value present")
+    }
+    return value
+  }
+
+  public boolean equals(Object o) {
+    if (o == this) {
+      return true
+    }
+    if (!(o instanceof OptionalLong)) {
+      return false
+    }
+    OptionalLong other = (OptionalLong) o
+    return present == other.isPresent() && (!present || value == other.getAsLong())
+  }
+
+  public int hashCode() {
+    return present ? Long.hashCode(value) : 0
+  }
+
+  public String toString() {
+    return present ? "OptionalLong[" + value + "]" : "OptionalLong.empty"
+  }
+}
+
+final class OptionalDouble {
+  private static final OptionalDouble EMPTY = new OptionalDouble(false, 0.0)
+
+  private final boolean present
+  private final double value
+
+  private OptionalDouble(boolean present, double value) {
+    this.present = present
+    this.value = value
+  }
+
+  public static OptionalDouble empty() {
+    return EMPTY
+  }
+
+  public static OptionalDouble of(double v) {
+    return new OptionalDouble(true, v)
+  }
+
+  public double getAsDouble() {
+    if (!present) {
+      throw new NoSuchElementException("No value present")
+    }
+    return value
+  }
+
+  public boolean isPresent() {
+    return present
+  }
+
+  public boolean isEmpty() {
+    return !present
+  }
+
+  public void ifPresent(DoubleConsumer action) {
+    if (present) {
+      action.accept(value)
+    }
+  }
+
+  public void ifPresentOrElse(DoubleConsumer action, Runnable emptyAction) {
+    if (present) {
+      action.accept(value)
+    } else {
+      emptyAction.run()
+    }
+  }
+
+  public double orElse(double other) {
+    return present ? value : other
+  }
+
+  public double orElseGet(DoubleSupplier supplier) {
+    return present ? value : supplier.getAsDouble()
+  }
+
+  public double orElseThrow() {
+    if (!present) {
+      throw new NoSuchElementException("No value present")
+    }
+    return value
+  }
+
+  public boolean equals(Object o) {
+    if (o == this) {
+      return true
+    }
+    if (!(o instanceof OptionalDouble)) {
+      return false
+    }
+    OptionalDouble other = (OptionalDouble) o
+    if (present != other.isPresent()) {
+      return false
+    }
+    // the Double contract: NaN equals NaN here, and -0.0 does not equal 0.0
+    return !present || Double.doubleToLongBits(value) == Double.doubleToLongBits(other.getAsDouble())
+  }
+
+  public int hashCode() {
+    return present ? Double.hashCode(value) : 0
+  }
+
+  public String toString() {
+    return present ? "OptionalDouble[" + value + "]" : "OptionalDouble.empty"
+  }
+}
+
+// ------------------------------------------------- java.util summary statistics
+
+/* Java's four-line text, exactly: `average` is formatted with %f, which is six
+   decimals, and the empty case reports Integer.MAX_VALUE as the minimum and
+   Integer.MIN_VALUE as the maximum, because that is what the counters start
+   at. Both are Java's own output, not an approximation of it. */
+class IntSummaryStatistics {
+  private long count
+  private long sum
+  private int min = Integer.MAX_VALUE
+  private int max = Integer.MIN_VALUE
+
+  public IntSummaryStatistics() {
+  }
+
+  public void accept(int value) {
+    count++
+    sum += (long) value
+    if (value < min) {
+      min = value
+    }
+    if (value > max) {
+      max = value
+    }
+  }
+
+  public void combine(IntSummaryStatistics other) {
+    count += other.getCount()
+    sum += other.getSum()
+    if (other.getMin() < min) {
+      min = other.getMin()
+    }
+    if (other.getMax() > max) {
+      max = other.getMax()
+    }
+  }
+
+  public long getCount() {
+    return count
+  }
+
+  public long getSum() {
+    return sum
+  }
+
+  public int getMin() {
+    return min
+  }
+
+  public int getMax() {
+    return max
+  }
+
+  public double getAverage() {
+    return count == 0 ? 0.0 : (double) sum / (double) count
+  }
+
+  public String toString() {
+    return String.format("IntSummaryStatistics{count=%d, sum=%d, min=%d, average=%f, max=%d}",
+      Long.valueOf(count), Long.valueOf(sum), Integer.valueOf(min), Double.valueOf(getAverage()), Integer.valueOf(max))
+  }
+}
+
+class LongSummaryStatistics {
+  private long count
+  private long sum
+  private long min = Long.MAX_VALUE
+  private long max = Long.MIN_VALUE
+
+  public LongSummaryStatistics() {
+  }
+
+  public void accept(long value) {
+    count++
+    sum += value
+    if (value < min) {
+      min = value
+    }
+    if (value > max) {
+      max = value
+    }
+  }
+
+  public void combine(LongSummaryStatistics other) {
+    count += other.getCount()
+    sum += other.getSum()
+    if (other.getMin() < min) {
+      min = other.getMin()
+    }
+    if (other.getMax() > max) {
+      max = other.getMax()
+    }
+  }
+
+  public long getCount() {
+    return count
+  }
+
+  public long getSum() {
+    return sum
+  }
+
+  public long getMin() {
+    return min
+  }
+
+  public long getMax() {
+    return max
+  }
+
+  public double getAverage() {
+    return count == 0 ? 0.0 : (double) sum / (double) count
+  }
+
+  public String toString() {
+    return String.format("LongSummaryStatistics{count=%d, sum=%d, min=%d, average=%f, max=%d}",
+      Long.valueOf(count), Long.valueOf(sum), Long.valueOf(min), Double.valueOf(getAverage()), Long.valueOf(max))
+  }
+}
+
+/* The sum the JDK keeps for doubles is compensated (Kahan) so that
+   `summaryStatistics` on a long pipeline does not drift; this one is a plain
+   sum. The count, min and max are Java's, and so is the text. */
+class DoubleSummaryStatistics {
+  private long count
+  private double sum
+  private double min = Double.POSITIVE_INFINITY
+  private double max = Double.NEGATIVE_INFINITY
+
+  public DoubleSummaryStatistics() {
+  }
+
+  public void accept(double value) {
+    count++
+    sum += value
+    if (value < min) {
+      min = value
+    }
+    if (value > max) {
+      max = value
+    }
+  }
+
+  public void combine(DoubleSummaryStatistics other) {
+    count += other.getCount()
+    sum += other.getSum()
+    if (other.getMin() < min) {
+      min = other.getMin()
+    }
+    if (other.getMax() > max) {
+      max = other.getMax()
+    }
+  }
+
+  public long getCount() {
+    return count
+  }
+
+  public double getSum() {
+    return sum
+  }
+
+  public double getMin() {
+    return min
+  }
+
+  public double getMax() {
+    return max
+  }
+
+  public double getAverage() {
+    return count == 0 ? 0.0 : sum / (double) count
+  }
+
+  public String toString() {
+    return String.format("DoubleSummaryStatistics{count=%d, sum=%f, min=%f, average=%f, max=%f}",
+      Long.valueOf(count), Double.valueOf(sum), Double.valueOf(min), Double.valueOf(getAverage()), Double.valueOf(max))
+  }
+}
+
+// ---------------------------------------------------------- java.util.stream.IntStream
+
+/* IntStream, LongStream and DoubleStream. Each holds the boxed pipeline it was
+   built from and unboxes at the boundary; the element type of a generic in
+   this dialect cannot be a primitive, so the boxed Stream is where the
+   laziness lives and this class is a typed face over it. `elements` has no
+   modifier on purpose: Stream.mapToInt, StreamSupport and the other primitive
+   streams in this file build one of these around a pipeline they already have,
+   and the alternative is a third name in the public surface.
+
+   The one thing worth knowing about the conversions: `mapToInt` on a
+   Stream<T> is `map(t -> Integer.valueOf(mapper.applyAsInt(t)))`, so the
+   intermediate stage is a Stream<Integer> and the boxing is per element. */
+final class IntStream {
+  Stream<Integer> elements
+
+  IntStream(Stream<Integer> elements) {
+    this.elements = elements
+  }
+
+  // ------------------------------------------------------------- the sources
+
+  public static IntStream empty() {
+    return new IntStream(Stream.<Integer>empty())
+  }
+
+  public static IntStream of(int t) {
+    return of(new int[]{t})
+  }
+
+  public static IntStream of(int... values) {
+    List<Integer> xs = new ArrayList<Integer>(values.length)
+    for (int i = 0 : i < values.length : i++) {
+      xs.add(Integer.valueOf(values[i]))
+    }
+    return new IntStream(Streams.of(xs))
+  }
+
+  public static IntStream iterate(int seed, IntUnaryOperator f) {
+    return new IntStream(Stream.iterate(Integer.valueOf(seed), n -> Integer.valueOf(f.applyAsInt(n.intValue()))))
+  }
+
+  public static IntStream iterate(int seed, IntPredicate hasNext, IntUnaryOperator next) {
+    return new IntStream(Stream.iterate(Integer.valueOf(seed), n -> hasNext.test(n.intValue()), n -> Integer.valueOf(next.applyAsInt(n.intValue()))))
+  }
+
+  public static IntStream generate(IntSupplier s) {
+    return new IntStream(Stream.generate(() -> Integer.valueOf(s.getAsInt())))
+  }
+
+  public static IntStream range(int startInclusive, int endExclusive) {
+    if (startInclusive >= endExclusive) {
+      return empty()
+    }
+    return iterate(startInclusive, n -> n + 1).limit((long) endExclusive - (long) startInclusive)
+  }
+
+  /* `to + 1` in int would wrap for Integer.MAX_VALUE, so the count is taken in
+     long, where Java's rangeClosed counts too. */
+  public static IntStream rangeClosed(int startInclusive, int endInclusive) {
+    if (startInclusive > endInclusive) {
+      return empty()
+    }
+    return iterate(startInclusive, n -> n + 1).limit((long) endInclusive - (long) startInclusive + 1L)
+  }
+
+  public static IntStream concat(IntStream a, IntStream b) {
+    return new IntStream(Stream.concat(a.elements, b.elements))
+  }
+
+  // ------------------------------------------------- intermediate operations
+
+  public IntStream filter(IntPredicate predicate) {
+    return new IntStream(elements.filter(v -> predicate.test(v.intValue())))
+  }
+
+  public IntStream map(IntUnaryOperator mapper) {
+    return new IntStream(elements.map(v -> Integer.valueOf(mapper.applyAsInt(v.intValue()))))
+  }
+
+  public <U> Stream<U> mapToObj(IntFunction<? extends U> mapper) {
+    IntFunction<U> m = (IntFunction<U>) mapper
+    return elements.map(v -> m.apply(v.intValue()))
+  }
+
+  public IntStream flatMap(IntFunction<? extends IntStream> mapper) {
+    IntFunction<IntStream> m = (IntFunction<IntStream>) mapper
+    return new IntStream(elements.flatMap(v -> m.apply(v.intValue()).elements))
+  }
+
+  public IntStream distinct() {
+    return new IntStream(elements.distinct())
+  }
+
+  public IntStream sorted() {
+    return new IntStream(elements.sorted())
+  }
+
+  public IntStream peek(IntConsumer action) {
+    return new IntStream(elements.peek(v -> action.accept(v.intValue())))
+  }
+
+  public IntStream limit(long maxSize) {
+    return new IntStream(elements.limit(maxSize))
+  }
+
+  public IntStream skip(long n) {
+    return new IntStream(elements.skip(n))
+  }
+
+  public IntStream takeWhile(IntPredicate predicate) {
+    return new IntStream(elements.takeWhile(v -> predicate.test(v.intValue())))
+  }
+
+  public IntStream dropWhile(IntPredicate predicate) {
+    return new IntStream(elements.dropWhile(v -> predicate.test(v.intValue())))
+  }
+
+  public LongStream asLongStream() {
+    return new LongStream(elements.map(v -> Long.valueOf((long) v.intValue())))
+  }
+
+  public DoubleStream asDoubleStream() {
+    return new DoubleStream(elements.map(v -> Double.valueOf((double) v.intValue())))
+  }
+
+  public Stream<Integer> boxed() {
+    return elements
+  }
+
+  // --------------------------------------------------- terminal operations
+
+  public void forEach(IntConsumer action) {
+    elements.forEach(v -> action.accept(v.intValue()))
+  }
+
+  public void forEachOrdered(IntConsumer action) {
+    forEach(action)
+  }
+
+  public int[] toArray() {
+    List<Integer> xs = new ArrayList<Integer>()
+    Iterator<Integer> it = elements.iterator()
+    while (it.hasNext()) {
+      xs.add(it.next())
+    }
+    int[] out = new int[xs.size()]
+    for (int i = 0 : i < out.length : i++) {
+      out[i] = xs.get(i).intValue()
+    }
+    return out
+  }
+
+  public int reduce(int identity, IntBinaryOperator op) {
+    int result = identity
+    Iterator<Integer> it = elements.iterator()
+    while (it.hasNext()) {
+      result = op.applyAsInt(result, it.next().intValue())
+    }
+    return result
+  }
+
+  public OptionalInt reduce(IntBinaryOperator op) {
+    Iterator<Integer> it = elements.iterator()
+    if (!it.hasNext()) {
+      return OptionalInt.empty()
+    }
+    int result = it.next().intValue()
+    while (it.hasNext()) {
+      result = op.applyAsInt(result, it.next().intValue())
+    }
+    return OptionalInt.of(result)
+  }
+
+  public <R> R collect(Supplier<R> supplier, ObjIntConsumer<R> accumulator, BiConsumer<R, R> combiner) {
+    R container = supplier.get()
+    Iterator<Integer> it = elements.iterator()
+    while (it.hasNext()) {
+      accumulator.accept(container, it.next().intValue())
+    }
+    return container
+  }
+
+  public int sum() {
+    int total = 0
+    Iterator<Integer> it = elements.iterator()
+    while (it.hasNext()) {
+      total += it.next().intValue()
+    }
+    return total
+  }
+
+  public OptionalInt min() {
+    Iterator<Integer> it = elements.iterator()
+    if (!it.hasNext()) {
+      return OptionalInt.empty()
+    }
+    int best = it.next().intValue()
+    while (it.hasNext()) {
+      int v = it.next().intValue()
+      if (v < best) {
+        best = v
+      }
+    }
+    return OptionalInt.of(best)
+  }
+
+  public OptionalInt max() {
+    Iterator<Integer> it = elements.iterator()
+    if (!it.hasNext()) {
+      return OptionalInt.empty()
+    }
+    int best = it.next().intValue()
+    while (it.hasNext()) {
+      int v = it.next().intValue()
+      if (v > best) {
+        best = v
+      }
+    }
+    return OptionalInt.of(best)
+  }
+
+  public long count() {
+    return elements.count()
+  }
+
+  /* Java sums the elements in a long here and divides once, which is what
+     keeps 2,000,000,000 + 2,000,000,000 from wrapping before the division. */
+  public OptionalDouble average() {
+    long total = 0
+    long n = 0
+    Iterator<Integer> it = elements.iterator()
+    while (it.hasNext()) {
+      total += (long) it.next().intValue()
+      n++
+    }
+    if (n == 0) {
+      return OptionalDouble.empty()
+    }
+    return OptionalDouble.of((double) total / (double) n)
+  }
+
+  public IntSummaryStatistics summaryStatistics() {
+    IntSummaryStatistics stats = new IntSummaryStatistics()
+    Iterator<Integer> it = elements.iterator()
+    while (it.hasNext()) {
+      stats.accept(it.next().intValue())
+    }
+    return stats
+  }
+
+  public boolean anyMatch(IntPredicate predicate) {
+    return elements.anyMatch(v -> predicate.test(v.intValue()))
+  }
+
+  public boolean allMatch(IntPredicate predicate) {
+    return elements.allMatch(v -> predicate.test(v.intValue()))
+  }
+
+  public boolean noneMatch(IntPredicate predicate) {
+    return elements.noneMatch(v -> predicate.test(v.intValue()))
+  }
+
+  public OptionalInt findFirst() {
+    Iterator<Integer> it = elements.iterator()
+    if (it.hasNext()) {
+      return OptionalInt.of(it.next().intValue())
+    }
+    return OptionalInt.empty()
+  }
+
+  public OptionalInt findAny() {
+    return findFirst()
+  }
+}
+
+// --------------------------------------------------------- java.util.stream.LongStream
+
+final class LongStream {
+  Stream<Long> elements
+
+  LongStream(Stream<Long> elements) {
+    this.elements = elements
+  }
+
+  public static LongStream empty() {
+    return new LongStream(Stream.<Long>empty())
+  }
+
+  public static LongStream of(long t) {
+    return of(new long[]{t})
+  }
+
+  public static LongStream of(long... values) {
+    List<Long> xs = new ArrayList<Long>(values.length)
+    for (int i = 0 : i < values.length : i++) {
+      xs.add(Long.valueOf(values[i]))
+    }
+    return new LongStream(Streams.of(xs))
+  }
+
+  public static LongStream iterate(long seed, LongUnaryOperator f) {
+    return new LongStream(Stream.iterate(Long.valueOf(seed), n -> Long.valueOf(f.applyAsLong(n.longValue()))))
+  }
+
+  public static LongStream iterate(long seed, LongPredicate hasNext, LongUnaryOperator next) {
+    return new LongStream(Stream.iterate(Long.valueOf(seed), n -> hasNext.test(n.longValue()), n -> Long.valueOf(next.applyAsLong(n.longValue()))))
+  }
+
+  public static LongStream generate(LongSupplier s) {
+    return new LongStream(Stream.generate(() -> Long.valueOf(s.getAsLong())))
+  }
+
+  public static LongStream range(long startInclusive, long endExclusive) {
+    if (startInclusive >= endExclusive) {
+      return empty()
+    }
+    return iterate(startInclusive, n -> n + 1L).limit(endExclusive - startInclusive)
+  }
+
+  public static LongStream rangeClosed(long startInclusive, long endInclusive) {
+    if (startInclusive > endInclusive) {
+      return empty()
+    }
+    return iterate(startInclusive, n -> n + 1L).limit(endInclusive - startInclusive + 1L)
+  }
+
+  public static LongStream concat(LongStream a, LongStream b) {
+    return new LongStream(Stream.concat(a.elements, b.elements))
+  }
+
+  public LongStream filter(LongPredicate predicate) {
+    return new LongStream(elements.filter(v -> predicate.test(v.longValue())))
+  }
+
+  public LongStream map(LongUnaryOperator mapper) {
+    return new LongStream(elements.map(v -> Long.valueOf(mapper.applyAsLong(v.longValue()))))
+  }
+
+  public <U> Stream<U> mapToObj(LongFunction<? extends U> mapper) {
+    LongFunction<U> m = (LongFunction<U>) mapper
+    return elements.map(v -> m.apply(v.longValue()))
+  }
+
+  public LongStream distinct() {
+    return new LongStream(elements.distinct())
+  }
+
+  public LongStream sorted() {
+    return new LongStream(elements.sorted())
+  }
+
+  public LongStream peek(LongConsumer action) {
+    return new LongStream(elements.peek(v -> action.accept(v.longValue())))
+  }
+
+  public LongStream limit(long maxSize) {
+    return new LongStream(elements.limit(maxSize))
+  }
+
+  public LongStream skip(long n) {
+    return new LongStream(elements.skip(n))
+  }
+
+  public LongStream takeWhile(LongPredicate predicate) {
+    return new LongStream(elements.takeWhile(v -> predicate.test(v.longValue())))
+  }
+
+  public LongStream dropWhile(LongPredicate predicate) {
+    return new LongStream(elements.dropWhile(v -> predicate.test(v.longValue())))
+  }
+
+  public DoubleStream asDoubleStream() {
+    return new DoubleStream(elements.map(v -> Double.valueOf((double) v.longValue())))
+  }
+
+  public Stream<Long> boxed() {
+    return elements
+  }
+
+  public void forEach(LongConsumer action) {
+    elements.forEach(v -> action.accept(v.longValue()))
+  }
+
+  public void forEachOrdered(LongConsumer action) {
+    forEach(action)
+  }
+
+  public long[] toArray() {
+    List<Long> xs = new ArrayList<Long>()
+    Iterator<Long> it = elements.iterator()
+    while (it.hasNext()) {
+      xs.add(it.next())
+    }
+    long[] out = new long[xs.size()]
+    for (int i = 0 : i < out.length : i++) {
+      out[i] = xs.get(i).longValue()
+    }
+    return out
+  }
+
+  public long reduce(long identity, LongBinaryOperator op) {
+    long result = identity
+    Iterator<Long> it = elements.iterator()
+    while (it.hasNext()) {
+      result = op.applyAsLong(result, it.next().longValue())
+    }
+    return result
+  }
+
+  public OptionalLong reduce(LongBinaryOperator op) {
+    Iterator<Long> it = elements.iterator()
+    if (!it.hasNext()) {
+      return OptionalLong.empty()
+    }
+    long result = it.next().longValue()
+    while (it.hasNext()) {
+      result = op.applyAsLong(result, it.next().longValue())
+    }
+    return OptionalLong.of(result)
+  }
+
+  public <R> R collect(Supplier<R> supplier, ObjLongConsumer<R> accumulator, BiConsumer<R, R> combiner) {
+    R container = supplier.get()
+    Iterator<Long> it = elements.iterator()
+    while (it.hasNext()) {
+      accumulator.accept(container, it.next().longValue())
+    }
+    return container
+  }
+
+  public long sum() {
+    long total = 0
+    Iterator<Long> it = elements.iterator()
+    while (it.hasNext()) {
+      total += it.next().longValue()
+    }
+    return total
+  }
+
+  public OptionalLong min() {
+    Iterator<Long> it = elements.iterator()
+    if (!it.hasNext()) {
+      return OptionalLong.empty()
+    }
+    long best = it.next().longValue()
+    while (it.hasNext()) {
+      long v = it.next().longValue()
+      if (v < best) {
+        best = v
+      }
+    }
+    return OptionalLong.of(best)
+  }
+
+  public OptionalLong max() {
+    Iterator<Long> it = elements.iterator()
+    if (!it.hasNext()) {
+      return OptionalLong.empty()
+    }
+    long best = it.next().longValue()
+    while (it.hasNext()) {
+      long v = it.next().longValue()
+      if (v > best) {
+        best = v
+      }
+    }
+    return OptionalLong.of(best)
+  }
+
+  public long count() {
+    return elements.count()
+  }
+
+  public OptionalDouble average() {
+    return elements.mapToDouble(v -> Double.valueOf((double) v.longValue())).average()
+  }
+
+  public LongSummaryStatistics summaryStatistics() {
+    LongSummaryStatistics stats = new LongSummaryStatistics()
+    Iterator<Long> it = elements.iterator()
+    while (it.hasNext()) {
+      stats.accept(it.next().longValue())
+    }
+    return stats
+  }
+
+  public boolean anyMatch(LongPredicate predicate) {
+    return elements.anyMatch(v -> predicate.test(v.longValue()))
+  }
+
+  public boolean allMatch(LongPredicate predicate) {
+    return elements.allMatch(v -> predicate.test(v.longValue()))
+  }
+
+  public boolean noneMatch(LongPredicate predicate) {
+    return elements.noneMatch(v -> predicate.test(v.longValue()))
+  }
+
+  public OptionalLong findFirst() {
+    Iterator<Long> it = elements.iterator()
+    if (it.hasNext()) {
+      return OptionalLong.of(it.next().longValue())
+    }
+    return OptionalLong.empty()
+  }
+
+  public OptionalLong findAny() {
+    return findFirst()
+  }
+}
+
+// ------------------------------------------------------- java.util.stream.DoubleStream
+
+final class DoubleStream {
+  Stream<Double> elements
+
+  DoubleStream(Stream<Double> elements) {
+    this.elements = elements
+  }
+
+  public static DoubleStream empty() {
+    return new DoubleStream(Stream.<Double>empty())
+  }
+
+  public static DoubleStream of(double t) {
+    return of(new double[]{t})
+  }
+
+  public static DoubleStream of(double... values) {
+    List<Double> xs = new ArrayList<Double>(values.length)
+    for (int i = 0 : i < values.length : i++) {
+      xs.add(Double.valueOf(values[i]))
+    }
+    return new DoubleStream(Streams.of(xs))
+  }
+
+  public static DoubleStream iterate(double seed, DoubleUnaryOperator f) {
+    return new DoubleStream(Stream.iterate(Double.valueOf(seed), n -> Double.valueOf(f.applyAsDouble(n.doubleValue()))))
+  }
+
+  public static DoubleStream iterate(double seed, DoublePredicate hasNext, DoubleUnaryOperator next) {
+    return new DoubleStream(Stream.iterate(Double.valueOf(seed), n -> hasNext.test(n.doubleValue()), n -> Double.valueOf(next.applyAsDouble(n.doubleValue()))))
+  }
+
+  public static DoubleStream generate(DoubleSupplier s) {
+    return new DoubleStream(Stream.generate(() -> Double.valueOf(s.getAsDouble())))
+  }
+
+  public static DoubleStream concat(DoubleStream a, DoubleStream b) {
+    return new DoubleStream(Stream.concat(a.elements, b.elements))
+  }
+
+  public DoubleStream filter(DoublePredicate predicate) {
+    return new DoubleStream(elements.filter(v -> predicate.test(v.doubleValue())))
+  }
+
+  public DoubleStream map(DoubleUnaryOperator mapper) {
+    return new DoubleStream(elements.map(v -> Double.valueOf(mapper.applyAsDouble(v.doubleValue()))))
+  }
+
+  public <U> Stream<U> mapToObj(DoubleFunction<? extends U> mapper) {
+    DoubleFunction<U> m = (DoubleFunction<U>) mapper
+    return elements.map(v -> m.apply(v.doubleValue()))
+  }
+
+  public DoubleStream distinct() {
+    return new DoubleStream(elements.distinct())
+  }
+
+  public DoubleStream sorted() {
+    return new DoubleStream(elements.sorted())
+  }
+
+  public DoubleStream peek(DoubleConsumer action) {
+    return new DoubleStream(elements.peek(v -> action.accept(v.doubleValue())))
+  }
+
+  public DoubleStream limit(long maxSize) {
+    return new DoubleStream(elements.limit(maxSize))
+  }
+
+  public DoubleStream skip(long n) {
+    return new DoubleStream(elements.skip(n))
+  }
+
+  public DoubleStream takeWhile(DoublePredicate predicate) {
+    return new DoubleStream(elements.takeWhile(v -> predicate.test(v.doubleValue())))
+  }
+
+  public DoubleStream dropWhile(DoublePredicate predicate) {
+    return new DoubleStream(elements.dropWhile(v -> predicate.test(v.doubleValue())))
+  }
+
+  public Stream<Double> boxed() {
+    return elements
+  }
+
+  public void forEach(DoubleConsumer action) {
+    elements.forEach(v -> action.accept(v.doubleValue()))
+  }
+
+  public void forEachOrdered(DoubleConsumer action) {
+    forEach(action)
+  }
+
+  public double[] toArray() {
+    List<Double> xs = new ArrayList<Double>()
+    Iterator<Double> it = elements.iterator()
+    while (it.hasNext()) {
+      xs.add(it.next())
+    }
+    double[] out = new double[xs.size()]
+    for (int i = 0 : i < out.length : i++) {
+      out[i] = xs.get(i).doubleValue()
+    }
+    return out
+  }
+
+  public double reduce(double identity, DoubleBinaryOperator op) {
+    double result = identity
+    Iterator<Double> it = elements.iterator()
+    while (it.hasNext()) {
+      result = op.applyAsDouble(result, it.next().doubleValue())
+    }
+    return result
+  }
+
+  public OptionalDouble reduce(DoubleBinaryOperator op) {
+    Iterator<Double> it = elements.iterator()
+    if (!it.hasNext()) {
+      return OptionalDouble.empty()
+    }
+    double result = it.next().doubleValue()
+    while (it.hasNext()) {
+      result = op.applyAsDouble(result, it.next().doubleValue())
+    }
+    return OptionalDouble.of(result)
+  }
+
+  public <R> R collect(Supplier<R> supplier, ObjDoubleConsumer<R> accumulator, BiConsumer<R, R> combiner) {
+    R container = supplier.get()
+    Iterator<Double> it = elements.iterator()
+    while (it.hasNext()) {
+      accumulator.accept(container, it.next().doubleValue())
+    }
+    return container
+  }
+
+  /* A plain sum. Java's DoubleStream.sum is Kahan-compensated, so a pipeline
+     where the additions lose bits can differ in the last place. */
+  public double sum() {
+    double total = 0.0
+    Iterator<Double> it = elements.iterator()
+    while (it.hasNext()) {
+      total += it.next().doubleValue()
+    }
+    return total
+  }
+
+  public OptionalDouble min() {
+    Iterator<Double> it = elements.iterator()
+    if (!it.hasNext()) {
+      return OptionalDouble.empty()
+    }
+    double best = it.next().doubleValue()
+    while (it.hasNext()) {
+      double v = it.next().doubleValue()
+      if (v < best) {
+        best = v
+      }
+    }
+    return OptionalDouble.of(best)
+  }
+
+  public OptionalDouble max() {
+    Iterator<Double> it = elements.iterator()
+    if (!it.hasNext()) {
+      return OptionalDouble.empty()
+    }
+    double best = it.next().doubleValue()
+    while (it.hasNext()) {
+      double v = it.next().doubleValue()
+      if (v > best) {
+        best = v
+      }
+    }
+    return OptionalDouble.of(best)
+  }
+
+  public long count() {
+    return elements.count()
+  }
+
+  public OptionalDouble average() {
+    double total = 0.0
+    long n = 0
+    Iterator<Double> it = elements.iterator()
+    while (it.hasNext()) {
+      total += it.next().doubleValue()
+      n++
+    }
+    if (n == 0) {
+      return OptionalDouble.empty()
+    }
+    return OptionalDouble.of(total / (double) n)
+  }
+
+  public DoubleSummaryStatistics summaryStatistics() {
+    DoubleSummaryStatistics stats = new DoubleSummaryStatistics()
+    Iterator<Double> it = elements.iterator()
+    while (it.hasNext()) {
+      stats.accept(it.next().doubleValue())
+    }
+    return stats
+  }
+
+  public boolean anyMatch(DoublePredicate predicate) {
+    return elements.anyMatch(v -> predicate.test(v.doubleValue()))
+  }
+
+  public boolean allMatch(DoublePredicate predicate) {
+    return elements.allMatch(v -> predicate.test(v.doubleValue()))
+  }
+
+  public boolean noneMatch(DoublePredicate predicate) {
+    return elements.noneMatch(v -> predicate.test(v.doubleValue()))
+  }
+
+  public OptionalDouble findFirst() {
+    Iterator<Double> it = elements.iterator()
+    if (it.hasNext()) {
+      return OptionalDouble.of(it.next().doubleValue())
+    }
+    return OptionalDouble.empty()
+  }
+
+  public OptionalDouble findAny() {
+    return findFirst()
+  }
+}
+
+// ------------------------------------------------------- the pipeline stages
+
+/* One class per intermediate operation, each wrapping the upstream iterator.
+   This is where the laziness is: a stage does nothing until hasNext() is
+   asked, and then it pulls only as far as the answer needs. `peek` after a
+   `filter` therefore prints only what the filter let through, and `limit(1)`
+   over an infinite `iterate` asks for exactly one element.
+
+   Every one of them is an Iterator<T> and nothing else -- no reset, no
+   lookahead the caller can see -- which is what lets Stream.iterator() be one
+   line and every terminal operation a while loop. */
+
+class StreamIterateIterator<T> implements Iterator<T> {
+  private T seed
+  private UnaryOperator<T> f
+  private boolean first = true
+
+  public StreamIterateIterator(T seed, UnaryOperator<T> f) {
+    this.seed = seed
+    this.f = f
+  }
+
+  /* The seed comes out first, and each later element is f of the one before.
+     There is no end: hasNext() is true forever, and `limit` or `takeWhile`
+     upstream is what stops the walk. */
+  public boolean hasNext() {
+    return true
+  }
+
+  public T next() {
+    if (first) {
+      first = false
+      return seed
+    }
+    seed = f.apply(seed)
+    return seed
+  }
+}
+
+class StreamIterateWhileIterator<T> implements Iterator<T> {
+  private T seed
+  private Predicate<T> stop
+  private UnaryOperator<T> nextValue
+  private boolean alive = true
+
+  public StreamIterateWhileIterator(T seed, Predicate<T> stop, UnaryOperator<T> next) {
+    this.seed = seed
+    this.stop = stop
+    this.nextValue = next
+  }
+
+  /* Java 9's three-argument iterate: the current value is tested before it is
+     handed out, so `iterate(0, n -> n < 3, n -> n + 1)` is 0, 1, 2 -- three
+     elements, where an until-style loop would have given four. The value is
+     advanced on the way out of next(), so hasNext() can be called any number
+     of times without moving the walk on. */
+  public boolean hasNext() {
+    if (!alive) {
+      return false
+    }
+    if (!stop.test(seed)) {
+      alive = false
+      return false
+    }
+    return true
+  }
+
+  public T next() {
+    if (!hasNext()) {
+      throw new NoSuchElementException("no more elements")
+    }
+    T result = seed
+    seed = nextValue.apply(seed)
+    return result
+  }
+}
+
+class StreamGenerateIterator<T> implements Iterator<T> {
+  private Supplier<T> sup
+
+  public StreamGenerateIterator(Supplier<T> sup) {
+    this.sup = sup
+  }
+
+  public boolean hasNext() {
+    return true
+  }
+
+  public T next() {
+    return sup.get()
+  }
+}
+
+class StreamConcatIterator<T> implements Iterator<T> {
+  private Iterator<T> first
+  private Iterator<T> second
+  private boolean onSecond = false
+
+  public StreamConcatIterator(Iterator<T> first, Iterator<T> second) {
+    this.first = first
+    this.second = second
+  }
+
+  public boolean hasNext() {
+    if (!onSecond && !first.hasNext()) {
+      onSecond = true
+    }
+    if (onSecond) {
+      return second.hasNext()
+    }
+    return true
+  }
+
+  public T next() {
+    if (!hasNext()) {
+      throw new NoSuchElementException("no more elements")
+    }
+    if (onSecond) {
+      return second.next()
+    }
+    return first.next()
+  }
+}
+
+class StreamFilterIterator<T> implements Iterator<T> {
+  private Iterator<T> up
+  private Predicate<T> p
+  private T pending
+  private boolean ready = false
+
+  public StreamFilterIterator(Iterator<T> upstream, Predicate<T> predicate) {
+    up = upstream
+    p = predicate
+  }
+
+  /* The loop keeps pulling until it finds an element the predicate accepts or
+     the upstream runs out, so a filtered stream costs exactly the elements it
+     has to look at -- the `peek` before the filter sees the rejected ones, the
+     one after does not. */
+  public boolean hasNext() {
+    if (ready) {
+      return true
+    }
+    while (up.hasNext()) {
+      T e = up.next()
+      if (p.test(e)) {
+        pending = e
+        ready = true
+        return true
+      }
+    }
+    return false
+  }
+
+  public T next() {
+    if (!hasNext()) {
+      throw new NoSuchElementException("no more elements")
+    }
+    T result = pending
+    ready = false
+    pending = null
+    return result
+  }
+}
+
+class StreamMapIterator<T, R> implements Iterator<R> {
+  private Iterator<T> up
+  private Function<T, R> m
+
+  public StreamMapIterator(Iterator<T> upstream, Function<T, R> mapper) {
+    up = upstream
+    m = mapper
+  }
+
+  public boolean hasNext() {
+    return up.hasNext()
+  }
+
+  public R next() {
+    return m.apply(up.next())
+  }
+}
+
+/* flatMap: one upstream element at a time, and the inner iterator is drained
+   before the next upstream element is asked for. `peek` between the outer
+   elements therefore fires when that element's inner stream is opened, which
+   is the same moment Java's does. */
+class StreamFlatMapIterator<T, R> implements Iterator<R> {
+  private Iterator<T> up
+  private Function<T, Stream<R>> m
+  private Iterator<R> inner = null
+
+  public StreamFlatMapIterator(Iterator<T> upstream, Function<T, Stream<R>> mapper) {
+    up = upstream
+    m = mapper
+  }
+
+  public boolean hasNext() {
+    while (true) {
+      if (inner != null && inner.hasNext()) {
+        return true
+      }
+      if (!up.hasNext()) {
+        return false
+      }
+      inner = m.apply(up.next()).iterator()
+    }
+  }
+
+  public R next() {
+    if (!hasNext()) {
+      throw new NoSuchElementException("no more elements")
+    }
+    return inner.next()
+  }
+}
+
+/* distinct remembers what it has already handed out, in a HashSet, so the
+   memory is proportional to the number of distinct elements rather than to
+   the stream. It is still lazy and still works on an infinite stream; the
+   `peek` upstream sees every element, the one downstream only the first of
+   each. */
+class StreamDistinctIterator<T> implements Iterator<T> {
+  private Iterator<T> up
+  private Set<T> seen = new HashSet<T>()
+  private T pending
+  private boolean ready = false
+
+  public StreamDistinctIterator(Iterator<T> upstream) {
+    up = upstream
+  }
+
+  public boolean hasNext() {
+    if (ready) {
+      return true
+    }
+    while (up.hasNext()) {
+      T e = up.next()
+      if (seen.add(e)) {
+        pending = e
+        ready = true
+        return true
+      }
+    }
+    return false
+  }
+
+  public T next() {
+    if (!hasNext()) {
+      throw new NoSuchElementException("no more elements")
+    }
+    T result = pending
+    ready = false
+    pending = null
+    return result
+  }
+}
+
+/* sorted buffers everything, then hands out the sorted list. The buffer is
+   filled on the first hasNext() rather than in the constructor so that a
+   sorted stream nobody asks for still reads nothing. The sort is stable --
+   Collections.sort is -- so equal elements keep their encounter order, as in
+   Java's sequential sorted(). */
+class StreamSortedIterator<T> implements Iterator<T> {
+  private Iterator<T> up
+  private Comparator<T> c
+  private Iterator<T> sorted = null
+
+  public StreamSortedIterator(Iterator<T> upstream, Comparator<T> comparator) {
+    up = upstream
+    c = comparator
+  }
+
+  private void fill() {
+    List<T> xs = new ArrayList<T>()
+    while (up.hasNext()) {
+      xs.add(up.next())
+    }
+    Collections.sort(xs, c)
+    sorted = xs.iterator()
+  }
+
+  public boolean hasNext() {
+    if (sorted == null) {
+      fill()
+    }
+    return sorted.hasNext()
+  }
+
+  public T next() {
+    if (!hasNext()) {
+      throw new NoSuchElementException("no more elements")
+    }
+    return sorted.next()
+  }
+}
+
+class StreamPeekIterator<T> implements Iterator<T> {
+  private Iterator<T> up
+  private Consumer<T> action
+
+  public StreamPeekIterator(Iterator<T> upstream, Consumer<T> a) {
+    up = upstream
+    action = a
+  }
+
+  /* The action runs inside next(), so it fires exactly once per element that
+     the rest of the pipeline actually pulls -- and never for an element a
+     later stage would have dropped without asking for it. */
+  public boolean hasNext() {
+    return up.hasNext()
+  }
+
+  public T next() {
+    T e = up.next()
+    action.accept(e)
+    return e
+  }
+}
+
+class StreamLimitIterator<T> implements Iterator<T> {
+  private Iterator<T> up
+  private long remaining
+
+  public StreamLimitIterator(Iterator<T> upstream, long maxSize) {
+    up = upstream
+    remaining = maxSize
+  }
+
+  public boolean hasNext() {
+    if (remaining <= 0) {
+      return false
+    }
+    return up.hasNext()
+  }
+
+  public T next() {
+    if (!hasNext()) {
+      throw new NoSuchElementException("no more elements")
+    }
+    remaining--
+    return up.next()
+  }
+}
+
+class StreamSkipIterator<T> implements Iterator<T> {
+  private Iterator<T> up
+  private long remaining
+  private boolean skipped = false
+
+  public StreamSkipIterator(Iterator<T> upstream, long n) {
+    up = upstream
+    remaining = n
+  }
+
+  private void skipAhead() {
+    while (remaining > 0 && up.hasNext()) {
+      up.next()
+      remaining--
+    }
+    skipped = true
+  }
+
+  public boolean hasNext() {
+    if (!skipped) {
+      skipAhead()
+    }
+    return up.hasNext()
+  }
+
+  public T next() {
+    if (!hasNext()) {
+      throw new NoSuchElementException("no more elements")
+    }
+    return up.next()
+  }
+}
+
+/* takeWhile: stops at the first element the predicate rejects and never looks
+   again, so an infinite upstream is fine as long as the predicate eventually
+   says no. That rejected element is consumed -- Java consumes it too, which is
+   why `dropWhile` on the same two-clause split has to be its own pass. */
+class StreamTakeWhileIterator<T> implements Iterator<T> {
+  private Iterator<T> up
+  private Predicate<T> p
+  private T pending
+  private boolean ready = false
+  private boolean stopped = false
+
+  public StreamTakeWhileIterator(Iterator<T> upstream, Predicate<T> predicate) {
+    up = upstream
+    p = predicate
+  }
+
+  public boolean hasNext() {
+    if (ready) {
+      return true
+    }
+    if (stopped || !up.hasNext()) {
+      return false
+    }
+    T e = up.next()
+    if (!p.test(e)) {
+      stopped = true
+      return false
+    }
+    pending = e
+    ready = true
+    return true
+  }
+
+  public T next() {
+    if (!hasNext()) {
+      throw new NoSuchElementException("no more elements")
+    }
+    T result = pending
+    ready = false
+    pending = null
+    return result
+  }
+}
+
+/* dropWhile: throws away the leading run the predicate accepts, then passes
+   everything else through untouched -- including later elements the predicate
+   would also accept, which is the difference from filter. */
+class StreamDropWhileIterator<T> implements Iterator<T> {
+  private Iterator<T> up
+  private Predicate<T> p
+  private boolean dropped = false
+  private T pending
+  private boolean ready = false
+
+  public StreamDropWhileIterator(Iterator<T> upstream, Predicate<T> predicate) {
+    up = upstream
+    p = predicate
+  }
+
+  private void dropAhead() {
+    while (up.hasNext()) {
+      T e = up.next()
+      if (!p.test(e)) {
+        pending = e
+        ready = true
+        break
+      }
+    }
+    dropped = true
+  }
+
+  public boolean hasNext() {
+    if (!dropped) {
+      dropAhead()
+    }
+    return ready || up.hasNext()
+  }
+
+  public T next() {
+    if (ready) {
+      T result = pending
+      ready = false
+      pending = null
+      return result
+    }
+    if (!hasNext()) {
+      throw new NoSuchElementException("no more elements")
+    }
+    return up.next()
+  }
+}
+
+// ----------------------------------------------------------- Obj*Consumer
+
+/* java.util.function's three object-plus-primitive consumers. They are here
+   for the same reason the rest of that package's tail is: IntStream.collect
+   takes one, and lib/09_functional.teyru is another file's. */
+interface ObjIntConsumer<T> {
+  void accept(T t, int value)
+}
+
+interface ObjLongConsumer<T> {
+  void accept(T t, long value)
+}
+
+interface ObjDoubleConsumer<T> {
+  void accept(T t, double value)
+}
+
+// ------------------------------------------------------- the accumulators
+
+/* The mutable boxes the collectors accumulate into. Java hides these behind
+   `Collector<T, ?, R>`; this dialect cannot write a wildcard there without
+   leaving `collect` nothing to infer, so they are named, and they are small.
+   `value` is package-visible because that is the whole point of the box. */
+class StreamBox<T> {
+  T value
+
+  StreamBox(T value) {
+    this.value = value
+  }
+}
+
+class IntAccumulator {
+  int value
+}
+
+class LongAccumulator {
+  long value
+}
+
+class DoubleAccumulator {
+  double value
+}
+
+/* averagingInt and averagingLong sum in a long and count, exactly as Java
+   does, so that 2,000,000,000 + 2,000,000,000 averages to 2.0E9 instead of to
+   a wrapped int. */
+class AverageAccumulator {
+  long count
+  long sum
+}
+
+class DoubleAverageAccumulator {
+  long count
+  double sum
+}
+
+// ------------------------------------------------------ java.util.stream.Collector
+
+/* `Collector<T, A, R>`: how to make a result container, fold one element into
+   it, merge two of them, and turn the container into the answer. The combiner
+   is the parallel case's -- nothing in this dialect runs it, since there are
+   no threads and collect() is a straight fold -- but the interface keeps it in
+   the JDK's position and the sequential collectors below still write one that
+   works, so a program that calls combiner() itself gets the right answer.
+
+   `characteristics()` answers a Set of the nested enum, as in the JDK. Nothing
+   downstream reads it: the IDENTITY_FINISH hint only tells a collector library
+   when it may skip the finisher, and with no parallel collect there is nothing
+   to tell. It is here because a Collector written against the JDK's interface
+   implements it, and dropping it would make the type not a Collector. */
+interface Collector<T, A, R> {
+  enum Characteristics {
+    CONCURRENT,
+    UNORDERED,
+    IDENTITY_FINISH
+  }
+
+  Supplier<A> supplier()
+
+  BiConsumer<A, T> accumulator()
+
+  BinaryOperator<A> combiner()
+
+  Function<A, R> finisher()
+
+  Set<Characteristics> characteristics()
+
+  /* Java 9's two Collector.of factories. The five-argument form is the whole
+     contract spelled out; the four-argument one is the same thing with the
+     identity function as finisher, which is why A and R are one type there. */
+  static <T, A, R> Collector<T, A, R> of(Supplier<A> supplier, BiConsumer<A, T> accumulator, BinaryOperator<A> combiner, Function<A, R> finisher, Characteristics... characteristics) {
+    return new CollectorImpl<T, A, R>(supplier, accumulator, combiner, finisher, CollectorChars.of(characteristics))
+  }
+
+  static <T, A> Collector<T, A, A> of(Supplier<A> supplier, BiConsumer<A, T> accumulator, BinaryOperator<A> combiner, Characteristics... characteristics) {
+    return new CollectorImpl<T, A, A>(supplier, accumulator, combiner, CollectorImpl.<A>identity(), CollectorChars.of(characteristics))
+  }
+}
+
+/* The characteristics set, and the identity finisher, both small enough that
+   spelling them at each collector would be noise. */
+final class CollectorChars {
+  private CollectorChars() {
+  }
+
+  public static Set<Collector.Characteristics> none() {
+    return new HashSet<Collector.Characteristics>()
+  }
+
+  public static Set<Collector.Characteristics> identityFinish() {
+    Set<Collector.Characteristics> s = none()
+    s.add(Collector.Characteristics.IDENTITY_FINISH)
+    return s
+  }
+
+  public static Set<Collector.Characteristics> of(Collector.Characteristics... given) {
+    Set<Collector.Characteristics> s = none()
+    for (int i = 0 : i < given.length : i++) {
+      s.add(given[i])
+    }
+    return s
+  }
+}
+
+final class CollectorImpl<T, A, R> implements Collector<T, A, R> {
+  private Supplier<A> sup
+  private BiConsumer<A, T> acc
+  private BinaryOperator<A> comb
+  private Function<A, R> fin
+  private Set<Collector.Characteristics> chars
+
+  public CollectorImpl(Supplier<A> supplier, BiConsumer<A, T> accumulator, BinaryOperator<A> combiner, Function<A, R> finisher, Set<Collector.Characteristics> characteristics) {
+    sup = supplier
+    acc = accumulator
+    comb = combiner
+    fin = finisher
+    chars = characteristics
+  }
+
+  public Supplier<A> supplier() {
+    return sup
+  }
+
+  public BiConsumer<A, T> accumulator() {
+    return acc
+  }
+
+  public BinaryOperator<A> combiner() {
+    return comb
+  }
+
+  public Function<A, R> finisher() {
+    return fin
+  }
+
+  public Set<Collector.Characteristics> characteristics() {
+    return chars
+  }
+
+  /* The finisher of every collector whose container is already its answer. */
+  public static <A> Function<A, A> identity() {
+    return a -> a
+  }
+}
+
+// ------------------------------------------------------ java.util.stream.Collectors
+
+/* The collectors. Each one is a CollectorImpl over four lambdas, which is all
+   a collector ever is.
+
+   Two things to know before reading:
+
+   - The return types name the accumulator (`Collector<T, List<T>, List<T>>`)
+     where the JDK writes `Collector<T, ?, List<T>>`. See the file header:
+     `collect(Collector<? super T, A, R>)` has to infer A, and a wildcard
+     leaves it nothing to infer from. A caller who writes the JDK's spelling in
+     a variable declaration still compiles -- `?` accepts the concrete type.
+
+   - A type witness is needed at the call site for the collectors whose type
+     parameters cannot be read off the arguments, because this dialect will not
+     infer from a lambda's body:
+     `Collectors.<String>toList()`, `Collectors.<String, Integer>groupingBy(x -> x.length())`.
+     javac accepts the same calls with the witness, so this is a spelling, not
+     a difference in what compiles. */
+final class Collectors {
+  private Collectors() {
+  }
+
+  // ------------------------------------------------------------- to a collection
+
+  public static <T> Collector<T, List<T>, List<T>> toList() {
+    return new CollectorImpl<T, List<T>, List<T>>(
+      () -> new ArrayList<T>(),
+      (acc, t) -> {
+        acc.add(t)
+      },
+      (a, b) -> {
+        a.addAll(b)
+        return a
+      },
+      CollectorImpl.<List<T>>identity(),
+      CollectorChars.identityFinish())
+  }
+
+  public static <T> Collector<T, Set<T>, Set<T>> toSet() {
+    return new CollectorImpl<T, Set<T>, Set<T>>(
+      () -> new HashSet<T>(),
+      (acc, t) -> {
+        acc.add(t)
+      },
+      (a, b) -> {
+        a.addAll(b)
+        return a
+      },
+      CollectorImpl.<Set<T>>identity(),
+      CollectorChars.identityFinish())
+  }
+
+  /* toCollection names its own container type: the factory decides C, and the
+     collector answers exactly the type the factory makes, as in the JDK. */
+  public static <T, C extends Collection<T>> Collector<T, C, C> toCollection(Supplier<C> collectionFactory) {
+    Supplier<C> f = collectionFactory
+    return new CollectorImpl<T, C, C>(
+      f,
+      (acc, t) -> {
+        acc.add(t)
+      },
+      (a, b) -> {
+        a.addAll(b)
+        return a
+      },
+      CollectorImpl.<C>identity(),
+      CollectorChars.identityFinish())
+  }
+
+  // ------------------------------------------------------------------ to a map
+
+  /* toMap's two-argument form has no merge function, so a duplicate key is an
+     error in Java and is an error here: the accumulator replaces the value,
+     and put() answers the one it displaced -- which the JDK turns into
+     IllegalStateException. This one overwrites instead of throwing, and the
+     three-argument form below is the one that decides what a duplicate means. */
+  public static <T, K, V> Collector<T, Map<K, V>, Map<K, V>> toMap(Function<? super T, ? extends K> keyMapper, Function<? super T, ? extends V> valueMapper) {
+    Function<T, K> kf = (Function<T, K>) keyMapper
+    Function<T, V> vf = (Function<T, V>) valueMapper
+    return new CollectorImpl<T, Map<K, V>, Map<K, V>>(
+      () -> new HashMap<K, V>(),
+      (acc, t) -> {
+        acc.put(kf.apply(t), vf.apply(t))
+      },
+      (a, b) -> {
+        a.putAll(b)
+        return a
+      },
+      CollectorImpl.<Map<K, V>>identity(),
+      CollectorChars.identityFinish())
+  }
+
+  public static <T, K, V> Collector<T, Map<K, V>, Map<K, V>> toMap(Function<? super T, ? extends K> keyMapper, Function<? super T, ? extends V> valueMapper, BinaryOperator<V> mergeFunction) {
+    Function<T, K> kf = (Function<T, K>) keyMapper
+    Function<T, V> vf = (Function<T, V>) valueMapper
+    BinaryOperator<V> merge = mergeFunction
+    return new CollectorImpl<T, Map<K, V>, Map<K, V>>(
+      () -> new HashMap<K, V>(),
+      (acc, t) -> {
+        K key = kf.apply(t)
+        V value = vf.apply(t)
+        if (acc.containsKey(key)) {
+          acc.put(key, merge.apply(acc.get(key), value))
+        } else {
+          acc.put(key, value)
+        }
+      },
+      (a, b) -> {
+        Iterator<K> keys = b.keySet().iterator()
+        while (keys.hasNext()) {
+          K k = keys.next()
+          if (a.containsKey(k)) {
+            a.put(k, merge.apply(a.get(k), b.get(k)))
+          } else {
+            a.put(k, b.get(k))
+          }
+        }
+        return a
+      },
+      CollectorImpl.<Map<K, V>>identity(),
+      CollectorChars.identityFinish())
+  }
+
+  // ---------------------------------------------------------------- joining
+
+  /* Java declares joining over CharSequence, and this dialect has no
+     CharSequence: String is the only string type, so the collector is declared
+     over String. Every Java program that joins a Stream<String> is unaffected;
+     one that joins a Stream<StringBuilder> has no counterpart here. */
+  public static Collector<String, StringJoiner, String> joining() {
+    return joining("")
+  }
+
+  public static Collector<String, StringJoiner, String> joining(String delimiter) {
+    String d = delimiter
+    return new CollectorImpl<String, StringJoiner, String>(
+      () -> new StringJoiner(d),
+      (acc, t) -> {
+        acc.add(t)
+      },
+      (a, b) -> {
+        a.merge(b)
+        return a
+      },
+      sj -> sj.toString(),
+      CollectorChars.none())
+  }
+
+  public static Collector<String, StringJoiner, String> joining(String delimiter, String prefix, String suffix) {
+    String d = delimiter
+    String pre = prefix
+    String suf = suffix
+    return new CollectorImpl<String, StringJoiner, String>(
+      () -> new StringJoiner(d, pre, suf),
+      (acc, t) -> {
+        acc.add(t)
+      },
+      (a, b) -> {
+        a.merge(b)
+        return a
+      },
+      sj -> sj.toString(),
+      CollectorChars.none())
+  }
+
+  // ------------------------------------------------------- counting and summing
+
+  public static <T> Collector<T, LongAccumulator, Long> counting() {
+    return new CollectorImpl<T, LongAccumulator, Long>(
+      () -> new LongAccumulator(),
+      (acc, t) -> {
+        acc.value = acc.value + 1L
+      },
+      (a, b) -> {
+        a.value = a.value + b.value
+        return a
+      },
+      box -> Long.valueOf(box.value),
+      CollectorChars.none())
+  }
+
+  public static <T> Collector<T, IntAccumulator, Integer> summingInt(ToIntFunction<? super T> mapper) {
+    ToIntFunction<T> m = (ToIntFunction<T>) mapper
+    return new CollectorImpl<T, IntAccumulator, Integer>(
+      () -> new IntAccumulator(),
+      (acc, t) -> {
+        acc.value = acc.value + m.applyAsInt(t)
+      },
+      (a, b) -> {
+        a.value = a.value + b.value
+        return a
+      },
+      box -> Integer.valueOf(box.value),
+      CollectorChars.none())
+  }
+
+  public static <T> Collector<T, LongAccumulator, Long> summingLong(ToLongFunction<? super T> mapper) {
+    ToLongFunction<T> m = (ToLongFunction<T>) mapper
+    return new CollectorImpl<T, LongAccumulator, Long>(
+      () -> new LongAccumulator(),
+      (acc, t) -> {
+        acc.value = acc.value + m.applyAsLong(t)
+      },
+      (a, b) -> {
+        a.value = a.value + b.value
+        return a
+      },
+      box -> Long.valueOf(box.value),
+      CollectorChars.none())
+  }
+
+  public static <T> Collector<T, DoubleAccumulator, Double> summingDouble(ToDoubleFunction<? super T> mapper) {
+    ToDoubleFunction<T> m = (ToDoubleFunction<T>) mapper
+    return new CollectorImpl<T, DoubleAccumulator, Double>(
+      () -> new DoubleAccumulator(),
+      (acc, t) -> {
+        acc.value = acc.value + m.applyAsDouble(t)
+      },
+      (a, b) -> {
+        a.value = a.value + b.value
+        return a
+      },
+      box -> Double.valueOf(box.value),
+      CollectorChars.none())
+  }
+
+  // ------------------------------------------------------------- averaging
+
+  /* An empty stream averages to 0.0, not to an empty Optional: the
+     OptionalDouble is what IntStream.average() answers, this is not. */
+  public static <T> Collector<T, AverageAccumulator, Double> averagingInt(ToIntFunction<? super T> mapper) {
+    ToIntFunction<T> m = (ToIntFunction<T>) mapper
+    return new CollectorImpl<T, AverageAccumulator, Double>(
+      () -> new AverageAccumulator(),
+      (acc, t) -> {
+        acc.count = acc.count + 1L
+        acc.sum = acc.sum + (long) m.applyAsInt(t)
+      },
+      (a, b) -> {
+        a.count = a.count + b.count
+        a.sum = a.sum + b.sum
+        return a
+      },
+      box -> Double.valueOf(box.count == 0 ? 0.0 : (double) box.sum / (double) box.count),
+      CollectorChars.none())
+  }
+
+  public static <T> Collector<T, AverageAccumulator, Double> averagingLong(ToLongFunction<? super T> mapper) {
+    ToLongFunction<T> m = (ToLongFunction<T>) mapper
+    return new CollectorImpl<T, AverageAccumulator, Double>(
+      () -> new AverageAccumulator(),
+      (acc, t) -> {
+        acc.count = acc.count + 1L
+        acc.sum = acc.sum + m.applyAsLong(t)
+      },
+      (a, b) -> {
+        a.count = a.count + b.count
+        a.sum = a.sum + b.sum
+        return a
+      },
+      box -> Double.valueOf(box.count == 0 ? 0.0 : (double) box.sum / (double) box.count),
+      CollectorChars.none())
+  }
+
+  public static <T> Collector<T, DoubleAverageAccumulator, Double> averagingDouble(ToDoubleFunction<? super T> mapper) {
+    ToDoubleFunction<T> m = (ToDoubleFunction<T>) mapper
+    return new CollectorImpl<T, DoubleAverageAccumulator, Double>(
+      () -> new DoubleAverageAccumulator(),
+      (acc, t) -> {
+        acc.count = acc.count + 1L
+        acc.sum = acc.sum + m.applyAsDouble(t)
+      },
+      (a, b) -> {
+        a.count = a.count + b.count
+        a.sum = a.sum + b.sum
+        return a
+      },
+      box -> Double.valueOf(box.count == 0 ? 0.0 : box.sum / (double) box.count),
+      CollectorChars.none())
+  }
+
+  // ------------------------------------------------------------- reducing
+
+  public static <T> Collector<T, StreamBox<T>, T> reducing(T identity, BinaryOperator<T> op) {
+    T seed = identity
+    BinaryOperator<T> f = op
+    return new CollectorImpl<T, StreamBox<T>, T>(
+      () -> new StreamBox<T>(seed),
+      (acc, t) -> {
+        acc.value = f.apply(acc.value, t)
+      },
+      (a, b) -> {
+        a.value = f.apply(a.value, b.value)
+        return a
+      },
+      box -> box.value,
+      CollectorChars.none())
+  }
+
+  /* The one-argument reducing answers an Optional, because an empty stream has
+     no identity to fall back on. An empty container is the absent case; a
+     container holding null is the same thing here, since no element of any
+     stream this file builds is null. */
+  public static <T> Collector<T, StreamBox<T>, Optional<T>> reducing(BinaryOperator<T> op) {
+    BinaryOperator<T> f = op
+    return new CollectorImpl<T, StreamBox<T>, Optional<T>>(
+      () -> new StreamBox<T>(null),
+      (acc, t) -> {
+        if (acc.value == null) {
+          acc.value = t
+        } else {
+          acc.value = f.apply(acc.value, t)
+        }
+      },
+      (a, b) -> {
+        if (a.value == null) {
+          a.value = b.value
+        } else if (b.value != null) {
+          a.value = f.apply(a.value, b.value)
+        }
+        return a
+      },
+      box -> box.value == null ? Optional.<T>empty() : Optional.<T>of(box.value),
+      CollectorChars.none())
+  }
+
+  public static <T, U> Collector<T, StreamBox<U>, U> reducing(U identity, Function<? super T, ? extends U> mapper, BinaryOperator<U> op) {
+    U seed = identity
+    Function<T, U> m = (Function<T, U>) mapper
+    BinaryOperator<U> f = op
+    return new CollectorImpl<T, StreamBox<U>, U>(
+      () -> new StreamBox<U>(seed),
+      (acc, t) -> {
+        acc.value = f.apply(acc.value, m.apply(t))
+      },
+      (a, b) -> {
+        a.value = f.apply(a.value, b.value)
+        return a
+      },
+      box -> box.value,
+      CollectorChars.none())
+  }
+
+  // ------------------------------------------------------------- min and max
+
+  /* minBy and maxBy keep the first of equals, which is what a strict
+     comparison does -- and what the JDK's do, since they are `reducing` over
+     a comparison. */
+  public static <T> Collector<T, StreamBox<T>, Optional<T>> minBy(Comparator<? super T> comparator) {
+    Comparator<T> c = (Comparator<T>) comparator
+    return reducing((a, b) -> c.compare(a, b) <= 0 ? a : b)
+  }
+
+  public static <T> Collector<T, StreamBox<T>, Optional<T>> maxBy(Comparator<? super T> comparator) {
+    Comparator<T> c = (Comparator<T>) comparator
+    return reducing((a, b) -> c.compare(a, b) >= 0 ? a : b)
+  }
+
+  // -------------------------------------------------------- composed collectors
+
+  /* mapping: run the downstream collector over each element's mapped value.
+     The supplier, combiner and finisher are the downstream's own; only the
+     accumulator changes, which is why the finisher's type is untouched. */
+  public static <T, U, A, R> Collector<T, A, R> mapping(Function<? super T, ? extends U> mapper, Collector<? super U, A, R> downstream) {
+    Function<T, U> m = (Function<T, U>) mapper
+    BiConsumer<A, U> sink = downstream.accumulator()
+    return new CollectorImpl<T, A, R>(
+      downstream.supplier(),
+      (acc, t) -> {
+        sink.accept(acc, m.apply(t))
+      },
+      downstream.combiner(),
+      downstream.finisher(),
+      downstream.characteristics())
+  }
+
+  /* groupingBy: one key per element, and each key's elements go to the
+     downstream collector. An element's key and that key's container both come
+     out of the element, so a group is a Map value holding whatever the
+     downstream accumulates.
+
+     The finisher walks the map and finishes each bucket, which is why the
+     answer is a different map from the accumulator. Java skips that copy when
+     the downstream is IDENTITY_FINISH; the copy is here because a
+     Map<K, A> cannot be handed back as a Map<K, R>. */
+  public static <T, K> Collector<T, Map<K, List<T>>, Map<K, List<T>>> groupingBy(Function<? super T, ? extends K> classifier) {
+    return groupingBy(classifier, Collectors.<T>toList())
+  }
+
+  public static <T, K, A, R> Collector<T, Map<K, A>, Map<K, R>> groupingBy(Function<? super T, ? extends K> classifier, Collector<? super T, A, R> downstream) {
+    Function<T, K> kf = (Function<T, K>) classifier
+    Supplier<A> ds = downstream.supplier()
+    BiConsumer<A, ? super T> rawSink = downstream.accumulator()
+    BiConsumer<A, T> sink = (BiConsumer<A, T>) rawSink
+    BinaryOperator<A> dc = downstream.combiner()
+    Function<A, R> df = downstream.finisher()
+    return new CollectorImpl<T, Map<K, A>, Map<K, R>>(
+      () -> new HashMap<K, A>(),
+      (acc, t) -> {
+        K key = kf.apply(t)
+        A bucket = acc.get(key)
+        if (bucket == null) {
+          bucket = ds.get()
+          acc.put(key, bucket)
+        }
+        sink.accept(bucket, t)
+      },
+      (a, b) -> {
+        Iterator<K> keys = b.keySet().iterator()
+        while (keys.hasNext()) {
+          K k = keys.next()
+          A other = b.get(k)
+          A mine = a.get(k)
+          if (mine == null) {
+            a.put(k, other)
+          } else {
+            a.put(k, dc.apply(mine, other))
+          }
+        }
+        return a
+      },
+      m -> {
+        Map<K, R> out = new HashMap<K, R>()
+        Iterator<K> keys = m.keySet().iterator()
+        while (keys.hasNext()) {
+          K k = keys.next()
+          out.put(k, df.apply(m.get(k)))
+        }
+        return out
+      },
+      CollectorChars.none())
+  }
+
+  /* The three-argument form takes a factory for the map itself. Its type
+     arguments cannot all be read off its arguments -- which map to make is the
+     factory's business and the value type belongs to the downstream -- so the
+     call site names them:
+
+         Collectors.<String, Integer, List<String>, List<String>, TreeMap<Integer, List<String>>>groupingBy(x -> x.length(), TreeMap::new, Collectors.<String>toList())
+
+     which is the call javac needs a witness for as well. */
+  public static <T, K, A, R, M extends Map<K, R>> Collector<T, Map<K, A>, M> groupingBy(Function<? super T, ? extends K> classifier, Supplier<M> mapFactory, Collector<? super T, A, R> downstream) {
+    Function<T, K> kf = (Function<T, K>) classifier
+    Supplier<M> factory = mapFactory
+    Supplier<A> ds = downstream.supplier()
+    BiConsumer<A, ? super T> rawSink = downstream.accumulator()
+    BiConsumer<A, T> sink = (BiConsumer<A, T>) rawSink
+    BinaryOperator<A> dc = downstream.combiner()
+    Function<A, R> df = downstream.finisher()
+    return new CollectorImpl<T, Map<K, A>, M>(
+      () -> new HashMap<K, A>(),
+      (acc, t) -> {
+        K key = kf.apply(t)
+        A bucket = acc.get(key)
+        if (bucket == null) {
+          bucket = ds.get()
+          acc.put(key, bucket)
+        }
+        sink.accept(bucket, t)
+      },
+      (a, b) -> {
+        Iterator<K> keys = b.keySet().iterator()
+        while (keys.hasNext()) {
+          K k = keys.next()
+          A other = b.get(k)
+          A mine = a.get(k)
+          if (mine == null) {
+            a.put(k, other)
+          } else {
+            a.put(k, dc.apply(mine, other))
+          }
+        }
+        return a
+      },
+      m -> {
+        M out = factory.get()
+        Iterator<K> keys = m.keySet().iterator()
+        while (keys.hasNext()) {
+          K k = keys.next()
+          out.put(k, df.apply(m.get(k)))
+        }
+        return out
+      },
+      CollectorChars.none())
+  }
+
+  /* partitioningBy is a groupingBy whose key is a boolean, with one difference
+     the JDK documents and this keeps: the answer always has both keys. An all-
+     true stream partitions to {false=[], true=[...]}, not to a one-entry map,
+     which is what lets a caller read either side without checking. */
+  public static <T> Collector<T, Map<Boolean, List<T>>, Map<Boolean, List<T>>> partitioningBy(Predicate<? super T> predicate) {
+    return partitioningBy(predicate, Collectors.<T>toList())
+  }
+
+  public static <T, A, R> Collector<T, Map<Boolean, A>, Map<Boolean, R>> partitioningBy(Predicate<? super T> predicate, Collector<? super T, A, R> downstream) {
+    Predicate<T> p = (Predicate<T>) predicate
+    Supplier<A> ds = downstream.supplier()
+    BiConsumer<A, ? super T> rawSink = downstream.accumulator()
+    BiConsumer<A, T> sink = (BiConsumer<A, T>) rawSink
+    BinaryOperator<A> dc = downstream.combiner()
+    Function<A, R> df = downstream.finisher()
+    return new CollectorImpl<T, Map<Boolean, A>, Map<Boolean, R>>(
+      () -> new HashMap<Boolean, A>(),
+      (acc, t) -> {
+        Boolean key = p.test(t) ? Boolean.TRUE : Boolean.FALSE
+        A bucket = acc.get(key)
+        if (bucket == null) {
+          bucket = ds.get()
+          acc.put(key, bucket)
+        }
+        sink.accept(bucket, t)
+      },
+      (a, b) -> {
+        Iterator<Boolean> keys = b.keySet().iterator()
+        while (keys.hasNext()) {
+          Boolean k = keys.next()
+          A other = b.get(k)
+          A mine = a.get(k)
+          if (mine == null) {
+            a.put(k, other)
+          } else {
+            a.put(k, dc.apply(mine, other))
+          }
+        }
+        return a
+      },
+      m -> {
+        Map<Boolean, R> out = new HashMap<Boolean, R>()
+        A yes = m.get(Boolean.TRUE)
+        A no = m.get(Boolean.FALSE)
+        out.put(Boolean.TRUE, df.apply(yes == null ? ds.get() : yes))
+        out.put(Boolean.FALSE, df.apply(no == null ? ds.get() : no))
+        return out
+      },
+      CollectorChars.none())
+  }
+}

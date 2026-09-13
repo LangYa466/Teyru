@@ -102,8 +102,16 @@ func (p *Program) ConstantLiteral(f *ast.Field) (string, bool) {
 		switch v.kind {
 		case ast.LitString:
 			return `"` + escapeC(v.s) + `"`, true
-		case ast.LitInt, ast.LitLong:
+		case ast.LitInt:
 			return strconv.FormatInt(v.i, 10), true
+		case ast.LitLong:
+			// The suffix is what makes C read the literal as a long. Without
+			// it a constant that fits in 32 bits is an int, and `MASK << 63`
+			// then shifts at 32-bit width and prints 1 where Java prints
+			// -9223372036854775808. A literal in the source carries its own
+			// type (emit_expr writes `LL`); this path is the inlined value of a
+			// `static final long` field, which has none of its own.
+			return strconv.FormatInt(v.i, 10) + "LL", true
 		case ast.LitDouble:
 			return util.FloatLiteral(v.f, false), true
 		case ast.LitFloat:

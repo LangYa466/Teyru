@@ -1,0 +1,71 @@
+/* A type variable that only a lambda could settle. `R pick(Fn<? super String,
+   ? extends R>)` cannot know R until the lambda's body has been read, and the
+   body cannot be checked until the target type is known -- so the call used to
+   be rejected outright (TY-TYP-0095). The hole is now filled from the body: the
+   lambda turns out to be `Fn<String, Integer>` and R is the wildcard's bound
+   inside that. Expected output is javac 25's for this same program. */
+
+package teyru
+
+interface Fn<T, R> { R apply(T t) }
+interface Cmp<T> { int compare(T a, T b) }
+
+class Chain<T> {
+  List<T> items
+  Chain(List<T> items) { this.items = items }
+  <R> Chain<R> map(Fn<? super T, ? extends R> f) {
+    List<R> out = new ArrayList<R>()
+    for (T t : items) { out.add(f.apply(t)) }
+    return new Chain<R>(out)
+  }
+  Chain<T> filter(Fn<? super T, Boolean> p) {
+    List<T> out = new ArrayList<T>()
+    for (T t : items) { if (p.apply(t)) { out.add(t) } }
+    return new Chain<T>(out)
+  }
+  List<T> toList() { return items }
+  int size() { return items.size() }
+}
+
+class T118 {
+  static void show(Object o) { System.out.println(o) }
+  static <R> R pick(Fn<? super String, ? extends R> f) { return f.apply("hello") }
+  static <T> T firstOf(List<T> xs, Cmp<? super T> c) {
+    T best = xs.get(0)
+    for (T t : xs) { if (c.compare(t, best) < 0) { best = t } }
+    return best
+  }
+
+  public static void main(String[] args) {
+    System.out.println("== the body settles the variable ==")
+    show(pick(s -> s.length()))
+    show(pick(s -> s.length() * 2))
+    show(pick(s -> s.toUpperCase()))
+    show(pick(s -> s.charAt(0)))
+    show(pick(s -> s.startsWith("he")))
+    System.out.println("== and through a chain ==")
+    List<String> xs = new ArrayList<String>()
+    xs.add("pear")
+    xs.add("apple")
+    xs.add("fig")
+    Chain<String> c = new Chain<String>(xs)
+    System.out.println(c.map(x -> x.length()).toList())
+    System.out.println(c.map(x -> x.toUpperCase()).toList())
+    System.out.println(c.map(x -> x.length() > 3).toList())
+    System.out.println(c.filter(x -> x.length() > 3).toList())
+    System.out.println(c.map(x -> x.charAt(0)).toList())
+    System.out.println(c.map(x -> x).filter(x -> x.startsWith("a")).toList())
+    System.out.println("== a named lambda still works ==")
+    Fn<String, Integer> len = s -> s.length()
+    show(pick(len))
+    System.out.println(c.map(len).toList())
+    System.out.println("== comparator over ? super T ==")
+    System.out.println(firstOf(xs, (a, b) -> a.length() - b.length()))
+    System.out.println(firstOf(xs, (a, b) -> a.compareTo(b)))
+    List<Integer> ns = new ArrayList<Integer>()
+    ns.add(9)
+    ns.add(3)
+    ns.add(7)
+    System.out.println(firstOf(ns, (a, b) -> a - b))
+  }
+}

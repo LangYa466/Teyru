@@ -1,0 +1,1827 @@
+package teyru
+
+/* The rest of java.util: Properties, Random, UUID, BitSet, StringTokenizer and
+ * the Enumeration interface they are declared over.
+ *
+ * Each of these is portable Teyru with one exception worth naming up front:
+ * Random is the JDK's published linear congruential generator, so a program
+ * that seeds one gets the same numbers javac's java would, and UUID.randomUUID
+ * is built on it -- which makes it a random UUID but not a *secure* one, since
+ * the JDK uses a SecureRandom and this library has no CSPRNG to reach for.
+ *
+ * The classes are laid out in dependency order: Enumeration, StringTokenizer
+ * (which is an Enumeration), Random, UUID (which needs a Random for
+ * randomUUID), BitSet, Properties (which is a HashMap).
+ *
+ * Scanner is NOT here, and that is a decision rather than an omission.
+ * Faithful Scanner is not a tokenizer: it carries a buffer with the positions
+ * of every delimiter it has seen, a Matcher that can be asked for a region and
+ * re-anchored, a per-locale radix and decimal separator for its number
+ * formats, and a nextBigDecimal/nextBigInteger that need java.math. A version
+ * that skipped any of that would answer differently from the JDK on exactly
+ * the inputs a program reaches for Scanner with -- "1,5" under a German
+ * locale, hasNextDouble on a partial token, a delimiter a caller set matches
+ * the end of the buffer -- and a scanner that is subtly wrong is worse than no
+ * scanner, which is a compile error a caller can see. */
+
+/* java.util.Enumeration, the pre-Iterator cursor. Java keeps it for the
+   classes that were written before Iterator existed, and StringTokenizer and
+   Properties.propertyNames are two of them, so a program that walks either
+   walks an Enumeration. */
+interface Enumeration<E> {
+  boolean hasMoreElements()
+  E nextElement()
+}
+
+/* java.util.StringTokenizer: a splitter over a SET OF DELIMITER CHARACTERS
+ * rather than a pattern, which is what it is for -- a caller who wants a
+ * regular expression has String.split, and a caller who wants one delimiter
+ * character does not want to pay for the regex engine.
+ *
+ * The state machine is Java's, down to the newPosition scratch field: a token
+ * request that has already been scanned by hasMoreTokens is taken from there,
+ * and the delimiters can be replaced mid-stream by nextToken(String), which
+ * must not re-scan from the position the old delimiters left behind. Those two
+ * fields are why the class cannot be written as a loop over an index. */
+class StringTokenizer implements Enumeration<Object> {
+  private String str
+  private String delimiters
+  private boolean retDelims
+  private int maxDelimCodePoint
+  private int maxPosition
+  private int currentPosition
+  private int newPosition
+  private boolean delimsChanged
+
+  public StringTokenizer(String str, String delim, boolean returnDelims) {
+    this.str = str
+    this.delimiters = delim
+    this.retDelims = returnDelims
+    this.maxPosition = str.length()
+    currentPosition = 0
+    newPosition = -1
+    delimsChanged = false
+    setMaxDelimCodePoint()
+  }
+
+  public StringTokenizer(String str, String delim) {
+    this(str, delim, false)
+  }
+
+  /* Java's default delimiter set, spelled out: space, tab, newline, carriage
+     return and form feed. It is deliberately not Character.isWhitespace --
+     vertical tab and the Unicode spaces are token characters here, exactly as
+     they are in the JDK -- and it is what Scanner does not use either. */
+  public StringTokenizer(String str) {
+    this(str, " \t\n\r\f", false)
+  }
+
+  private void setMaxDelimCodePoint() {
+    if (delimiters == null) {
+      maxDelimCodePoint = 0
+      return
+    }
+    int m = 0
+    for (int i = 0 : i < delimiters.length() : i++) {
+      char c = delimiters.charAt(i)
+      if (c > m) {
+        m = c
+      }
+    }
+    maxDelimCodePoint = m
+  }
+
+  private boolean isDelimiter(char c) {
+    return delimiters.indexOf((int) c) >= 0
+  }
+
+  /* The two scans test maxDelimCodePoint before the delimiter string: a
+     character above every delimiter cannot be one, and that comparison is what
+     makes a delimiter string of "" mean "no delimiters at all" rather than
+     "every character is a delimiter". */
+  private int skipDelimiters(int startPos) {
+    if (delimiters == null) {
+      throw new NullPointerException()
+    }
+    int position = startPos
+    while (!retDelims && position < maxPosition) {
+      char c = str.charAt(position)
+      if (c > maxDelimCodePoint || !isDelimiter(c)) {
+        break
+      }
+      position++
+    }
+    return position
+  }
+
+  private int scanToken(int startPos) {
+    int position = startPos
+    while (position < maxPosition) {
+      char c = str.charAt(position)
+      if (c <= maxDelimCodePoint && isDelimiter(c)) {
+        break
+      }
+      position++
+    }
+    /* With returnDelims, an empty token is a delimiter character handed back as
+       itself; the scan above stopped on it, so it is one character long. */
+    if (retDelims && startPos == position) {
+      char c = str.charAt(position)
+      if (c <= maxDelimCodePoint && isDelimiter(c)) {
+        position++
+      }
+    }
+    return position
+  }
+
+  public boolean hasMoreTokens() {
+    newPosition = skipDelimiters(currentPosition)
+    return newPosition < maxPosition
+  }
+
+  public String nextToken() {
+    if (newPosition >= 0 && !delimsChanged) {
+      currentPosition = newPosition
+    } else {
+      currentPosition = skipDelimiters(currentPosition)
+    }
+    delimsChanged = false
+    newPosition = -1
+    if (currentPosition >= maxPosition) {
+      throw new NoSuchElementException()
+    }
+    int start = currentPosition
+    currentPosition = scanToken(currentPosition)
+    return str.substring(start, currentPosition)
+  }
+
+  public String nextToken(String delim) {
+    delimiters = delim
+    delimsChanged = true
+    setMaxDelimCodePoint()
+    return nextToken()
+  }
+
+  /* countTokens walks a local index and leaves currentPosition and newPosition
+     alone, which is Java's documented contract ("the current position is not
+     advanced") and the reason the two token reads above do not consult it. */
+  public int countTokens() {
+    int count = 0
+    int position = currentPosition
+    while (position < maxPosition) {
+      position = skipDelimiters(position)
+      if (position >= maxPosition) {
+        break
+      }
+      position = scanToken(position)
+      count++
+    }
+    return count
+  }
+
+  public boolean hasMoreElements() {
+    return hasMoreTokens()
+  }
+
+  public Object nextElement() {
+    return nextToken()
+  }
+}
+
+/* java.util.Random, which for a given seed is a fixed sequence of numbers and
+ * therefore an API with no freedom in it at all: the fields, the scramble, the
+ * shift and the rejection loop are all specified by the JDK's own
+ * documentation, and a program that seeds one of these gets the numbers the
+ * same program on javac gets.
+ *
+ * The two places the values are not simply arithmetic are nextInt(bound)
+ * (which rejects and retries rather than taking a modulo, so that an
+ * out-of-range value cannot bias a small bound) and nextGaussian (which
+ * reaches Math.sqrt and Math.log through the same C library the JDK's
+ * StrictMath would not -- see the note there). */
+class Random {
+  private static final long MULTIPLIER = 0x5DEECE66DL
+  private static final long ADDEND = 0xBL
+  private static final long MASK = (1L << 48) - 1
+  private static final double DOUBLE_UNIT = 1.0 / 9007199254740992.0
+
+  private long seed
+  private boolean haveNextNextGaussian
+  private double nextNextGaussian
+
+  /* Java seeds this from a static uniquifier xor'd with nanoTime; the
+     uniquifier is there to keep two Randoms created in the same nanosecond
+     apart, and the clock is what is left of it here. */
+  public Random() {
+    setSeed(System.nanoTime())
+  }
+
+  public Random(long seed) {
+    setSeed(seed)
+  }
+
+  private static long initialScramble(long seed) {
+    return (seed ^ MULTIPLIER) & MASK
+  }
+
+  public void setSeed(long seed) {
+    this.seed = initialScramble(seed)
+    haveNextNextGaussian = false
+  }
+
+  /* The whole generator: 48 bits of state, multiplied and incremented modulo
+     2^48, with the top `bits` of the result handed back. Java's declaration is
+     protected, so a subclass that exposes it is how a program reads the raw
+     stream, and the same subclass works here. */
+  protected int next(int bits) {
+    seed = (seed * MULTIPLIER + ADDEND) & MASK
+    return (int) (seed >>> (48 - bits))
+  }
+
+  public void nextBytes(byte[] bytes) {
+    int i = 0
+    int len = bytes.length
+    while (i < len) {
+      int rnd = nextInt()
+      int n = len - i < 4 ? len - i : 4
+      while (n > 0) {
+        bytes[i] = (byte) rnd
+        i++
+        rnd = rnd >> 8
+        n--
+      }
+    }
+  }
+
+  public int nextInt() {
+    return next(32)
+  }
+
+  public int nextInt(int bound) {
+    if (bound <= 0) {
+      throw new IllegalArgumentException("bound must be positive")
+    }
+    int r = next(31)
+    int m = bound - 1
+    if ((bound & m) == 0) {
+      // a power of two: the multiply takes the high bits of r, which are the
+      // ones the low bits of a small bound would otherwise miss
+      r = (int) ((bound * (long) r) >> 31)
+      return r
+    }
+    int u = r
+    r = u % bound
+    while (u - r + m < 0) {
+      u = next(31)
+      r = u % bound
+    }
+    return r
+  }
+
+  public long nextLong() {
+    return ((long) (next(32)) << 32) + next(32)
+  }
+
+  public boolean nextBoolean() {
+    return next(1) != 0
+  }
+
+  public float nextFloat() {
+    return ((float) next(24)) / ((float) (1 << 24))
+  }
+
+  public double nextDouble() {
+    return (((long) (next(26)) << 27) + next(27)) * DOUBLE_UNIT
+  }
+
+  /* The polar form of the Box-Muller transform: two uniform points in the unit
+     disc, and the log of the squared radius turned into a length. The pair
+     comes out together, so the second value is kept for the next call -- which
+     is observable, because it means the generator is not a pure function of
+     the seed at that point.
+
+     Java computes this with StrictMath.log and StrictMath.sqrt, which are
+     fdlibm; Math.log here is the C library's, which can differ in the last
+     bit. Everything up to that point is exact. */
+  public double nextGaussian() {
+    if (haveNextNextGaussian) {
+      haveNextNextGaussian = false
+      return nextNextGaussian
+    }
+    double v1 = 0.0
+    double v2 = 0.0
+    double s = 0.0
+    boolean again = true
+    while (again) {
+      v1 = 2 * nextDouble() - 1
+      v2 = 2 * nextDouble() - 1
+      s = v1 * v1 + v2 * v2
+      again = s >= 1 || s == 0
+    }
+    double multiplier = Math.sqrt(-2 * Math.log(s) / s)
+    nextNextGaussian = v2 * multiplier
+    haveNextNextGaussian = true
+    return v1 * multiplier
+  }
+}
+
+/* java.util.UUID, which is two longs and the textual form java prints them in.
+ *
+ * randomUUID is a version-4 UUID drawn from the Random above, which is seeded
+ * from the clock: the bits are uniformly random for a program that does not
+ * care who can predict them, and they are NOT cryptographically strong. The
+ * JDK draws this from a SecureRandom; there is no CSPRNG in this runtime, and
+ * a v4 UUID is not a secret, so the substitution is a documented one rather
+ * than a hidden one. */
+class UUID implements Comparable<UUID> {
+  private static final Random SOURCE = new Random()
+
+  private final long mostSigBits
+  private final long leastSigBits
+
+  private UUID(long mostSigBits, long leastSigBits) {
+    this.mostSigBits = mostSigBits
+    this.leastSigBits = leastSigBits
+  }
+
+  public static UUID randomUUID() {
+    long msb = SOURCE.nextLong()
+    long lsb = SOURCE.nextLong()
+    // version 4: the four bits after the third dash-group's top bits say so
+    msb = (msb & ~0xF000L) | 0x4000L
+    // variant 2 (IETF): the two highest bits of the low half are 10
+    lsb = (lsb & 0x3FFFFFFFFFFFFFFFL) | 0x8000000000000000L
+    return new UUID(msb, lsb)
+  }
+
+  /* The dashes have to be where they are and there has to be the right number
+     of them; the digit GROUPS do not have to be the right length, which Java
+     accepts and which this accepts too rather than being stricter than the
+     thing it is copying. */
+  public static UUID fromString(String name) {
+    if (name.length() > 36) {
+      throw new IllegalArgumentException("UUID string too large")
+    }
+    int dash1 = name.indexOf('-', 0)
+    int dash2 = name.indexOf('-', dash1 + 1)
+    int dash3 = name.indexOf('-', dash2 + 1)
+    int dash4 = name.indexOf('-', dash3 + 1)
+    int dash5 = name.indexOf('-', dash4 + 1)
+    if (dash4 < 0 || dash5 >= 0) {
+      throw new IllegalArgumentException("Invalid UUID string: " + name)
+    }
+    long mostSigBits = Long.parseLong(name.substring(0, dash1), 16) & 0xffffffffL
+    mostSigBits = mostSigBits << 16
+    mostSigBits = mostSigBits | (Long.parseLong(name.substring(dash1 + 1, dash2), 16) & 0xffffL)
+    mostSigBits = mostSigBits << 16
+    mostSigBits = mostSigBits | (Long.parseLong(name.substring(dash2 + 1, dash3), 16) & 0xffffL)
+    long leastSigBits = Long.parseLong(name.substring(dash3 + 1, dash4), 16) & 0xffffL
+    leastSigBits = leastSigBits << 48
+    leastSigBits = leastSigBits | (Long.parseLong(name.substring(dash4 + 1), 16) & 0xffffffffffffL)
+    return new UUID(mostSigBits, leastSigBits)
+  }
+
+  public long getMostSignificantBits() {
+    return mostSigBits
+  }
+
+  public long getLeastSignificantBits() {
+    return leastSigBits
+  }
+
+  public int version() {
+    return (int) ((mostSigBits >> 12) & 0x0fL)
+  }
+
+  /* Java's expression, kept as Java's expression: the shift distance is itself
+     derived from the two variant bits, and the mask it is anded with is the
+     sign of the low half. A shift distance of 64 cannot be asked of the
+     hardware, so the one case that reaches it -- an NCS variant, whose two
+     high bits are zero -- is folded to 0, which is what shifting by 64 mod 64
+     means anyway. */
+  public int variant() {
+    int distance = (int) (64 - (leastSigBits >>> 62))
+    if (distance == 64) {
+      distance = 0
+    }
+    return (int) ((leastSigBits >>> distance) & (leastSigBits >> 63))
+  }
+
+  public int compareTo(UUID o) {
+    if (mostSigBits < o.mostSigBits) {
+      return -1
+    }
+    if (mostSigBits > o.mostSigBits) {
+      return 1
+    }
+    if (leastSigBits < o.leastSigBits) {
+      return -1
+    }
+    if (leastSigBits > o.leastSigBits) {
+      return 1
+    }
+    return 0
+  }
+
+  public boolean equals(Object o) {
+    if (o == this) {
+      return true
+    }
+    if (!(o instanceof UUID)) {
+      return false
+    }
+    UUID other = (UUID) o
+    return mostSigBits == other.mostSigBits && leastSigBits == other.leastSigBits
+  }
+
+  public int hashCode() {
+    return (int) ((mostSigBits >> 32) ^ mostSigBits ^ (leastSigBits >> 32) ^ leastSigBits)
+  }
+
+  /* Java builds each group by or-ing in a bit above it and dropping the top
+     digit of the result, which is a pad-to-width; the same trick is used here
+     because it is the one that needs no width arithmetic. */
+  public String toString() {
+    return digits(mostSigBits >> 32, 8) + "-" + digits(mostSigBits >> 16, 4) + "-" +
+      digits(mostSigBits, 4) + "-" + digits(leastSigBits >> 48, 4) + "-" +
+      digits(leastSigBits, 12)
+  }
+
+  private static String digits(long value, int digits) {
+    long high = 1L << (digits * 4)
+    return Long.toHexString(high | (value & (high - 1))).substring(1)
+  }
+}
+
+/* java.util.BitSet: a vector of bits that grows on demand.
+ *
+ * The representation is the JDK's -- an array of longs, wordsInUse counting
+ * the non-zero prefix, and sizeIsSticky remembering whether the caller named
+ * the size -- because all three are observable: `size()` reports the CAPACITY
+ * the array happens to have, `length()` reports one past the highest set bit,
+ * and clone() trims. A program that prints size() after a clear sees the
+ * difference.
+ *
+ * Every shift distance is masked with & 63 where Java relies on the JVM's
+ * shift-mod-64: `1L << bitIndex` with bitIndex = 70 is 1L << 6 in Java and
+ * undefined behaviour in C, which is what this compiles to. */
+class BitSet {
+  private static final int ADDRESS_BITS_PER_WORD = 6
+  private static final int BITS_PER_WORD = 64
+  private static final long WORD_MASK = 0xffffffffffffffffL
+
+  private long[] words
+  private int wordsInUse
+  private boolean sizeIsSticky
+
+  /* Java allocates one word here, so an empty new BitSet().size() is 64 and
+     not 0; it is the one place where the capacity of a fresh set is visible. */
+  public BitSet() {
+    initWords(BITS_PER_WORD)
+    sizeIsSticky = false
+  }
+
+  public BitSet(int nbits) {
+    if (nbits < 0) {
+      throw new NegativeArraySizeException("nbits < 0: " + nbits)
+    }
+    initWords(nbits)
+    sizeIsSticky = true
+  }
+
+  private void initWords(int nbits) {
+    words = new long[wordIndex(nbits - 1) + 1]
+  }
+
+  private static int wordIndex(int bitIndex) {
+    return bitIndex >> ADDRESS_BITS_PER_WORD
+  }
+
+  /* A word outside the array reads as zero, which is what Java's own array
+     guarantees by keeping every word past wordsInUse zero; the accessor is the
+     only difference, and it exists because this array is bounds-checked. */
+  private long wordAt(int index) {
+    if (index < 0 || index >= words.length) {
+      return 0L
+    }
+    return words[index]
+  }
+
+  private static long bitAt(int bitIndex) {
+    return 1L << (bitIndex & (BITS_PER_WORD - 1))
+  }
+
+  /* The two all-ones masks of the range operators, with the shifts at 0
+     spelled out: Java shifts by (index & 63) and a shift of 64 would be
+     undefined, so the mask of a whole word is the one it must be. */
+  private static long maskFrom(int fromIndex) {
+    return WORD_MASK << (fromIndex & (BITS_PER_WORD - 1))
+  }
+
+  private static long maskTo(int toIndex) {
+    return WORD_MASK >>> ((BITS_PER_WORD - (toIndex & (BITS_PER_WORD - 1))) & (BITS_PER_WORD - 1))
+  }
+
+  private void ensureCapacity(int wordsRequired) {
+    if (words.length < wordsRequired) {
+      int request = 2 * words.length
+      if (request < wordsRequired) {
+        request = wordsRequired
+      }
+      words = Arrays.copyOf(words, request)
+      sizeIsSticky = false
+    }
+  }
+
+  private void expandTo(int index) {
+    int wordsRequired = index + 1
+    if (wordsInUse < wordsRequired) {
+      ensureCapacity(wordsRequired)
+      wordsInUse = wordsRequired
+    }
+  }
+
+  private void recalculateWordsInUse() {
+    int i = wordsInUse - 1
+    while (i >= 0 && words[i] == 0L) {
+      i--
+    }
+    wordsInUse = i + 1
+  }
+
+  private void trimToSize() {
+    if (words.length != wordsInUse) {
+      words = Arrays.copyOf(words, wordsInUse)
+    }
+  }
+
+  private static void checkRange(int fromIndex, int toIndex) {
+    if (fromIndex < 0) {
+      throw new IndexOutOfBoundsException("fromIndex < 0: " + fromIndex)
+    }
+    if (toIndex < 0) {
+      throw new IndexOutOfBoundsException("toIndex < 0: " + toIndex)
+    }
+    if (fromIndex > toIndex) {
+      throw new IndexOutOfBoundsException("fromIndex: " + fromIndex + " > toIndex: " + toIndex)
+    }
+  }
+
+  // ------------------------------------------------------------ single bits
+
+  public void set(int bitIndex) {
+    if (bitIndex < 0) {
+      throw new IndexOutOfBoundsException("bitIndex < 0: " + bitIndex)
+    }
+    int index = wordIndex(bitIndex)
+    expandTo(index)
+    words[index] = words[index] | bitAt(bitIndex)
+  }
+
+  public void set(int bitIndex, boolean value) {
+    if (value) {
+      set(bitIndex)
+    } else {
+      clear(bitIndex)
+    }
+  }
+
+  /* Java's no-argument clear empties the set but keeps the array, so size()
+     still reports the capacity it had grown to. */
+  public void clear() {
+    while (wordsInUse > 0) {
+      wordsInUse--
+      words[wordsInUse] = 0L
+    }
+  }
+
+  public void clear(int bitIndex) {
+    if (bitIndex < 0) {
+      throw new IndexOutOfBoundsException("bitIndex < 0: " + bitIndex)
+    }
+    int index = wordIndex(bitIndex)
+    if (index >= wordsInUse) {
+      return
+    }
+    words[index] = words[index] & ~bitAt(bitIndex)
+    recalculateWordsInUse()
+  }
+
+  public void flip(int bitIndex) {
+    if (bitIndex < 0) {
+      throw new IndexOutOfBoundsException("bitIndex < 0: " + bitIndex)
+    }
+    int index = wordIndex(bitIndex)
+    expandTo(index)
+    words[index] = words[index] ^ bitAt(bitIndex)
+    recalculateWordsInUse()
+  }
+
+  public boolean get(int bitIndex) {
+    if (bitIndex < 0) {
+      throw new IndexOutOfBoundsException("bitIndex < 0: " + bitIndex)
+    }
+    int index = wordIndex(bitIndex)
+    return index < wordsInUse && (words[index] & bitAt(bitIndex)) != 0L
+  }
+
+  // -------------------------------------------------------------- bit ranges
+
+  public void set(int fromIndex, int toIndex) {
+    checkRange(fromIndex, toIndex)
+    if (fromIndex == toIndex) {
+      return
+    }
+    int startWord = wordIndex(fromIndex)
+    int endWord = wordIndex(toIndex - 1)
+    expandTo(endWord)
+    long firstMask = maskFrom(fromIndex)
+    long lastMask = maskTo(toIndex)
+    if (startWord == endWord) {
+      words[startWord] = words[startWord] | (firstMask & lastMask)
+      return
+    }
+    words[startWord] = words[startWord] | firstMask
+    for (int i = startWord + 1 : i < endWord : i++) {
+      words[i] = WORD_MASK
+    }
+    words[endWord] = words[endWord] | lastMask
+  }
+
+  public void set(int fromIndex, int toIndex, boolean value) {
+    if (value) {
+      set(fromIndex, toIndex)
+    } else {
+      clear(fromIndex, toIndex)
+    }
+  }
+
+  public void clear(int fromIndex, int toIndex) {
+    checkRange(fromIndex, toIndex)
+    if (fromIndex == toIndex) {
+      return
+    }
+    int startWord = wordIndex(fromIndex)
+    if (startWord >= wordsInUse) {
+      return
+    }
+    int endWord = wordIndex(toIndex - 1)
+    if (endWord >= wordsInUse) {
+      toIndex = length()
+      endWord = wordsInUse - 1
+    }
+    long firstMask = maskFrom(fromIndex)
+    long lastMask = maskTo(toIndex)
+    if (startWord == endWord) {
+      words[startWord] = words[startWord] & ~(firstMask & lastMask)
+    } else {
+      words[startWord] = words[startWord] & ~firstMask
+      for (int i = startWord + 1 : i < endWord : i++) {
+        words[i] = 0L
+      }
+      words[endWord] = words[endWord] & ~lastMask
+    }
+    recalculateWordsInUse()
+  }
+
+  public void flip(int fromIndex, int toIndex) {
+    checkRange(fromIndex, toIndex)
+    if (fromIndex == toIndex) {
+      return
+    }
+    int startWord = wordIndex(fromIndex)
+    int endWord = wordIndex(toIndex - 1)
+    expandTo(endWord)
+    long firstMask = maskFrom(fromIndex)
+    long lastMask = maskTo(toIndex)
+    if (startWord == endWord) {
+      words[startWord] = words[startWord] ^ (firstMask & lastMask)
+    } else {
+      words[startWord] = words[startWord] ^ firstMask
+      for (int i = startWord + 1 : i < endWord : i++) {
+        words[i] = words[i] ^ WORD_MASK
+      }
+      words[endWord] = words[endWord] ^ lastMask
+    }
+    recalculateWordsInUse()
+  }
+
+  public BitSet get(int fromIndex, int toIndex) {
+    checkRange(fromIndex, toIndex)
+    int len = length()
+    if (len <= fromIndex || fromIndex == toIndex) {
+      return new BitSet(0)
+    }
+    if (toIndex > len) {
+      toIndex = len
+    }
+    BitSet result = new BitSet(toIndex - fromIndex)
+    int targetWords = wordIndex(toIndex - fromIndex - 1) + 1
+    int sourceIndex = wordIndex(fromIndex)
+    boolean wordAligned = (fromIndex & (BITS_PER_WORD - 1)) == 0
+    int shift = fromIndex & (BITS_PER_WORD - 1)
+    for (int i = 0 : i < targetWords - 1 : i++) {
+      if (wordAligned) {
+        result.words[i] = words[sourceIndex]
+      } else {
+        result.words[i] = (words[sourceIndex] >>> shift) | (wordAt(sourceIndex + 1) << (BITS_PER_WORD - shift))
+      }
+      sourceIndex++
+    }
+    long lastMask = maskTo(toIndex)
+    long last
+    if (((toIndex - 1) & (BITS_PER_WORD - 1)) < shift) {
+      last = (words[sourceIndex] >>> shift) | (wordAt(sourceIndex + 1) & lastMask) << (BITS_PER_WORD - shift)
+    } else {
+      last = (words[sourceIndex] & lastMask) >>> shift
+    }
+    result.words[targetWords - 1] = last
+    result.wordsInUse = targetWords
+    result.recalculateWordsInUse()
+    return result
+  }
+
+  // -------------------------------------------------------------- bulk logic
+
+  public void and(BitSet set) {
+    if (this == set) {
+      return
+    }
+    int n = wordsInUse < set.wordsInUse ? wordsInUse : set.wordsInUse
+    for (int i = 0 : i < n : i++) {
+      words[i] = words[i] & set.words[i]
+    }
+    while (wordsInUse > n) {
+      wordsInUse--
+      words[wordsInUse] = 0L
+    }
+    recalculateWordsInUse()
+  }
+
+  public void or(BitSet set) {
+    if (this == set) {
+      return
+    }
+    int common = wordsInUse < set.wordsInUse ? wordsInUse : set.wordsInUse
+    if (wordsInUse < set.wordsInUse) {
+      ensureCapacity(set.wordsInUse)
+      wordsInUse = set.wordsInUse
+    }
+    for (int i = 0 : i < common : i++) {
+      words[i] = words[i] | set.words[i]
+    }
+    for (int i = common : i < set.wordsInUse : i++) {
+      words[i] = set.words[i]
+    }
+  }
+
+  public void xor(BitSet set) {
+    int n = wordsInUse < set.wordsInUse ? wordsInUse : set.wordsInUse
+    if (wordsInUse < set.wordsInUse) {
+      ensureCapacity(set.wordsInUse)
+      wordsInUse = set.wordsInUse
+    }
+    for (int i = 0 : i < n : i++) {
+      words[i] = words[i] ^ set.words[i]
+    }
+    for (int i = n : i < set.wordsInUse : i++) {
+      words[i] = set.words[i]
+    }
+    recalculateWordsInUse()
+  }
+
+  public void andNot(BitSet set) {
+    int common = wordsInUse < set.wordsInUse ? wordsInUse : set.wordsInUse
+    for (int i = common - 1 : i >= 0 : i--) {
+      words[i] = words[i] & ~set.words[i]
+    }
+    recalculateWordsInUse()
+  }
+
+  public boolean intersects(BitSet set) {
+    int n = wordsInUse < set.wordsInUse ? wordsInUse : set.wordsInUse
+    for (int i = 0 : i < n : i++) {
+      if ((words[i] & set.words[i]) != 0L) {
+        return true
+      }
+    }
+    return false
+  }
+
+  // ---------------------------------------------------------------- queries
+
+  public int cardinality() {
+    int sum = 0
+    for (int i = 0 : i < wordsInUse : i++) {
+      sum += Long.bitCount(words[i])
+    }
+    return sum
+  }
+
+  public boolean isEmpty() {
+    return wordsInUse == 0
+  }
+
+  public int length() {
+    if (wordsInUse == 0) {
+      return 0
+    }
+    return BITS_PER_WORD * (wordsInUse - 1) + (BITS_PER_WORD - Long.numberOfLeadingZeros(words[wordsInUse - 1]))
+  }
+
+  public int size() {
+    return words.length * BITS_PER_WORD
+  }
+
+  public int nextSetBit(int fromIndex) {
+    if (fromIndex < 0) {
+      throw new IndexOutOfBoundsException("fromIndex < 0: " + fromIndex)
+    }
+    int u = wordIndex(fromIndex)
+    if (u >= wordsInUse) {
+      return -1
+    }
+    long word = words[u] & maskFrom(fromIndex)
+    while (true) {
+      if (word != 0L) {
+        return u * BITS_PER_WORD + Long.numberOfTrailingZeros(word)
+      }
+      u++
+      if (u == wordsInUse) {
+        return -1
+      }
+      word = words[u]
+    }
+  }
+
+  public int nextClearBit(int fromIndex) {
+    if (fromIndex < 0) {
+      throw new IndexOutOfBoundsException("fromIndex < 0: " + fromIndex)
+    }
+    int u = wordIndex(fromIndex)
+    if (u >= wordsInUse) {
+      return fromIndex
+    }
+    long word = ~words[u] & maskFrom(fromIndex)
+    while (true) {
+      if (word != 0L) {
+        return u * BITS_PER_WORD + Long.numberOfTrailingZeros(word)
+      }
+      u++
+      if (u == wordsInUse) {
+        return wordsInUse * BITS_PER_WORD
+      }
+      word = ~words[u]
+    }
+  }
+
+  public int previousSetBit(int fromIndex) {
+    if (fromIndex < 0) {
+      if (fromIndex == -1) {
+        return -1
+      }
+      throw new IndexOutOfBoundsException("fromIndex < -1: " + fromIndex)
+    }
+    int u = wordIndex(fromIndex)
+    if (u >= wordsInUse) {
+      return length() - 1
+    }
+    long word = words[u] & maskTo(fromIndex + 1)
+    while (true) {
+      if (word != 0L) {
+        return (u + 1) * BITS_PER_WORD - 1 - Long.numberOfLeadingZeros(word)
+      }
+      if (u == 0) {
+        return -1
+      }
+      u--
+      word = words[u]
+    }
+  }
+
+  public int previousClearBit(int fromIndex) {
+    if (fromIndex < 0) {
+      if (fromIndex == -1) {
+        return -1
+      }
+      throw new IndexOutOfBoundsException("fromIndex < -1: " + fromIndex)
+    }
+    int u = wordIndex(fromIndex)
+    if (u >= wordsInUse) {
+      return fromIndex
+    }
+    long word = ~words[u] & maskTo(fromIndex + 1)
+    while (true) {
+      if (word != 0L) {
+        return (u + 1) * BITS_PER_WORD - 1 - Long.numberOfLeadingZeros(word)
+      }
+      if (u == 0) {
+        return -1
+      }
+      u--
+      word = ~words[u]
+    }
+  }
+
+  // ----------------------------------------------------------- Object's four
+
+  public boolean equals(Object o) {
+    if (o == this) {
+      return true
+    }
+    if (!(o instanceof BitSet)) {
+      return false
+    }
+    BitSet set = (BitSet) o
+    if (wordsInUse != set.wordsInUse) {
+      return false
+    }
+    for (int i = 0 : i < wordsInUse : i++) {
+      if (words[i] != set.words[i]) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public int hashCode() {
+    long h = 1234
+    for (int i = wordsInUse : i > 0 : i--) {
+      h = h ^ (words[i - 1] * i)
+    }
+    return (int) ((h >> 32) ^ h)
+  }
+
+  public String toString() {
+    StringBuilder sb = new StringBuilder()
+    sb.append("{")
+    int i = nextSetBit(0)
+    boolean first = true
+    while (i >= 0) {
+      if (!first) {
+        sb.append(", ")
+      }
+      sb.append(i)
+      first = false
+      i = nextSetBit(i + 1)
+    }
+    sb.append("}")
+    return sb.toString()
+  }
+
+  /* Object.clone is not reachable here -- this library's Object does not
+     declare one, and the arrays are the only things that can be copied with
+     it -- so the copy is written out. It is Java's clone as far as a caller
+     can see: the same bits, a private copy of the words, and the trim that
+     makes the ORIGINAL's size() shrink when its capacity was larger than its
+     contents. */
+  public BitSet clone() {
+    if (!sizeIsSticky) {
+      trimToSize()
+    }
+    BitSet result = new BitSet(0)
+    result.words = words.clone()
+    result.wordsInUse = wordsInUse
+    result.sizeIsSticky = sizeIsSticky
+    return result
+  }
+}
+
+/* An Enumeration over a Set, which is what Properties.propertyNames returns
+   and what java.util.Collections.enumeration would build. It is a class here
+   rather than a method there because Collections is another file's to
+   extend. */
+class SetEnumeration<E> implements Enumeration<E> {
+  private Iterator<E> it
+
+  public SetEnumeration(Collection<E> c) {
+    it = c.iterator()
+  }
+
+  public boolean hasMoreElements() {
+    return it.hasNext()
+  }
+
+  public E nextElement() {
+    return it.next()
+  }
+}
+
+/* java.util.Properties.
+ *
+ * It SUBCLASSES HashMap<Object, Object> rather than wrapping one. Java's
+ * Properties extends Hashtable<Object, Object>, and the inheritance is the
+ * point of the class: a program passes a Properties to anything that takes a
+ * Map and expects setProperty to land in the same table put does. A wrapper
+ * would have to re-declare the whole Map surface and hand out views that are
+ * no longer the map -- and the one thing it would buy, hiding the Map methods,
+ * is the opposite of what Java does.
+ *
+ * The divergences from the JDK, all of them deliberate:
+ *   - No `defaults` chain. Java's Properties(Properties) constructor and the
+ *     lookup-through-defaults in getProperty/stringPropertyNames/list/store
+ *     are not implemented; getProperty answers only for this table.
+ *   - No XML. loadFromXML and storeToXML need a parser and a document model,
+ *     neither of which this library has.
+ *   - Keys and values may be null here, where Hashtable (and the
+ *     ConcurrentHashMap JDK 9 delegates to) rejects them with a
+ *     NullPointerException. This is a HashMap-backed table and inherits
+ *     HashMap's tolerance.
+ *   - The date line store writes is this runtime's clock in ISO form, not
+ *     java.util.Date.toString's "EEE MMM dd HH:mm:ss zzz yyyy". */
+class Properties extends HashMap<Object, Object> {
+  public Properties() {
+  }
+
+  public String getProperty(String key) {
+    Object value = get(key)
+    if (value instanceof String) {
+      return (String) value
+    }
+    return null
+  }
+
+  public String getProperty(String key, String defaultValue) {
+    String value = getProperty(key)
+    return value == null ? defaultValue : value
+  }
+
+  public Object setProperty(String key, String value) {
+    return put(key, value)
+  }
+
+  /* Every key whose key AND value are both Strings -- the map can hold other
+     things, and a program that asked for property names asked for the ones
+     that are properties. */
+  public Set<String> stringPropertyNames() {
+    Set<String> names = new HashSet<String>()
+    for (Map.Entry<Object, Object> e : entrySet()) {
+      Object key = e.getKey()
+      Object value = e.getValue()
+      if (key instanceof String && value instanceof String) {
+        names.add((String) key)
+      }
+    }
+    return names
+  }
+
+  /* Java's propertyNames is keys(), filtered: the JDK builds it by casting
+     every key to String and collecting those, so a table holding a non-String
+     key throws ClassCastException here and the cast below is the reproduction
+     of that, not a bug. A non-String VALUE, by contrast, does not disqualify a
+     name -- that is the one thing propertyNames and stringPropertyNames do not
+     agree on. */
+  public Enumeration<Object> propertyNames() {
+    Set<Object> names = new HashSet<Object>()
+    for (Object key : keySet()) {
+      String k = (String) key
+      names.add(k)
+    }
+    return new SetEnumeration<Object>(names)
+  }
+
+  // ------------------------------------------------------------------ load
+
+  public void load(Path path) {
+    loadText(Files.readString(path))
+  }
+
+  /* Java's load(InputStream) reads ISO-8859-1 bytes one character each, so the
+     cast is the decoding: there is no charset here to get it wrong. */
+  public void load(InputStream in) {
+    StringBuilder sb = new StringBuilder()
+    int c = in.read()
+    while (c >= 0) {
+      sb.append((char) c)
+      c = in.read()
+    }
+    loadText(sb.toString())
+  }
+
+  /* Java's LineReader, character for character: leading whitespace is skipped
+     on every physical line, a line whose first character is # or ! is a
+     comment, and a line ending in an odd number of backslashes continues onto
+     the next one with the backslash removed and its leading whitespace
+     skipped. The state is Java's because the states are what makes
+     "a=b\\\n  c" a value of "b  c" rather than of "bc". */
+  private void loadText(String text) {
+    int n = text.length()
+    int i = 0
+    StringBuilder line = new StringBuilder()
+    boolean skipWhite = true
+    boolean isNewLine = true
+    boolean isComment = false
+    boolean appendedLineBegin = false
+    boolean precedingBackslash = false
+    boolean skipLF = false
+    while (i < n) {
+      char c = text.charAt(i)
+      i++
+      if (skipLF) {
+        skipLF = false
+        if (c == '\n') {
+          continue
+        }
+      }
+      if (skipWhite) {
+        if (c == ' ' || c == '\t' || c == '\f') {
+          continue
+        }
+        if (!appendedLineBegin && (c == '\r' || c == '\n')) {
+          continue
+        }
+        skipWhite = false
+        appendedLineBegin = false
+      }
+      if (isNewLine) {
+        isNewLine = false
+        if (c == '#' || c == '!') {
+          isComment = true
+          continue
+        }
+      }
+      if (c != '\n' && c != '\r') {
+        /* One byte of the source, not the char: a Teyru string is UTF-8, so
+           append(c) would re-encode a byte of a multi-byte character and the
+           text would be encoded twice over. Appending the one-byte substring
+           copies the byte as it is. */
+        line.append(text.substring(i - 1, i))
+        /* Toggled, not set: a line ending in two backslashes ends the logical
+           line, and a line ending in one continues it. */
+        if (c == '\\') {
+          precedingBackslash = !precedingBackslash
+        } else {
+          precedingBackslash = false
+        }
+        continue
+      }
+      if (isComment || line.length() == 0) {
+        isComment = false
+        isNewLine = true
+        skipWhite = true
+        line.setLength(0)
+        continue
+      }
+      if (precedingBackslash) {
+        line.setLength(line.length() - 1)
+        skipWhite = true
+        appendedLineBegin = true
+        precedingBackslash = false
+        if (c == '\r') {
+          skipLF = true
+        }
+        continue
+      }
+      loadLine(line.toString())
+      line.setLength(0)
+      isNewLine = true
+      skipWhite = true
+      precedingBackslash = false
+    }
+    if (!isComment && line.length() > 0) {
+      if (precedingBackslash) {
+        line.setLength(line.length() - 1)
+      }
+      loadLine(line.toString())
+    }
+  }
+
+  /* Java's load0: the key ends at the first unescaped =, : or whitespace, the
+     value starts after that separator and after any whitespace following it,
+     and both are unescaped. */
+  private void loadLine(String text) {
+    int limit = text.length()
+    int keyLen = 0
+    int valueStart = limit
+    boolean hasSep = false
+    boolean precedingBackslash = false
+    while (keyLen < limit) {
+      char c = text.charAt(keyLen)
+      if ((c == '=' || c == ':') && !precedingBackslash) {
+        valueStart = keyLen + 1
+        hasSep = true
+        break
+      }
+      if ((c == ' ' || c == '\t' || c == '\f') && !precedingBackslash) {
+        valueStart = keyLen + 1
+        break
+      }
+      if (c == '\\') {
+        precedingBackslash = !precedingBackslash
+      } else {
+        precedingBackslash = false
+      }
+      keyLen++
+    }
+    while (valueStart < limit) {
+      char c = text.charAt(valueStart)
+      if (c != ' ' && c != '\t' && c != '\f') {
+        if (!hasSep && (c == '=' || c == ':')) {
+          hasSep = true
+        } else {
+          break
+        }
+      }
+      valueStart++
+    }
+    put(loadConvert(text, 0, keyLen), loadConvert(text, valueStart, limit - valueStart))
+  }
+
+  private static String loadConvert(String s, int off, int len) {
+    StringBuilder out = new StringBuilder()
+    int end = off + len
+    int i = off
+    while (i < end) {
+      char c = s.charAt(i)
+      i++
+      if (c == '\\' && i < end) {
+        c = s.charAt(i)
+        i++
+        if (c == 'u') {
+          out.append(readHex4(s, i))
+          i = i + 4
+        } else if (c == 't') {
+          out.append('\t')
+        } else if (c == 'r') {
+          out.append('\r')
+        } else if (c == 'n') {
+          out.append('\n')
+        } else if (c == 'f') {
+          out.append('\f')
+        } else {
+          out.append(s.substring(i - 1, i))
+        }
+      } else {
+        out.append(s.substring(i - 1, i))
+      }
+    }
+    return out.toString()
+  }
+
+  private static char readHex4(String s, int at) {
+    int value = 0
+    for (int i = 0 : i < 4 : i++) {
+      char c = at + i < s.length() ? s.charAt(at + i) : '0'
+      int digit
+      if (c >= '0' && c <= '9') {
+        digit = c - '0'
+      } else if (c >= 'a' && c <= 'f') {
+        digit = c - 'a' + 10
+      } else if (c >= 'A' && c <= 'F') {
+        digit = c - 'A' + 10
+      } else {
+        throw new IllegalArgumentException("Malformed \\uxxxx encoding.")
+      }
+      value = (value << 4) + digit
+    }
+    return (char) value
+  }
+
+  // ----------------------------------------------------------------- store
+
+  /* Java writes this to a Writer and this writes it to a path, which is the
+     one shape change: the library has no Writer, and a file is where the
+     properties of a program live. The escaping is Java's saveConvert with
+     Unicode escaped, so the file is ASCII and load reads it back unchanged. */
+  public void store(Path path, String comments) {
+    StringBuilder sb = new StringBuilder()
+    if (comments != null) {
+      sb.append(commentsLine(comments))
+    }
+    sb.append("#" + dateLine())
+    sb.append("\n")
+    for (Map.Entry<Object, Object> e : entrySet()) {
+      String key = (String) e.getKey()
+      String value = (String) e.getValue()
+      sb.append(saveConvert(key, true) + "=" + saveConvert(value, false))
+      sb.append("\n")
+    }
+    Files.writeString(path, sb.toString())
+  }
+
+  /* Each line of the comment gets its own #, as Java does; embedded
+     non-Latin-1 characters are escaped like everything else store writes. */
+  private static String commentsLine(String comments) {
+    StringBuilder sb = new StringBuilder()
+    int start = 0
+    while (start <= comments.length()) {
+      int end = start
+      while (end < comments.length() && comments.charAt(end) != '\n' && comments.charAt(end) != '\r') {
+        end++
+      }
+      sb.append("#" + saveConvert(comments.substring(start, end), false) + "\n")
+      if (end >= comments.length()) {
+        break
+      }
+      if (comments.charAt(end) == '\r' && end + 1 < comments.length() && comments.charAt(end + 1) == '\n') {
+        end++
+      }
+      start = end + 1
+    }
+    return sb.toString()
+  }
+
+  /* The clock, in ISO form. This is the ONE line store writes that is not
+     reproducible, which is why a test that compares stored bytes filters the
+     comment lines out. */
+  private static String dateLine() {
+    Instant now = Instant.ofEpochMilli(System.currentTimeMillis())
+    return now.toString()
+  }
+
+  private static String saveConvert(String s, boolean escapeSpace) {
+    StringBuilder out = new StringBuilder()
+    for (int i = 0 : i < s.length() : i++) {
+      char c = s.charAt(i)
+      if (c > 61 && c < 127) {
+        if (c == '\\') {
+          out.append('\\')
+        }
+        out.append(c)
+        continue
+      }
+      if (c == ' ') {
+        if (i == 0 || escapeSpace) {
+          out.append('\\')
+        }
+        out.append(' ')
+      } else if (c == '\t') {
+        out.append("\\t")
+      } else if (c == '\n') {
+        out.append("\\n")
+      } else if (c == '\r') {
+        out.append("\\r")
+      } else if (c == '\f') {
+        out.append("\\f")
+      } else if (c == '=' || c == ':' || c == '#' || c == '!') {
+        out.append('\\')
+        out.append(c)
+      } else if (c < 0x0020) {
+        out.append("\\u" + hex4(c))
+      } else if (c > 0x007e) {
+        /* Java escapes the CHARACTER; a Teyru string holds the UTF-8 bytes of
+           that character, so the bytes are decoded back to the code point
+           first -- escaping them one byte at a time would write the encoding
+           of the encoding, which is what store used to do to any non-ASCII
+           value. A code point outside the BMP is written as the pair of
+           surrogates Java holds it as. */
+        int cp = utf8CodePoint(s, i)
+        i = i + utf8Length(c) - 1
+        if (cp > 0xFFFF) {
+          int v = cp - 0x10000
+          out.append("\\u" + hex4((char) (0xD800 + (v >> 10))))
+          out.append("\\u" + hex4((char) (0xDC00 + (v & 0x3FF))))
+        } else {
+          out.append("\\u" + hex4((char) cp))
+        }
+      } else {
+        out.append(c)
+      }
+    }
+    return out.toString()
+  }
+
+  /* How many bytes the UTF-8 sequence starting with `lead` occupies. A byte
+     that cannot start one counts as itself. */
+  private static int utf8Length(char lead) {
+    if (lead >= 0xC0 && lead < 0xE0) {
+      return 2
+    }
+    if (lead >= 0xE0 && lead < 0xF0) {
+      return 3
+    }
+    if (lead >= 0xF0 && lead < 0xF8) {
+      return 4
+    }
+    return 1
+  }
+
+  /* The code point the UTF-8 bytes starting at `at` stand for. Text that is
+     not valid UTF-8 reads as the bytes it is made of, so it is escaped a byte
+     at a time instead of being swallowed. */
+  private static int utf8CodePoint(String s, int at) {
+    char b = s.charAt(at)
+    if (b < 0x80) {
+      return b
+    }
+    if (b >= 0xC0 && b < 0xE0) {
+      return ((b & 0x1F) << 6) | utf8Tail(s, at + 1)
+    }
+    if (b >= 0xE0 && b < 0xF0) {
+      return ((b & 0x0F) << 12) | (utf8Tail(s, at + 1) << 6) | utf8Tail(s, at + 2)
+    }
+    if (b >= 0xF0 && b < 0xF8) {
+      return ((b & 0x07) << 18) | (utf8Tail(s, at + 1) << 12) |
+        (utf8Tail(s, at + 2) << 6) | utf8Tail(s, at + 3)
+    }
+    return b
+  }
+
+  private static int utf8Tail(String s, int at) {
+    if (at >= s.length()) {
+      return 0
+    }
+    return s.charAt(at) & 0x3F
+  }
+
+  /* Java's own hex digits, and uppercase: store writes é, not é,
+     and a file compared against one javac wrote has to agree. */
+  private static String hex4(char c) {
+    String digits = "0123456789ABCDEF"
+    StringBuilder sb = new StringBuilder()
+    for (int shift = 12 : shift >= 0 : shift = shift - 4) {
+      sb.append(digits.charAt((c >> shift) & 0xF))
+    }
+    return sb.toString()
+  }
+
+  /* Java's list: a header, then key=value with the value cut to 40 characters.
+     The order is the table's, which is not specified on either side.
+
+     Java collects the entries into a fresh table before it prints anything,
+     and every key is cast to String during that collection -- so a table
+     holding a non-String key throws ClassCastException with nothing printed
+     but the header, and the printing never happens. Doing the cast while
+     printing would print the String entries first and throw in the middle. */
+  public void list(PrintStream out) {
+    out.println("-- listing properties --")
+    Map<Object, Object> h = new HashMap<Object, Object>()
+    for (Map.Entry<Object, Object> e : entrySet()) {
+      String key = (String) e.getKey()
+      h.put(key, e.getValue())
+    }
+    for (Map.Entry<Object, Object> e : h.entrySet()) {
+      String key = (String) e.getKey()
+      String value = (String) e.getValue()
+      if (value.length() > 40) {
+        value = value.substring(0, 37) + "..."
+      }
+      out.println(key + "=" + value)
+    }
+  }
+}
+
+/* The parts of java.util.Arrays that 14_util_arrays.teyru does not carry: the
+ * RANGE forms of fill, sort and binarySearch, and deepHashCode.
+ *
+ * They are here rather than there for a reason that is not a preference: that
+ * file's Arrays class is closed (its own comment says the range forms are
+ * absent, "the JDK's own range checking, AIOOBE and IAE, for a shape the
+ * whole-array forms already cover"), and Teyru has no partial classes, so a
+ * method cannot be added to Arrays from another file. A second class is the
+ * only way to offer them at all, and this one keeps the JDK's names and the
+ * JDK's argument order so that a method moved across is moved unchanged.
+ *
+ * The range forms delegate: a range of an array is copied out, handed to the
+ * whole-array method in Arrays, and (for the sorts) copied back. That is one
+ * allocation per call the JDK does not make; what it buys is that a range is
+ * sorted by exactly the comparison the whole array would have been sorted by,
+ * including the Comparator overload and the stability that goes with it. fill
+ * is written out as a loop because filling does not compare anything.
+ *
+ * deepHashCode has the same shape deepEquals has in that file, and for the
+ * same reason: Java decides "is this element an array" from the runtime
+ * component type, and a Teyru array has one class for all element types, so
+ * `x instanceof Object[]` cannot tell an int[] from an Object[] -- reading one
+ * as the other is memory corruption, not a wrong answer. The object form
+ * below therefore recurses into elements it can read as Object[], and the
+ * per-primitive 2-D overloads Java does not have carry the nested primitive
+ * cases the object form must not be handed. */
+class ArrayOps {
+  private ArrayOps() {
+  }
+
+  /* Java's rangeCheck, in Java's order and with Java's messages: the empty
+     range and the full range both pass, from past to is an IllegalArgumentException,
+     and an out-of-bounds end is an ArrayIndexOutOfBoundsException naming the
+     index -- from first, then to, which is the order the JDK tests them in. */
+  private static void rangeCheck(int arrayLength, int fromIndex, int toIndex) {
+    if (fromIndex > toIndex) {
+      throw new IllegalArgumentException("fromIndex(" + fromIndex + ") > toIndex(" + toIndex + ")")
+    }
+    if (fromIndex < 0) {
+      throw new ArrayIndexOutOfBoundsException("Array index out of range: " + fromIndex)
+    }
+    if (toIndex > arrayLength) {
+      throw new ArrayIndexOutOfBoundsException("Array index out of range: " + toIndex)
+    }
+  }
+
+  // ------------------------------------------------------------------ fill
+
+  public static void fill(int[] a, int fromIndex, int toIndex, int val) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    for (int i = fromIndex : i < toIndex : i++) {
+      a[i] = val
+    }
+  }
+
+  public static void fill(long[] a, int fromIndex, int toIndex, long val) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    for (int i = fromIndex : i < toIndex : i++) {
+      a[i] = val
+    }
+  }
+
+  public static void fill(short[] a, int fromIndex, int toIndex, short val) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    for (int i = fromIndex : i < toIndex : i++) {
+      a[i] = val
+    }
+  }
+
+  public static void fill(char[] a, int fromIndex, int toIndex, char val) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    for (int i = fromIndex : i < toIndex : i++) {
+      a[i] = val
+    }
+  }
+
+  public static void fill(byte[] a, int fromIndex, int toIndex, byte val) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    for (int i = fromIndex : i < toIndex : i++) {
+      a[i] = val
+    }
+  }
+
+  public static void fill(boolean[] a, int fromIndex, int toIndex, boolean val) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    for (int i = fromIndex : i < toIndex : i++) {
+      a[i] = val
+    }
+  }
+
+  public static void fill(float[] a, int fromIndex, int toIndex, float val) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    for (int i = fromIndex : i < toIndex : i++) {
+      a[i] = val
+    }
+  }
+
+  public static void fill(double[] a, int fromIndex, int toIndex, double val) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    for (int i = fromIndex : i < toIndex : i++) {
+      a[i] = val
+    }
+  }
+
+  public static void fill(Object[] a, int fromIndex, int toIndex, Object val) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    for (int i = fromIndex : i < toIndex : i++) {
+      a[i] = val
+    }
+  }
+
+  // ----------------------------------------------------------------- sorts
+
+  public static void sort(int[] a, int fromIndex, int toIndex) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    int[] part = Arrays.copyOfRange(a, fromIndex, toIndex)
+    Arrays.sort(part)
+    for (int i = 0 : i < part.length : i++) {
+      a[fromIndex + i] = part[i]
+    }
+  }
+
+  public static void sort(long[] a, int fromIndex, int toIndex) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    long[] part = Arrays.copyOfRange(a, fromIndex, toIndex)
+    Arrays.sort(part)
+    for (int i = 0 : i < part.length : i++) {
+      a[fromIndex + i] = part[i]
+    }
+  }
+
+  public static void sort(short[] a, int fromIndex, int toIndex) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    short[] part = Arrays.copyOfRange(a, fromIndex, toIndex)
+    Arrays.sort(part)
+    for (int i = 0 : i < part.length : i++) {
+      a[fromIndex + i] = part[i]
+    }
+  }
+
+  public static void sort(char[] a, int fromIndex, int toIndex) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    char[] part = Arrays.copyOfRange(a, fromIndex, toIndex)
+    Arrays.sort(part)
+    for (int i = 0 : i < part.length : i++) {
+      a[fromIndex + i] = part[i]
+    }
+  }
+
+  public static void sort(byte[] a, int fromIndex, int toIndex) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    byte[] part = Arrays.copyOfRange(a, fromIndex, toIndex)
+    Arrays.sort(part)
+    for (int i = 0 : i < part.length : i++) {
+      a[fromIndex + i] = part[i]
+    }
+  }
+
+  public static void sort(float[] a, int fromIndex, int toIndex) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    float[] part = Arrays.copyOfRange(a, fromIndex, toIndex)
+    Arrays.sort(part)
+    for (int i = 0 : i < part.length : i++) {
+      a[fromIndex + i] = part[i]
+    }
+  }
+
+  public static void sort(double[] a, int fromIndex, int toIndex) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    double[] part = Arrays.copyOfRange(a, fromIndex, toIndex)
+    Arrays.sort(part)
+    for (int i = 0 : i < part.length : i++) {
+      a[fromIndex + i] = part[i]
+    }
+  }
+
+  public static void sort(Object[] a, int fromIndex, int toIndex) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    Object[] part = Arrays.copyOfRange(a, fromIndex, toIndex)
+    Arrays.sort(part)
+    for (int i = 0 : i < part.length : i++) {
+      a[fromIndex + i] = part[i]
+    }
+  }
+
+  public static <T> void sort(T[] a, int fromIndex, int toIndex, Comparator<? super T> c) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    T[] part = Arrays.copyOfRange(a, fromIndex, toIndex)
+    Arrays.sort(part, c)
+    for (int i = 0 : i < part.length : i++) {
+      a[fromIndex + i] = part[i]
+    }
+  }
+
+  // --------------------------------------------------------- binary searches
+
+  /* A search of a range is a search of the copy, with the answer mapped back:
+     a hit moves by fromIndex, and a miss is the insertion point relative to
+     the range, which is the copy's answer shifted by fromIndex as well --
+     -(fromIndex + i) - 1 and (copyAnswer - fromIndex) are the same number. */
+  public static int binarySearch(int[] a, int fromIndex, int toIndex, int key) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    int r = Arrays.binarySearch(Arrays.copyOfRange(a, fromIndex, toIndex), key)
+    return r < 0 ? r - fromIndex : r + fromIndex
+  }
+
+  public static int binarySearch(long[] a, int fromIndex, int toIndex, long key) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    int r = Arrays.binarySearch(Arrays.copyOfRange(a, fromIndex, toIndex), key)
+    return r < 0 ? r - fromIndex : r + fromIndex
+  }
+
+  public static int binarySearch(short[] a, int fromIndex, int toIndex, short key) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    int r = Arrays.binarySearch(Arrays.copyOfRange(a, fromIndex, toIndex), key)
+    return r < 0 ? r - fromIndex : r + fromIndex
+  }
+
+  public static int binarySearch(char[] a, int fromIndex, int toIndex, char key) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    int r = Arrays.binarySearch(Arrays.copyOfRange(a, fromIndex, toIndex), key)
+    return r < 0 ? r - fromIndex : r + fromIndex
+  }
+
+  public static int binarySearch(byte[] a, int fromIndex, int toIndex, byte key) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    int r = Arrays.binarySearch(Arrays.copyOfRange(a, fromIndex, toIndex), key)
+    return r < 0 ? r - fromIndex : r + fromIndex
+  }
+
+  public static int binarySearch(float[] a, int fromIndex, int toIndex, float key) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    int r = Arrays.binarySearch(Arrays.copyOfRange(a, fromIndex, toIndex), key)
+    return r < 0 ? r - fromIndex : r + fromIndex
+  }
+
+  public static int binarySearch(double[] a, int fromIndex, int toIndex, double key) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    int r = Arrays.binarySearch(Arrays.copyOfRange(a, fromIndex, toIndex), key)
+    return r < 0 ? r - fromIndex : r + fromIndex
+  }
+
+  public static int binarySearch(Object[] a, int fromIndex, int toIndex, Object key) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    int r = Arrays.binarySearch(Arrays.copyOfRange(a, fromIndex, toIndex), key)
+    return r < 0 ? r - fromIndex : r + fromIndex
+  }
+
+  public static <T> int binarySearch(T[] a, int fromIndex, int toIndex, T key, Comparator<? super T> c) {
+    rangeCheck(a.length, fromIndex, toIndex)
+    int r = Arrays.binarySearch(Arrays.copyOfRange(a, fromIndex, toIndex), key, c)
+    return r < 0 ? r - fromIndex : r + fromIndex
+  }
+
+  // ------------------------------------------------------------ deepHashCode
+
+  public static int deepHashCode(Object[] a) {
+    if (a == null) {
+      return 0
+    }
+    int h = 1
+    for (int i = 0 : i < a.length : i++) {
+      Object e = a[i]
+      int eh
+      if (e == null) {
+        eh = 0
+      } else if (e instanceof Object[]) {
+        eh = deepHashCode((Object[]) e)
+      } else {
+        eh = e.hashCode()
+      }
+      h = 31 * h + eh
+    }
+    return h
+  }
+
+  public static int deepHashCode(int[][] a) {
+    if (a == null) {
+      return 0
+    }
+    int h = 1
+    for (int i = 0 : i < a.length : i++) {
+      h = 31 * h + Arrays.hashCode(a[i])
+    }
+    return h
+  }
+
+  public static int deepHashCode(long[][] a) {
+    if (a == null) {
+      return 0
+    }
+    int h = 1
+    for (int i = 0 : i < a.length : i++) {
+      h = 31 * h + Arrays.hashCode(a[i])
+    }
+    return h
+  }
+
+  public static int deepHashCode(short[][] a) {
+    if (a == null) {
+      return 0
+    }
+    int h = 1
+    for (int i = 0 : i < a.length : i++) {
+      h = 31 * h + Arrays.hashCode(a[i])
+    }
+    return h
+  }
+
+  public static int deepHashCode(char[][] a) {
+    if (a == null) {
+      return 0
+    }
+    int h = 1
+    for (int i = 0 : i < a.length : i++) {
+      h = 31 * h + Arrays.hashCode(a[i])
+    }
+    return h
+  }
+
+  public static int deepHashCode(byte[][] a) {
+    if (a == null) {
+      return 0
+    }
+    int h = 1
+    for (int i = 0 : i < a.length : i++) {
+      h = 31 * h + Arrays.hashCode(a[i])
+    }
+    return h
+  }
+
+  public static int deepHashCode(boolean[][] a) {
+    if (a == null) {
+      return 0
+    }
+    int h = 1
+    for (int i = 0 : i < a.length : i++) {
+      h = 31 * h + Arrays.hashCode(a[i])
+    }
+    return h
+  }
+
+  public static int deepHashCode(float[][] a) {
+    if (a == null) {
+      return 0
+    }
+    int h = 1
+    for (int i = 0 : i < a.length : i++) {
+      h = 31 * h + Arrays.hashCode(a[i])
+    }
+    return h
+  }
+
+  public static int deepHashCode(double[][] a) {
+    if (a == null) {
+      return 0
+    }
+    int h = 1
+    for (int i = 0 : i < a.length : i++) {
+      h = 31 * h + Arrays.hashCode(a[i])
+    }
+    return h
+  }
+}
