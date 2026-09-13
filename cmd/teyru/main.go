@@ -34,9 +34,17 @@ flags:
 `
 
 func main() {
+	os.Exit(run())
+}
+
+// run does the work and returns the exit code. It is a function rather than the
+// body of main so that a deferred cleanup actually runs: os.Exit skips deferred
+// calls, and `teyru run` used to leave its compiled program and generated C
+// behind in the temporary directory on every invocation.
+func run() int {
 	if len(os.Args) < 2 {
 		fmt.Print(usage)
-		os.Exit(2)
+		return 2
 	}
 	cmd := os.Args[1]
 	args := os.Args[2:]
@@ -101,15 +109,15 @@ func main() {
 	switch cmd {
 	case "version", "--version", "-V":
 		fmt.Println(driver.Version())
-		return
+		return 0
 	case "help", "--help", "-h":
 		fmt.Print(usage)
-		return
+		return 0
 	case "build", "run", "emit", "emit-llvm":
 	default:
 		fmt.Fprintf(os.Stderr, "teyru: unknown command %q\n", cmd)
 		fmt.Print(usage)
-		os.Exit(2)
+		return 2
 	}
 
 	if cmd == "run" {
@@ -166,10 +174,11 @@ func main() {
 		if err != nil {
 			fail(err)
 		}
-		os.Exit(code)
+		return code
 	default:
 		fmt.Println(res.Exe)
 	}
+	return 0
 }
 
 func fail(err error) {
