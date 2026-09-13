@@ -1,0 +1,22 @@
+// A call on a null reference throws NullPointerException, as in Java. The
+// vtable and itable lookups read the receiver, so without a test the program
+// died with SIGSEGV instead. javac prints the same stdout and exits 1.
+interface Greeter {
+  String greet()
+}
+
+class Cell {
+  public String name = "cell"
+
+  public String get() {
+    return name
+  }
+}
+
+class Main {
+  public static void main(String[] args) {
+    Cell c = null
+    System.out.println("one")
+    System.out.println(c.get())
+  }
+}

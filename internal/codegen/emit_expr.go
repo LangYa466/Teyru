@@ -1201,16 +1201,28 @@ func (e *Emitter) virtCallTemp(recv ast.Expr, m *ast.Method, args []ast.Expr) st
 }
 
 // virtCall dispatches through the vtable or, for interface receivers, the itable.
+//
+// Both lookups read the receiver, so a null one has to be answered the way Java
+// answers it: a NullPointerException, not a segmentation fault. The receiver is
+// a variable or a temporary by the time it gets here (virtCallTemp binds
+// anything else), so the test evaluates nothing twice and costs one branch,
+// which the conditional operator keeps out of the call itself.
 func (e *Emitter) virtCall(m *ast.Method, recvT, recv string, args []ast.Expr) string {
 	if recvT == "" {
 		recvT = "void*"
 	}
+	var call string
 	if m.Selector >= 0 {
 		fn := "((void*)ty_itab((tyobj*)" + recv + ", " + fmt.Sprint(m.Selector) + "))"
-		return e.indirect(m, fn, "void*", recv, args)
+		call = e.indirect(m, fn, "void*", recv, args)
+	} else {
+		fn := "((" + recv + ")->obj.cls->vtable[" + fmt.Sprint(m.VIndex) + "])"
+		call = e.indirect(m, fn, recvT, recv, args)
 	}
-	fn := "((" + recv + ")->obj.cls->vtable[" + fmt.Sprint(m.VIndex) + "])"
-	return e.indirect(m, fn, recvT, recv, args)
+	if ret := e.ctype(m.Result); ret != "void" {
+		return "((" + recv + ") ? (" + call + ") : (" + ret + ")((intptr_t)ty_npe()))"
+	}
+	return "((" + recv + ") ? (void)(" + call + ") : (void)ty_npe())"
 }
 
 // indirect builds a call through a runtime-resolved function pointer.
