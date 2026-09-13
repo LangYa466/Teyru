@@ -6,7 +6,7 @@
 
 Teyru 的语法对 Java 开发者非常熟悉（类、接口、泛型、lambda、异常、record、enum、annotation），
 但去掉了分号、加入了原生 property，并且以**原生机器码**运行：编译器把整个程序降级为 C，
-再交给 clang/LLVM（或 gcc）编译成可执行文件。运行时只有约 1500 行 C，其中包含自己的垃圾回收器
+再交给 clang/LLVM（或 gcc）编译成可执行文件。运行时只有约 5000 行 C，其中包含自己的垃圾回收器
 （conservative mark-and-sweep）、字符串、数组与异常实现，没有任何虚拟机。
 
 ```
@@ -48,18 +48,19 @@ Teyru 源码 (.teyru)
 
 | 指标 | Teyru（原生） | Java（HotSpot） | 差距 |
 |---|---|---|---|
-| 启动 100 次总时间 | **0.064 s**（0.64 ms/次） | 1.98 s（19.8 ms/次） | **约 31 倍快** |
-| 可执行文件大小 | **34.8 KB** | JDK 安装约 346 MB | 约 10000 倍小 |
-| 峰值内存（hello） | **2.1 MB** | 49.8 MB | **约 24 倍省** |
-| `bench_fib` 递归 | **0.0057 s** | 0.0260 s | **4.6 倍快** |
-| `bench_loop` 循环与整数运算 | **0.0206 s** | 0.0426 s | **2.1 倍快** |
-| `bench_oop` 对象与虚调用 | **0.0045 s** | 0.0251 s | **5.6 倍快** |
-| `bench_string` 字符串处理 | **0.0134 s** | 0.0536 s | **4.0 倍快** |
-| `bench_alloc` 短命对象分配 | **0.0231 s** | 0.0296 s | **1.3 倍快** |
+| 启动 100 次总时间 | **0.065 s**（0.65 ms/次） | 2.02 s（20.2 ms/次） | **约 31 倍快** |
+| 可执行文件大小 | **392.6 KB** | JDK 安装约 346 MB | 约 903 倍小 |
+| 峰值内存（hello） | **2.2 MB** | 50.7 MB | **约 23 倍省** |
+| `bench_fib` 递归 | **0.0060 s** | 0.0269 s | **4.5 倍快** |
+| `bench_loop` 循环与整数运算 | **0.0209 s** | 0.0434 s | **2.1 倍快** |
+| `bench_oop` 对象与虚调用 | **0.0049 s** | 0.0254 s | **5.2 倍快** |
+| `bench_string` 字符串处理 | **0.0145 s** | 0.0544 s | **3.8 倍快** |
+| `bench_alloc` 短命对象分配 | **0.0276 s** | 0.0311 s | **1.1 倍快** |
 
 **为什么快：**
 
 1. **没有 JVM 启动成本。** 没有 class loading、没有 JIT 预热、没有 GC 线程启动。
+   适合 CLI 工具、短命进程、容器启动、serverless。
 2. **编译期能做完的事不留到运行期。** 泛型擦除、调用定址、字符串常量静态分配、
    `static final` 常量折叠、vtable 与接口表都由编译器填好。
 3. **没有字节码解释阶段。** clang/LLVM 直接优化整个程序（LTO 跨模块内联、
@@ -68,7 +69,7 @@ Teyru 源码 (.teyru)
    LLVM 随后把它的字段提升为寄存器、把整个对象消除——与 JVM 的 scalar replacement
    效果相同，`bench_alloc` 正是靠这一点赢过 HotSpot。
 5. **分配与边界检查都走行内快速路径。** `ty_alloc` 的指针碰撞分配在头文件内联，
-   数组访问只在必要时调用慢路径；GC 会回收完全空掉的 chunk。
+   数组访问只在必要时调用慢路径；GC 会回收完全空掉的 chunk，类初始化也只测一个旗标。
 6. **可预测的性能。** 没有 deopt、没有预热曲线、没有 GC 调参。
 
 **诚实的边界。** 逃逸分析只覆盖“不离开所在方法”的对象。会存进字段、数组、返回或
@@ -77,6 +78,11 @@ Teyru 源码 (.teyru)
 小；重现方式见 `sh scripts/bench.sh`，五支 benchmark 程序、启动 100 次、可执行文件大小
 与峰值内存都由这支脚本测量（大小那一列对照的 JDK 运行时是测量机器上安装的运行时，
 不由脚本测量）。
+
+大小那一行量的是 hello world，它是约 390 KB 而不是几十 KB：程序用到 `String`，`String`
+的 vtable 就必须收进它的每一个方法，于是 `matches` 把整支正则表达式引擎拉了进来、
+`Collection` 的默认方法把四个 Stream 也拉了进来。链接期优化删得掉到不了的类，
+删不掉「用到的类碰得到」的类。
 
 ---
 
@@ -227,6 +233,27 @@ class Main {
 }
 ```
 
+### Java 25 语法对照
+
+Teyru 以 Java SE 25 最终定案的语法为基准（不含预览功能），保留 Java 语义，
+只去掉分号并加入原生 property。已实现并有测试的 Java 25 项目：
+
+| JEP | 功能 | 状态 |
+|---|---|---|
+| 512 | 精简源文件、实例 `main`、隐式 `java.io.IO`（`println`／`print`／`readln`） | ✅ |
+| 511 | `import module java.base`（解析后忽略，运行期没有模块系统） | ✅ 解析 |
+| 513 | 弹性构造器本体（`super()` 之前可以写语句） | ✅ |
+| 440 | Record 模式（含嵌套解构、`instanceof` 版本） | ✅ |
+| 441 | switch 的模式匹配与 `when` 守卫 | ✅ |
+| 507 | 原生类型 pattern（`case int i`、`o instanceof int i`，精确转换语义） | ✅ |
+| 456 | 未命名变量与模式 `_` | ✅ |
+| 395 | record（含紧凑构造器） | ✅ |
+| 394 | `instanceof` 类型模式 | ✅ |
+| 409 | sealed 类（`sealed`／`permits`／`non-sealed`） | ✅ 解析 |
+| 378 | 文本块 | ✅ |
+| 361 | switch 表达式 | ✅ |
+| 286 | `var` 局部变量推断 | ✅ |
+
 ### Lombok 兼容层
 
 编译器内置 Lombok：注解在语义分析阶段展开成普通的 Teyru 成员，与手写代码走同一条
@@ -263,16 +290,6 @@ class Main {
 清除、`build()` 取得副本）、`@SuperBuilder`（覆盖整条继承链的字段）与
 `@Builder.ObtainVia`。
 
-### Java 25 语法对照
-
-Teyru 以 Java SE 25 最终定案的语法为基准（不含预览功能），保留 Java 语义，
-只去掉分号并加入原生 property：JEP 512 紧凑源文件与实例 `main`（含隐式
-`println`／`print`／`readln`）、JEP 511 模块导入、JEP 513 弹性构造器本体、
-JEP 440 record 模式、JEP 441 switch 模式与 `when` 守卫、JEP 456 未命名变量 `_`、
-JEP 507 原生类型 pattern（`case int i`、`o instanceof int i`，精确转换）、
-JEP 395 record、JEP 394 `instanceof` 模式、JEP 409 sealed 类（`sealed`／`permits`／
-`non-sealed`）、JEP 378 文本块、JEP 361 switch 表达式、JEP 286 `var`。
-
 ### 支持的语言特性
 
 | 类别 | 内容 |
@@ -295,7 +312,7 @@ JEP 395 record、JEP 394 `instanceof` 模式、JEP 409 sealed 类（`sealed`／`
 | 包 | 内容 |
 |---|---|
 | `java.lang` | `Object`、`Class`、`String`（`format`／`join`／`valueOf` 等）、`StringBuilder`、`Math`、`System`、`PrintStream`、八个包装类和 `Number`、`Throwable` 家族、`Enum`、`Record` |
-| `java.util` | `List`／`ArrayList`／`LinkedList`、`Set`／`HashSet`／`LinkedHashSet`／`TreeSet`、`Map`／`HashMap`／`LinkedHashMap`／`TreeMap`、`Deque`／`ArrayDeque`、`Arrays`、`Collections`、`Objects`、`Optional`、`StringJoiner` |
+| `java.util` | `List`／`ArrayList`／`LinkedList`、`Set`／`HashSet`／`LinkedHashSet`／`TreeSet`、`Map`／`HashMap`／`LinkedHashMap`／`TreeMap`、`Deque`／`ArrayDeque`、`Arrays`、`Collections`、`Objects`、`Optional`、`StringJoiner`、`Properties`、`Random`、`UUID`、`BitSet`、`StringTokenizer` |
 | `java.time` | `LocalDate`／`LocalTime`／`LocalDateTime`／`Instant`／`Duration`／`Period` |
 | `java.io` | `File`、`Path`／`Paths`、`Files` |
 | `java.util.regex` | `Pattern`／`Matcher` |
@@ -311,6 +328,7 @@ JEP 395 record、JEP 394 `instanceof` 模式、JEP 409 sealed 类（`sealed`／`
 ```teyru
 List<String> names = new ArrayList<String>()
 names.add("ada")
+names.add("grace")
 for (String n : names) {
   System.out.println(n)
 }
@@ -324,7 +342,7 @@ teyru get example.com/greeting@v0.1.0
 teyru build ./...
 ```
 
-没有反射、没有线程、没有 `Stream`、没有 `BigDecimal`、没有时区数据库——这些缺席都是刻意的，理由记在
+没有反射、没有线程（也没有 `java.util.concurrent`）、没有 `Scanner`、没有时区数据库——这些缺席都是刻意的，理由记在
 [docs/language.md](docs/language.md) §11 与 §13。
 
 需要自己的原生库时，声明 `native` 方法并用 C 实现：
@@ -358,7 +376,7 @@ teyru build --native impl.c program.teyru            # 一起编译
 
 | 路径 | 说明 |
 |---|---|
-| `cmd/teyru` | CLI 入口（`build`／`run`／`emit`／`emit-llvm`／`version`） |
+| `cmd/teyru` | CLI 入口（`build`／`run`／`emit`／`emit-llvm`／`get`／`mod`／`version`） |
 | `internal/driver` | 编译流程：串起前端与 C 后端、调用 C 编译器、处理 native 源文件与输出选项 |
 | `internal/source` | 文件、位置换算、诊断容器 |
 | `internal/lexer` | 词法分析；换行不产生 token，只在 token 上标记“前面有换行” |
@@ -407,11 +425,11 @@ Teyru 不是 Java 的子集，而是“Java 开发者一看就懂”的独立语
    没有 accessor 块的字段就是普通 Java 字段。
 6. **`val`**：推断类型的不可重绑定局部变量（不是深度不可变）。
 7. **没有 checked exception 检查**；`throws` 会被解析但不强制。
-8. **没有 `System.out.printf`、没有运行期反射、没有 annotation processor**。
+8. **没有运行期反射、没有 annotation processor**。
 9. **不是 bytecode 平台**：没有 `.class`、没有 `java.lang`、没有 JNI，
    目前也**无法**与既有 Java 库互通——这是刻意的取舍。
 
-完整清单见 [docs/language.md](docs/language.md)。
+完整清单见 [docs/language.md §12](docs/language.md)。
 
 ---
 
@@ -422,6 +440,9 @@ teyru build [flags] <files...>                 编译成原生可执行文件
 teyru run   [flags] <files...> [-- args...]    编译后直接运行
 teyru emit  [flags] <files...>                 打印生成的 C
 teyru emit-llvm [flags] <files...>             打印交给 LLVM 的 IR
+teyru get <module>@<version>                   获取模块到缓存并加入依赖
+teyru mod init <module-path>                   为新模块写出 teyru.mod
+teyru mod tidy                                 让 teyru.mod 与 teyru.sum 与源码一致
 teyru version                                  版本
 teyru help                                     帮助
 ```

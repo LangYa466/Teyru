@@ -7,7 +7,7 @@
 The syntax will feel familiar to Java developers (classes, interfaces, generics, lambdas,
 exceptions, records, enums, annotations), but Teyru drops semicolons, adds native
 properties, and runs as **native machine code**: the compiler lowers the whole program to
-C and hands it to clang/LLVM (or gcc). The runtime is about 1500 lines of C — a
+C and hands it to clang/LLVM (or gcc). The runtime is about 5000 lines of C — a
 conservative mark-and-sweep collector, strings, arrays and exceptions — with no virtual
 machine of any kind.
 
@@ -50,18 +50,19 @@ Temurin; produced by `RUNS=5 sh scripts/bench.sh`, best of 5 runs):
 
 | Metric | Teyru (native) | Java (HotSpot) | Difference |
 |---|---|---|---|
-| 100 startups | **0.064 s** (0.64 ms each) | 1.98 s (19.8 ms each) | **~31x faster** |
-| Executable size | **34.8 KB** | ~346 MB JDK installation | ~10000x smaller |
-| Peak RSS (hello) | **2.1 MB** | 49.8 MB | **~24x less** |
-| `bench_fib` recursion | **0.0057 s** | 0.0260 s | **4.6x faster** |
-| `bench_loop` loops and integer math | **0.0206 s** | 0.0426 s | **2.1x faster** |
-| `bench_oop` objects and virtual calls | **0.0045 s** | 0.0251 s | **5.6x faster** |
-| `bench_string` string handling | **0.0134 s** | 0.0536 s | **4.0x faster** |
-| `bench_alloc` short-lived allocation | **0.0231 s** | 0.0296 s | **1.3x faster** |
+| 100 startups | **0.065 s** (0.65 ms each) | 2.02 s (20.2 ms each) | **~31x faster** |
+| Executable size | **392.6 KB** | ~346 MB JDK installation | ~903x smaller |
+| Peak RSS (hello) | **2.2 MB** | 50.7 MB | **~23x less** |
+| `bench_fib` recursion | **0.0060 s** | 0.0269 s | **4.5x faster** |
+| `bench_loop` loops and integer math | **0.0209 s** | 0.0434 s | **2.1x faster** |
+| `bench_oop` objects and virtual calls | **0.0049 s** | 0.0254 s | **5.2x faster** |
+| `bench_string` string handling | **0.0145 s** | 0.0544 s | **3.8x faster** |
+| `bench_alloc` short-lived allocation | **0.0276 s** | 0.0311 s | **1.1x faster** |
 
 **Where the speed comes from:**
 
 1. **No JVM startup.** No class loading, no JIT warmup, no GC threads to spawn.
+   That suits CLI tools, short-lived processes, container startup and serverless.
 2. **Compile-time work stays at compile time.** Generics are erased, calls are
    addressed statically, string constants are allocated statically, `static final`
    constants are folded, and the compiler fills in the vtables and interface tables.
@@ -74,7 +75,8 @@ Temurin; produced by `RUNS=5 sh scripts/bench.sh`, best of 5 runs):
    replacement. That is what makes `bench_alloc` faster than HotSpot.
 5. **Allocation and bounds checks take an inlined fast path.** `ty_alloc` bumps a
    pointer inline in the header, array access only calls the slow path when it must,
-   and the collector releases chunks that are completely empty.
+   the collector releases chunks that are completely empty, and class initialisation
+   tests a single flag.
 6. **Predictable performance.** No deoptimisation, no warmup curve, no GC tuning.
 
 **The honest boundary.** Escape analysis only covers objects that stay inside the
@@ -86,6 +88,12 @@ small. Every number is reproducible with `sh scripts/bench.sh`, which measures t
 programs, the 100 startups, the executable size and the peak RSS; the JDK-runtime figure
 in the size row is the runtime installed on the measuring machine, which the script does
 not measure.
+
+The size row measures a hello world, and it is 390 KB rather than tens of KB: the program
+uses `String`, so `String`'s vtable has to carry every one of its methods, which pulls in
+the whole regular-expression engine through `matches` and all four streams through
+`Collection`'s default methods. Link-time optimisation removes what nothing can reach; it
+cannot remove what a class the program does use can reach.
 
 ---
 
@@ -318,7 +326,7 @@ and checked together with every program. Package names follow Java's, so
 | Package | Contents |
 |---|---|
 | `java.lang` | `Object`, `Class`, `String` (`format`/`join`/`valueOf`/…), `StringBuilder`, `Math`, `System`, `PrintStream`, the eight wrappers and `Number`, the `Throwable` family, `Enum`, `Record` |
-| `java.util` | `List`/`ArrayList`/`LinkedList`, `Set`/`HashSet`/`LinkedHashSet`/`TreeSet`, `Map`/`HashMap`/`LinkedHashMap`/`TreeMap`, `Deque`/`ArrayDeque`, `Arrays`, `Collections`, `Objects`, `Optional`, `StringJoiner` |
+| `java.util` | `List`/`ArrayList`/`LinkedList`, `Set`/`HashSet`/`LinkedHashSet`/`TreeSet`, `Map`/`HashMap`/`LinkedHashMap`/`TreeMap`, `Deque`/`ArrayDeque`, `Arrays`, `Collections`, `Objects`, `Optional`, `StringJoiner`, `Properties`, `Random`, `UUID`, `BitSet`, `StringTokenizer` |
 | `java.time` | `LocalDate`/`LocalTime`/`LocalDateTime`/`Instant`/`Duration`/`Period` |
 | `java.io` | `File`, `Path`/`Paths`, `Files` |
 | `java.util.regex` | `Pattern`/`Matcher` |
@@ -334,6 +342,7 @@ Collections are written in Teyru, so `for` works on them directly:
 ```teyru
 List<String> names = new ArrayList<String>()
 names.add("ada")
+names.add("grace")
 for (String n : names) {
   System.out.println(n)
 }
@@ -348,8 +357,8 @@ teyru get example.com/greeting@v0.1.0
 teyru build ./...
 ```
 
-There is no reflection, no threading, no `Stream`, no `BigDecimal` and no time
-zone database. Each absence is deliberate and argued for in
+There is no reflection, no threading (and no `java.util.concurrent`), no `Scanner`
+and no time zone database. Each absence is deliberate and argued for in
 [docs/language.md](docs/language.md) §11 and §13.
 
 For your own native library, declare a `native` method and implement it in C:
@@ -386,7 +395,7 @@ See [`docs/native.md`](docs/native.md).
 
 | Path | Purpose |
 |---|---|
-| `cmd/teyru` | CLI entry point (`build`/`run`/`emit`/`emit-llvm`/`version`) |
+| `cmd/teyru` | CLI entry point (`build`/`run`/`emit`/`emit-llvm`/`get`/`mod`/`version`) |
 | `internal/driver` | Compile pipeline: wires the front end to the C back end, runs the C compiler, handles native sources and output options |
 | `internal/source` | Files, position mapping, diagnostics |
 | `internal/lexer` | Tokeniser; newlines are not tokens, each token carries a "newline before" flag |
@@ -442,11 +451,11 @@ familiar to Java developers. The main differences:
    Java field.
 6. **`val`** declares an inferred, non-reassignable local (not deep immutability).
 7. **No checked exception checking**; `throws` is parsed but not enforced.
-8. **No `System.out.printf`, no runtime reflection, no annotation processors.**
+8. **No runtime reflection, no annotation processors.**
 9. **Not a bytecode platform**: no `.class` files, no `java.lang`, no JNI, and no
    interoperability with existing Java libraries — a deliberate trade-off.
 
-The full list is in [docs/language.md](docs/language.md).
+The full list is in [docs/language.md](docs/language.md) §12.
 
 ---
 
@@ -457,6 +466,9 @@ teyru build [flags] <files...>                 compile to a native executable
 teyru run   [flags] <files...> [-- args...]    compile and run
 teyru emit  [flags] <files...>                 print the generated C
 teyru emit-llvm [flags] <files...>             print the LLVM IR
+teyru get <module>@<version>                   fetch a module into the cache and require it
+teyru mod init <module-path>                   write teyru.mod for a new module
+teyru mod tidy                                 make teyru.mod and teyru.sum match the sources
 teyru version                                  print the version
 teyru help                                     print usage
 ```

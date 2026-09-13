@@ -7,7 +7,7 @@
 文法は Java 開発者にとって見慣れたものです（クラス、インターフェース、ジェネリクス、
 ラムダ、例外、record、enum、annotation）。一方でセミコロンを廃止し、ネイティブ
 プロパティを追加し、**ネイティブ機械語**として動作します。コンパイラはプログラム全体を
-C に落とし、clang/LLVM（または gcc）が実行ファイルにします。ランタイムは約 1500 行の C で、
+C に落とし、clang/LLVM（または gcc）が実行ファイルにします。ランタイムは約 5000 行の C で、
 保守的マークアンドスイープ GC、文字列、配列、例外を自前で実装しており、仮想マシンは
 一切ありません。
 
@@ -50,18 +50,19 @@ Temurin。`RUNS=5 sh scripts/bench.sh` の出力、5 回の最良値）：
 
 | 指標 | Teyru（ネイティブ） | Java（HotSpot） | 差 |
 |---|---|---|---|
-| 起動 100 回の合計 | **0.064 s**（1 回 0.64 ms） | 1.98 s（1 回 19.8 ms） | **約 31 倍速い** |
-| 実行ファイルの大きさ | **34.8 KB** | JDK のインストール約 346 MB | 約 10000 倍小さい |
-| ピークメモリ（hello） | **2.1 MB** | 49.8 MB | **約 24 倍少ない** |
-| `bench_fib` 再帰 | **0.0057 s** | 0.0260 s | **4.6 倍速い** |
-| `bench_loop` ループと整数演算 | **0.0206 s** | 0.0426 s | **2.1 倍速い** |
-| `bench_oop` オブジェクトと仮想呼び出し | **0.0045 s** | 0.0251 s | **5.6 倍速い** |
-| `bench_string` 文字列処理 | **0.0134 s** | 0.0536 s | **4.0 倍速い** |
-| `bench_alloc` 短命オブジェクトの確保 | **0.0231 s** | 0.0296 s | **1.3 倍速い** |
+| 起動 100 回の合計 | **0.065 s**（1 回 0.65 ms） | 2.02 s（1 回 20.2 ms） | **約 31 倍速い** |
+| 実行ファイルの大きさ | **392.6 KB** | JDK のインストール約 346 MB | 約 903 倍小さい |
+| ピークメモリ（hello） | **2.2 MB** | 50.7 MB | **約 23 倍少ない** |
+| `bench_fib` 再帰 | **0.0060 s** | 0.0269 s | **4.5 倍速い** |
+| `bench_loop` ループと整数演算 | **0.0209 s** | 0.0434 s | **2.1 倍速い** |
+| `bench_oop` オブジェクトと仮想呼び出し | **0.0049 s** | 0.0254 s | **5.2 倍速い** |
+| `bench_string` 文字列処理 | **0.0145 s** | 0.0544 s | **3.8 倍速い** |
+| `bench_alloc` 短命オブジェクトの確保 | **0.0276 s** | 0.0311 s | **1.1 倍速い** |
 
 **速さの理由：**
 
 1. **JVM の起動コストがない。** クラスロードも JIT のウォームアップも GC スレッドもない。
+   CLI ツール、短命のプロセス、コンテナの起動、serverless に向きます。
 2. **コンパイル時にできることは実行時に残さない。** ジェネリクスの消去、呼び出しの静的
    解決、文字列定数の静的配置、`static final` 定数の畳み込み、vtable とインターフェース
    テーブルの確定をすべてコンパイラが行う。
@@ -73,7 +74,7 @@ Temurin。`RUNS=5 sh scripts/bench.sh` の出力、5 回の最良値）：
    HotSpot を上回る理由です。
 5. **確保と境界チェックはインラインの高速経路を通る。** `ty_alloc` はヘッダー内で
    ポインタを進めるだけ、配列アクセスは必要なときだけ低速経路を呼び、GC は完全に
-   空になった chunk を解放する。
+   空になった chunk を解放し、クラス初期化も旗を一つ見るだけです。
 6. **予測可能な性能。** 脱最適化もウォームアップ曲線も GC チューニングもない。
 
 **正直な限界。** エスケープ解析が扱うのは「生成したメソッドから出ない」オブジェクト
@@ -83,6 +84,12 @@ HotSpot の世代別の仮定が勝ります。上の数値はすべてプロセ
 小さい。再現方法は `sh scripts/bench.sh` で、5 本のプログラム、起動 100 回、実行ファイルの
 大きさ、ピークメモリはこのスクリプトが計測します（大きさの行の JDK ランタイムは計測
 マシンにインストールされているランタイムで、スクリプトは計測しません）。
+
+大きさの行が測っているのは hello world で、数十 KB ではなく約 390 KB あるのは、
+プログラムが `String` を使う以上 `String` の vtable がその全メソッドを抱えなければ
+ならず、`matches` が正規表現エンジン全体を、`Collection` のデフォルトメソッドが
+4 つの Stream を引き込むためです。リンク時最適化が消せるのは到達できないものだけで、
+「使っているクラスから到達できる」ものは消せません。
 
 ---
 
@@ -234,6 +241,28 @@ class Main {
 }
 ```
 
+### Java 25 構文への対応
+
+Teyru は Java SE 25 の確定した構文（プレビューを除く）を基準にしており、Java の意味を
+保ったまま、セミコロンを廃してネイティブプロパティを加えています。実装済みでテストの
+ある Java 25 の項目：
+
+| JEP | 機能 | 状態 |
+|---|---|---|
+| 512 | コンパクトソースファイル、インスタンス `main`、暗黙の `java.io.IO`（`println`／`print`／`readln`） | ✅ |
+| 511 | `import module java.base`（解析して無視。実行時にモジュールシステムはない） | ✅ 解析 |
+| 513 | 柔軟なコンストラクタ本体（`super()` の前に文を書ける） | ✅ |
+| 440 | レコードパターン（ネストした分解、`instanceof` 版も） | ✅ |
+| 441 | switch のパターンマッチと `when` ガード | ✅ |
+| 507 | プリミティブ型パターン（`case int i`、`o instanceof int i`、正確な変換） | ✅ |
+| 456 | 未使用変数とパターン `_` | ✅ |
+| 395 | record（コンパクトコンストラクタを含む） | ✅ |
+| 394 | `instanceof` の型パターン | ✅ |
+| 409 | sealed クラス（`sealed`／`permits`／`non-sealed`） | ✅ 解析 |
+| 378 | テキストブロック | ✅ |
+| 361 | switch 式 | ✅ |
+| 286 | `var` によるローカル変数の型推論 | ✅ |
+
 ### Lombok 互換レイヤー
 
 コンパイラに Lombok を内蔵しています。注釈は意味解析の段階で通常の Teyru メンバーに
@@ -271,17 +300,6 @@ class Main {
 まとめて追加、クリア、`build()` がコピーを受け取る）、`@SuperBuilder`（継承チェーン
 全体のフィールド）、`@Builder.ObtainVia` も含みます）。
 
-### Java 25 構文への対応
-
-Teyru は Java SE 25 の確定した構文（プレビューを除く）を基準にしています：
-JEP 512 コンパクトソースファイルとインスタンス `main`（暗黙の `println`／`print`／
-`readln` を含む）、JEP 511 モジュールインポート、JEP 513 柔軟なコンストラクタ本体、
-JEP 440 レコードパターン、JEP 441 switch のパターンと `when` ガード、
-JEP 507 プリミティブ型パターン（`case int i`、`o instanceof int i`、正確な変換）、
-JEP 456 未使用変数 `_`、JEP 395 record、JEP 394 `instanceof` パターン、
-JEP 409 sealed クラス（`sealed`／`permits`／`non-sealed`）、
-JEP 378 テキストブロック、JEP 361 switch 式、JEP 286 `var`。
-
 ### 対応している言語機能
 
 | 区分 | 内容 |
@@ -305,7 +323,7 @@ JEP 378 テキストブロック、JEP 361 switch 式、JEP 286 `var`。
 | パッケージ | 内容 |
 |---|---|
 | `java.lang` | `Object`、`Class`、`String`（`format`／`join`／`valueOf` など）、`StringBuilder`、`Math`、`System`、`PrintStream`、八つのラッパーと `Number`、`Throwable` 一族、`Enum`、`Record` |
-| `java.util` | `List`／`ArrayList`／`LinkedList`、`Set`／`HashSet`／`LinkedHashSet`／`TreeSet`、`Map`／`HashMap`／`LinkedHashMap`／`TreeMap`、`Deque`／`ArrayDeque`、`Arrays`、`Collections`、`Objects`、`Optional`、`StringJoiner` |
+| `java.util` | `List`／`ArrayList`／`LinkedList`、`Set`／`HashSet`／`LinkedHashSet`／`TreeSet`、`Map`／`HashMap`／`LinkedHashMap`／`TreeMap`、`Deque`／`ArrayDeque`、`Arrays`、`Collections`、`Objects`、`Optional`、`StringJoiner`、`Properties`、`Random`、`UUID`、`BitSet`、`StringTokenizer` |
 | `java.time` | `LocalDate`／`LocalTime`／`LocalDateTime`／`Instant`／`Duration`／`Period` |
 | `java.io` | `File`、`Path`／`Paths`、`Files` |
 | `java.util.regex` | `Pattern`／`Matcher` |
@@ -321,6 +339,7 @@ JEP 378 テキストブロック、JEP 361 switch 式、JEP 286 `var`。
 ```teyru
 List<String> names = new ArrayList<String>()
 names.add("ada")
+names.add("grace")
 for (String n : names) {
   System.out.println(n)
 }
@@ -335,7 +354,8 @@ teyru get example.com/greeting@v0.1.0
 teyru build ./...
 ```
 
-リフレクション、スレッド、`Stream`、`BigDecimal`、タイムゾーンデータベースは無い。どれも意図的な不在で、理由は
+リフレクション、スレッド（`java.util.concurrent` も）、`Scanner`、タイムゾーン
+データベースは無い。どれも意図的な不在で、理由は
 [docs/language.md](docs/language.md) §11 と §13 に書いてある。
 
 自分のネイティブライブラリは `native` メソッドを宣言して C で実装する:
@@ -370,7 +390,7 @@ teyru build --native impl.c program.teyru            # 一緒にコンパイル
 
 | パス | 役割 |
 |---|---|
-| `cmd/teyru` | CLI エントリ（`build`／`run`／`emit`／`emit-llvm`／`version`） |
+| `cmd/teyru` | CLI エントリ（`build`／`run`／`emit`／`emit-llvm`／`get`／`mod`／`version`） |
 | `internal/driver` | コンパイル手順：前後段をつなぎ、C コンパイラを呼び、native ソースと出力オプションを扱う |
 | `internal/source` | ファイル、位置変換、診断 |
 | `internal/lexer` | 字句解析。改行はトークンにせず「直前に改行があるか」を各トークンに記録 |
@@ -426,11 +446,11 @@ Teyru は Java のサブセットではなく、Java 開発者にとってすぐ
    普通の Java フィールドです。
 6. **`val`** は型推論される再代入不可のローカル変数です（深い不変性ではありません）。
 7. **checked exception の検査はありません**。`throws` は解析されますが強制されません。
-8. **`System.out.printf`、実行時リフレクション、annotation processor はありません。**
+8. **実行時リフレクションと annotation processor はありません。**
 9. **bytecode プラットフォームではありません**：`.class` も `java.lang` も JNI もなく、
    既存の Java ライブラリとの相互運用もできません。これは意図的な割り切りです。
 
-全体の一覧は [docs/language.md](docs/language.md) にあります。
+全体の一覧は [docs/language.md](docs/language.md) §12 にあります。
 
 ---
 
@@ -441,6 +461,9 @@ teyru build [flags] <files...>                 ネイティブ実行ファイル
 teyru run   [flags] <files...> [-- args...]    コンパイルして実行
 teyru emit  [flags] <files...>                 生成された C を出力
 teyru emit-llvm [flags] <files...>             LLVM IR を出力
+teyru get <module>@<version>                   モジュールをキャッシュに取得して依存に加える
+teyru mod init <module-path>                   新しいモジュールの teyru.mod を書く
+teyru mod tidy                                 teyru.mod と teyru.sum をソースに合わせる
 teyru version                                  バージョン
 teyru help                                     使い方
 ```

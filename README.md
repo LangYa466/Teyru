@@ -6,7 +6,7 @@
 
 Teyru 的語法對 Java 開發者高度熟悉（類別、介面、泛型、lambda、例外、record、enum、annotation），
 但拿掉了分號、補上原生 property，並且用**原生機器碼**執行：編譯器把整個程式降成 C，
-再交給 clang/LLVM（或 gcc）編成執行檔。執行期只有約 1500 行的 C，裡頭有自己的垃圾回收器
+再交給 clang/LLVM（或 gcc）編成執行檔。執行期只有約 5000 行的 C，裡頭有自己的垃圾回收器
 （conservative mark-and-sweep）、字串、陣列與例外實作，沒有任何虛擬機。
 
 ```
@@ -48,14 +48,14 @@ Teyru 原始碼 (.teyru)
 
 | 指標 | Teyru（原生） | Java（HotSpot） | 差距 |
 |---|---|---|---|
-| 啟動 100 次總時間 | **0.064 s**（0.64 ms/次） | 1.98 s（19.8 ms/次） | **約 31 倍快** |
-| 執行檔大小 | **34.8 KB** | JDK 安裝約 346 MB | 約 10000 倍小 |
-| 尖峰記憶體（hello） | **2.1 MB** | 49.8 MB | **約 24 倍省** |
-| `bench_fib` 遞迴 | **0.0057 s** | 0.0260 s | **4.6 倍快** |
-| `bench_loop` 迴圈與整數運算 | **0.0206 s** | 0.0426 s | **2.1 倍快** |
-| `bench_oop` 物件與虛擬呼叫 | **0.0045 s** | 0.0251 s | **5.6 倍快** |
-| `bench_string` 字串處理 | **0.0134 s** | 0.0536 s | **4.0 倍快** |
-| `bench_alloc` 短命物件配置 | **0.0231 s** | 0.0296 s | **1.3 倍快** |
+| 啟動 100 次總時間 | **0.065 s**（0.65 ms/次） | 2.02 s（20.2 ms/次） | **約 31 倍快** |
+| 執行檔大小 | **392.6 KB** | JDK 安裝約 346 MB | 約 903 倍小 |
+| 尖峰記憶體（hello） | **2.2 MB** | 50.7 MB | **約 23 倍省** |
+| `bench_fib` 遞迴 | **0.0060 s** | 0.0269 s | **4.5 倍快** |
+| `bench_loop` 迴圈與整數運算 | **0.0209 s** | 0.0434 s | **2.1 倍快** |
+| `bench_oop` 物件與虛擬呼叫 | **0.0049 s** | 0.0254 s | **5.2 倍快** |
+| `bench_string` 字串處理 | **0.0145 s** | 0.0544 s | **3.8 倍快** |
+| `bench_alloc` 短命物件配置 | **0.0276 s** | 0.0311 s | **1.1 倍快** |
 
 **為什麼會快：**
 
@@ -79,6 +79,11 @@ Teyru 原始碼 (.teyru)
 process 啟動，絕對值都很小；重現方式見 `sh scripts/bench.sh`，五支 benchmark 程式、
 啟動 100 次、執行檔大小與尖峰記憶體都由這支腳本量測（大小那一列對照的是量測機器上
 安裝的 JDK 目錄，不由腳本量測）。
+
+大小那一列量的是 hello world，它約 390 KB 而不是幾十 KB：程式用到 `String`，`String`
+的 vtable 就必須收進它的每一個方法，於是 `matches` 把整支規則表達式引擎拉了進來、
+`Collection` 的預設方法把四個 Stream 也拉了進來。連結期最佳化刪得掉到不了的類別，
+刪不掉「用到的類別碰得到」的類別。
 
 ---
 
@@ -338,7 +343,7 @@ teyru get example.com/greeting@v0.1.0
 teyru build ./...
 ```
 
-沒有反射、沒有執行緒、沒有 `Stream`、沒有 `BigDecimal`、沒有時區資料庫——這些缺席都是刻意的，理由記在
+沒有反射、沒有執行緒（也沒有 `java.util.concurrent`）、沒有 `Scanner`、沒有時區資料庫——這些缺席都是刻意的，理由記在
 [docs/language.md](docs/language.md) §11 與 §13。
 
 需要自己的原生程式庫時，宣告 `native` 方法並用 C 實作：
@@ -372,7 +377,7 @@ teyru build --native impl.c program.teyru            # 一起編譯
 
 | 路徑 | 說明 |
 |---|---|
-| `cmd/teyru` | CLI 進入點（`build`／`run`／`emit`／`emit-llvm`／`version`） |
+| `cmd/teyru` | CLI 進入點（`build`／`run`／`emit`／`emit-llvm`／`get`／`mod`／`version`） |
 | `internal/driver` | 編譯流程：串起前後端、呼叫 C 編譯器、處理 native 來源與輸出選項 |
 | `internal/source` | 檔案、位置換算、診斷容器 |
 | `internal/lexer` | 詞法分析；換行不產生 token，只在 token 上標記「前面有換行」 |
@@ -421,7 +426,7 @@ Teyru 不是 Java 的子集，而是「Java 開發者一看就懂」的獨立語
    沒有 accessor 區塊的欄位就是普通 Java 欄位。
 6. **`val`**：推斷型別的不可重綁區域變數（不是深度不可變）。
 7. **沒有 checked exception 檢查**；`throws` 會被剖析但不強制。
-8. **沒有 `System.out.printf`、沒有執行期反射、沒有 annotation processor**。
+8. **沒有執行期反射、沒有 annotation processor**。
 9. **不是 bytecode 平台**：沒有 `.class`、沒有 `java.lang`、沒有 JNI，
    目前也**無法**與既有 Java 程式庫互通——這是刻意的取捨。
 
@@ -436,6 +441,9 @@ teyru build [flags] <files...>                 編譯成原生執行檔
 teyru run   [flags] <files...> [-- args...]    編譯後直接執行
 teyru emit  [flags] <files...>                 印出產生的 C
 teyru emit-llvm [flags] <files...>             印出交給 LLVM 的 IR
+teyru get <module>@<version>                   取得模組到快取並加入相依
+teyru mod init <module-path>                   為新模組寫出 teyru.mod
+teyru mod tidy                                 讓 teyru.mod 與 teyru.sum 對上原始碼
 teyru version                                  版本
 teyru help                                     說明
 ```
