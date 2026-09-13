@@ -33,8 +33,15 @@ func (e *Emitter) emitSynthetic(cl *ast.Class, m *ast.Method) {
 		}
 		parts = append(parts, args...)
 		call := nf.fn + "(" + strings.Join(parts, ", ") + ")"
+		// A helper that carries its own prototype is declared here, the way
+		// nativeCall does it: a prelude class's native method has no other
+		// place to declare it, and the generated C is compiled with -w but not
+		// with an implicit-declaration allowance.
+		if nf.proto != "" {
+			call = "({ extern " + nf.proto + "; " + call + "; })"
+		}
 		if m.Result == ast.TVoid {
-			e.line("%s;\n", call)
+			e.line("(void)%s;\n", call)
 		} else {
 			e.line("return %s;\n", call)
 		}
