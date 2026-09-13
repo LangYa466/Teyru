@@ -154,6 +154,9 @@ const gsonClass = "teyru.Gson"
 // an adapter, and the fields walked are the ones the class has at that point --
 // after Lombok has added whatever it adds.
 func (c *Checker) jsonAdapterFor(cl *ast.Class, pos source.Pos) *jsonAdapterPair {
+	if cl == nil {
+		return nil
+	}
 	if c.jsonAdapters == nil {
 		c.jsonAdapters = map[*ast.Class]*jsonAdapterPair{}
 	}
@@ -173,6 +176,17 @@ func (c *Checker) jsonAdapterFor(cl *ast.Class, pos source.Pos) *jsonAdapterPair
 	pair := &jsonAdapterPair{}
 	c.jsonAdapters[cl] = pair
 
+	// Gson allocates without calling a constructor, through Unsafe. Teyru has
+	// no such thing, so a bound class needs a no-argument constructor to be
+	// read: the reader has to build the object before it can fill the fields.
+	// Saying so here is better than a confusing "no suitable constructor" from
+	// the generated code.
+	if !c.hasNoArgCtor(cl) {
+		c.errf(pos, "TY-TYP-0112",
+			"%s is bound from JSON but has no no-argument constructor; add one, or bind a class that has one", cl.Name)
+		delete(c.jsonAdapters, cl)
+		return nil
+	}
 	fields := c.jsonFieldsOf(cl, pos)
 	reader := c.synthJsonReader(cl, fields)
 	writer := c.synthJsonWriter(cl, fields)
@@ -183,12 +197,18 @@ func (c *Checker) jsonAdapterFor(cl *ast.Class, pos source.Pos) *jsonAdapterPair
 	}
 	c.addMethod(cl, reader)
 	c.addMethod(cl, writer)
-	// the bodies are checked in the class's own context, the way a synthetic
-	// method anywhere else in this compiler is
+	// The bodies are checked in the class's own context, and marked as checked:
+	// checkBodies would otherwise check them a second time, and the second pass
+	// leaves every identifier pointing at the variable the first pass declared
+	// while declaring a fresh one for the declaration -- two different symbols
+	// for one local, which the emitter then names differently at the
+	// declaration and at every use.
 	lctx := c.newCtx(cl, reader)
 	lctx.checkBlock(reader.Body, false)
+	reader.Checked = true
 	wctx := c.newCtx(cl, writer)
 	wctx.checkBlock(writer.Body, false)
+	writer.Checked = true
 	c.synthJsonRegister(cl, reader, writer)
 	return pair
 }
@@ -234,6 +254,7 @@ func (c *Checker) synthJsonRegister(cl *ast.Class, reader, writer *ast.Method) {
 	c.addMethod(cl, m)
 	rctx := c.newCtx(cl, m)
 	rctx.checkBlock(m.Body, false)
+	m.Checked = true
 	_ = anyType
 
 	// the static field is what makes the call run: a class's <clinit> is filled
@@ -251,6 +272,20 @@ func (c *Checker) synthJsonRegister(cl *ast.Class, reader, writer *ast.Method) {
 		cl.ClInit = &ast.Method{Name: "<clinit>", Owner: cl, Mods: ast.ModStatic,
 			Result: ast.TVoid, Pos: pos(), SynthKind: "clinit"}
 	}
+}
+
+// hasNoArgCtor reports whether a class can be built with no arguments. An
+// absent constructor list means the default one, which counts.
+func (c *Checker) hasNoArgCtor(cl *ast.Class) bool {
+	if len(cl.Ctors) == 0 {
+		return true
+	}
+	for _, ctor := range cl.Ctors {
+		if len(ctor.Params) == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // jsonField is one field of a bound class: the name it has in the JSON and the

@@ -3,7 +3,7 @@ package teyru
 /* Gson's tree API (com.google.gson), so a Java file that walks a JSON document
    with JsonParser/JsonObject/JsonArray ports over unchanged.
 
-   The shapes and the observable behaviour follow Gson 2.10.1, including the
+   The shapes and the observable behaviour follow Gson 2.10.0, including the
    details that are easy to get wrong:
 
    - JsonNull extends JsonElement, not JsonPrimitive (Gson changed this in 2.10),
