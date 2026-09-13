@@ -1,0 +1,53 @@
+// Long-lived objects must survive a collection while the heap is churned.
+//
+// A static field, a static container and a local object graph stay reachable
+// across several collections; every one of them must still read back correctly
+// afterwards. A collector that traces the wrong slots, or an allocator that
+// hands out a block twice, shows up here as corrupted output.
+class Node {
+  public String label
+  public int[] nums
+  public Node next
+
+  public Node(String label) {
+    this.label = label
+    int[] ns = {7, 8, 9}
+    this.nums = ns
+  }
+}
+
+class Main {
+  static Node root
+  static List<String> kept = new ArrayList<String>()
+
+  static String make(int i) {
+    return "item-" + i
+  }
+
+  public static void main(String[] args) {
+    root = new Node("root")
+    root.next = new Node("second")
+    root.next.next = new Node("third")
+
+    kept.add("alpha")
+    kept.add(make(1))
+    kept.add(make(2))
+
+    Node local = new Node("local")
+    int total = 0
+    for (int i = 0 : i < 300000 : i++) {
+      String s = make(i)
+      total = total + s.length()
+    }
+
+    System.out.println(kept.get(0) + " " + kept.get(1) + " " + kept.get(2))
+    System.out.println(kept.size())
+
+    System.out.println(root.label + " " + root.next.label + " " + root.next.next.label)
+    System.out.println(root.nums[0] + " " + root.nums[1] + " " + root.nums[2])
+    System.out.println(root.next.next.next == null)
+
+    System.out.println(local.label + " " + local.nums[2])
+    System.out.println("total " + total + " tail " + (total % 1000))
+  }
+}
