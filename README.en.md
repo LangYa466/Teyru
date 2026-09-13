@@ -310,30 +310,56 @@ The complete syntax and semantics live in **[docs/language.md](docs/language.md)
 
 ## Standard library
 
-The standard library is written **in Teyru itself** (`lib/*.teyru`) and is
-compiled and checked together with every user program:
+The standard library is written **in Teyru itself** (`lib/*.teyru`) and is compiled
+and checked together with every program. Package names follow Java's, so
+`import java.util.List` works unchanged:
 
-`Object`, `String`, `StringBuilder`, `Math`, `System`, `PrintStream`,
-`Iterable`/`Iterator`, `Comparable`, `AutoCloseable`, `Cloneable`, `Enum`, `Record`,
-the eight primitive wrappers (`Byte`, `Short`, `Integer`, `Long`, `Float`, `Double`,
-`Character`, `Boolean`), their supertype `Number`,
-`Character`, `Boolean`), the collections (`List`, `ArrayList`, `Map`, `HashMap`), and the
-`Throwable` family (`Exception`, `RuntimeException`, `NullPointerException`,
-`ArrayIndexOutOfBoundsException`, `ArithmeticException`, `ClassCastException`,
-`IllegalArgumentException`, `IllegalStateException`, `IndexOutOfBoundsException`,
-`NoSuchElementException`, `NegativeArraySizeException`, `AssertionError`,
-`UnsupportedOperationException`).
+| Package | Contents |
+|---|---|
+| `java.lang` | `Object`, `Class`, `String` (`format`/`join`/`valueOf`/…), `StringBuilder`, `Math`, `System`, `PrintStream`, the eight wrappers and `Number`, the `Throwable` family, `Enum`, `Record` |
+| `java.util` | `List`/`ArrayList`/`LinkedList`, `Set`/`HashSet`/`LinkedHashSet`/`TreeSet`, `Map`/`HashMap`/`LinkedHashMap`/`TreeMap`, `Deque`/`ArrayDeque`, `Arrays`, `Collections`, `Objects`, `Optional`, `StringJoiner` |
+| `java.time` | `LocalDate`/`LocalTime`/`LocalDateTime`/`Instant`/`Duration`/`Period` |
+| `java.io` | `File`, `Path`/`Paths`, `Files` |
+| `java.net` | `ServerSocket`, `Socket` and their streams |
+| `com.google.gson` | Gson's tree API plus a compiler-generated object binding ([docs/json.md](docs/json.md)) |
+| framework | A Spring-shaped container and web layer ([docs/framework.md](docs/framework.md)) |
 
-`ArrayList` implements `Iterable`, so `for (String s : names)` reads the same as in
-Java. There is no `printf` and no file I/O — those remain deliberate scope limits.
+Collections are written in Teyru, so `for` works on them directly:
 
-To bring your own native library, declare a `native` method and implement it in C.
-See [`docs/native.md`](docs/native.md):
+```teyru
+List<String> names = new ArrayList<String>()
+names.add("ada")
+for (String n : names) {
+  System.out.println(n)
+}
+```
+
+Dependencies are declared in `teyru.mod` and fetched and verified the way Go does
+it ([docs/modules.md](docs/modules.md)):
 
 ```sh
-teyru build --native-header native.h program.teyru   # the declarations to implement
-teyru build --native impl.c program.teyru            # compile them together
+teyru mod init example.com/app
+teyru get example.com/greeting@v0.1.0
+teyru build ./...
 ```
+
+There is no reflection, no threading, no `Stream`, no `BigDecimal`, no regular
+expressions and no time zone database. Each absence is deliberate and argued for in
+[docs/language.md](docs/language.md) §11 and §13.
+
+For your own native library, declare a `native` method and implement it in C:
+
+```teyru
+class Native {
+  public static native int add(int a, int b)
+}
+```
+```sh
+teyru build --native-header native.h program.teyru   # the declarations to implement
+teyru build --native impl.c program.teyru            # compile together
+```
+
+See [`docs/native.md`](docs/native.md).
 
 ---
 

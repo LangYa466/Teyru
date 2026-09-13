@@ -429,41 +429,57 @@ try {
 
 ## 11. 標準程式庫
 
-標準程式庫以 Teyru 撰寫（`lib/` 下的 `*.teyru`），內容如下：
+標準程式庫以 **Teyru 本身**撰寫（`lib/*.teyru`），每次編譯都與使用者程式一起被
+編譯與檢查——它沒有什麼特別的地位，`lib/` 底下的檔案就是用 Teyru 寫的普通程式。
+套件名照 Java 的寫法，所以 Java 程式碼的 `import java.util.List` 原樣可用。
 
-| 類別 | 內容 |
-|---|---|
-| `Object` | `toString`、`hashCode`、`equals`、`getClass` |
-| 陣列 | `length`、元素存取、`clone`；`toString` 印成 `[array]`（Java 是 `[I@<hash>`；Teyru 的陣列不帶元素型別，印不出 `[I` 這種拼法） |
-| `String` | `length`、`charAt`、`isEmpty`、`equals`、`hashCode`、`indexOf`、`substring`、`toUpperCase`、`toLowerCase`、`trim`、`contains`、`startsWith`、`endsWith`、`replace`、`compareTo`、`concat`、`valueOf`（多載） |
-| `StringBuilder` | `append`（String／Object／int／long／char／double／boolean）、`toString`、`length` |
-| `Math` | `PI`、`abs`、`max`、`min`、`sqrt`、`pow`、`floor`、`ceil`、`round`、`random` |
-| `System` | `out`、`err`、`currentTimeMillis`、`nanoTime`、`exit`、`arraycopy` |
-| `PrintStream` | `print`／`println`（String／Object／int／long／double／boolean／char／無參數） |
-| `Number` | `Byte`、`Short`、`Integer`、`Long`、`Float`、`Double` 的共同父類別，六個轉換 `intValue`／`longValue`／`doubleValue`／`floatValue`／`byteValue`／`shortValue`（窄化依 Java 規則） |
-| 包裝類別 | `Byte`、`Short`、`Integer`、`Long`、`Float`、`Double`、`Character`、`Boolean`：`valueOf`、`parseXxx`、`xxxValue`、`compareTo`、`equals`、`hashCode`、`toString` |
-| 介面 | `Cloneable`、`Comparable<T>`、`AutoCloseable`、`Iterable<T>`、`Iterator<T>` |
-| `Enum<E>` | `ordinal`、`name`、`compareTo`、`toString`、`hashCode`、`equals` |
-| `Record` | 所有 record 的根 |
-| `List<T>` | `size`、`get`、`add`、`addAll`、`isEmpty`、`contains`、`indexOf`；繼承 `Iterable<T>` |
-| `ArrayList<T>` | `List<T>` 的實作；可加倍成長，另有 `set`、`removeAt`、`clear`、`addAll`、`toString` |
-| `Map<K,V>` | `get`、`put`、`putAll`、`containsKey`、`remove`、`size`、`isEmpty`、`keys` |
-| `HashMap<K,V>` | `Map<K,V>` 的實作；另有 `toString` |
-| `Logger` | `trace`／`debug`／`info`／`warn`／`error` |
+### java.lang（`lib/01`–`lib/07`）
 
-集合以 Teyru 撰寫，因此 `for` 迴圈直接支援：
+`Object`、`Class`、`String`（`format`／`join`／`valueOf`／`compareTo`／
+`startsWith`／`replace`／`split`／`strip`／`repeat`…）、`StringBuilder` 與
+`StringBuffer`、`Math`（含 `floorDiv`／`floorMod`／`round`／三角函式）、
+`System`（`out`／`err`／`currentTimeMillis`／`nanoTime`／`arraycopy`／`getenv`／
+`exit`）、`PrintStream`、`InputStream`、`IO`（`println`／`readln`）、
+`Number` 與八個包裝類別（`Integer.parseInt`、`Long.toHexString`、`Character.isDigit`
+等完整靜態 API）、`Throwable` 家族、`Enum`、`Record`、`Comparable`／`Iterable`／
+`Iterator`／`Cloneable`／`AutoCloseable`、`Logger`。
+
+### java.util（`lib/08`、`lib/14_*`）
+
+`Collection`、`List`／`ArrayList`／`LinkedList`、`Set`／`HashSet`／
+`LinkedHashSet`／`TreeSet`、`Map`／`HashMap`／`LinkedHashMap`／`TreeMap`（紅黑樹）、
+`SortedSet`／`NavigableSet`／`SortedMap`／`NavigableMap`、`Queue`／`Deque`／
+`ArrayDeque`、`Iterator`／`ListIterator`、`Arrays`、`Collections`、`Objects`、
+`Optional`、`StringJoiner`。
+
+契約照 JDK：`LinkedHashMap` 是插入序、`TreeMap` 是鍵序、`TreeSet` 的
+`headSet`／`subSet` 是活的視圖、`computeIfAbsent`／`merge`／`forEach` 都在。
+`java.util.function`（`lib/09`）提供 `Function`／`BiFunction`／`Consumer`／
+`Supplier`／`Predicate`／`Runnable`／`Comparator`。
 
 ```teyru
 List<String> names = new ArrayList<String>()
 names.add("ada")
-names.add("grace")
 for (String n : names) {
   System.out.println(n)
 }
 ```
 
-`for (int v : listOfInteger)` 會自動拆箱。沒有 `printf`、沒有正規表達式、
-沒有檔案 I/O。
+### 其他套件
+
+| 套件 | 檔案 | 內容 |
+|---|---|---|
+| `java.time` | `lib/20` | `LocalDate`／`LocalTime`／`LocalDateTime`／`Instant`／`Duration`／`Period`／`DayOfWeek`／`Month`；曆法算在 epoch day 上，輸出與 JDK 逐位元組相同（沒有時區，`now()` 讀 UTC） |
+| `java.io` | `lib/16` | `File`、`Path`／`Paths`、`Files`（`readString`／`writeString`／`readAllLines`／`exists`／`createDirectories`／`listFiles`） |
+| `java.net` | `lib/15` | `ServerSocket`、`Socket`、`SocketInputStream`／`SocketOutputStream`；同步阻塞的 POSIX socket，逾時以 `SocketTimeoutException` 回報 |
+| `com.google.gson` | `lib/10`、`lib/19` | Gson 的樹狀 API，以及由編譯器產生的物件綁定（見 [docs/json.md](json.md)） |
+| 框架 | `lib/17`、`lib/18` | Spring 形狀的容器與 web 層（見 [docs/framework.md](framework.md)） |
+
+### 沒有的東西
+
+反射、執行緒、`Stream`／`Spliterator`、`BigDecimal`／`BigInteger`、正規表達式、
+`java.util.concurrent`、時區資料庫、`DateTimeFormatter`、`Properties`。這些缺席
+都是刻意的：它們要嘛需要執行期反射，要嘛需要一份比整個語言還大的資料表。
 
 需要自己的原生程式庫時，`native` 方法可以實作在 C 裡，見
 [docs/native.md](native.md)。
