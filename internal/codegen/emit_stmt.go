@@ -77,6 +77,10 @@ func (e *Emitter) stmt(s ast.Stmt) {
 		// the declaration stands before the loop, where the condition that
 		// follows `while` can still see it
 		e.hoistPatterns(v.Cond)
+		// the condition is rendered here and written after the body: emitting
+		// the body would drop the record of which patterns this condition
+		// declared, and the text must still name them
+		cond := e.cond(v.Cond)
 		e.line("do {\n")
 		e.indent++
 		e.pushLoop("")
@@ -84,7 +88,7 @@ func (e *Emitter) stmt(s ast.Stmt) {
 		e.popLoop()
 		e.contLabels(labels)
 		e.indent--
-		e.line("} while (%s);\n", e.cond(v.Cond))
+		e.line("} while (%s);\n", cond)
 		e.brkLabels(labels)
 		e.clearPatterns()
 	case *ast.For:
@@ -694,7 +698,11 @@ func caseEndLabel(id int) string { return fmt.Sprintf("%s%d", caseEndPrefix, id)
 func isCaseEnd(t string) bool { return strings.HasPrefix(t, caseEndPrefix) }
 
 // hoistPatterns declares the variables bound by `instanceof` patterns that
-// appear in a controlling expression, so the condition can refer to them.
+// appear in a controlling expression, so the body and the update of a loop can
+// refer to them. Java binds such a variable afresh on every evaluation of the
+// condition rather than once when the loop is entered, so only the declaration
+// is hoisted: the assignment is part of the condition, and instanceOf writes it
+// there (see assignPattern in emit_expr.go).
 func (e *Emitter) hoistPatterns(cond ast.Expr) {
 	if cond == nil {
 		return
@@ -706,7 +714,7 @@ func (e *Emitter) hoistPatterns(cond ast.Expr) {
 		switch v := x.(type) {
 		case *ast.InstanceOf:
 			if v.Binding != nil {
-				name := e.bindExprPattern(v)
+				name := e.declareExprPattern(v)
 				if name != "" {
 					e.patternVars[v] = name
 				}
@@ -736,40 +744,46 @@ func (e *Emitter) instTarget(v *ast.InstanceOf) string {
 	return "&cls_" + mangle(e.prog.ArrayClass().Full)
 }
 
-// bindExprPattern declares the variable of an instanceof pattern and returns
-// the C expression that holds the matched value (empty for `_`).
-func (e *Emitter) bindExprPattern(v *ast.InstanceOf) string {
+// declareExprPattern declares the variables an `instanceof` pattern in a
+// controlling expression binds, with their zero values: the one that holds the
+// whole match and, for a record pattern, one per component. It returns the
+// variable holding the match, or "" when there is none.
+//
+// Only the declaration is hoisted; the values arrive with every evaluation of
+// the condition, which instanceOf emits as a statement expression. Java gives
+// the variable the scope of the loop body and binds it anew each time the
+// condition is evaluated, so `xs[i] instanceof String s` must see the element
+// of the current iteration, not of the one that entered the loop.
+func (e *Emitter) declareExprPattern(v *ast.InstanceOf) string {
 	pat := v.Binding
 	if pat == nil {
 		return ""
 	}
-	src := e.expr(v.X)
 	if prim, ok := e.prog.Erased(v.Type.Resolved).(*ast.PrimType); ok {
 		// a primitive pattern is a question about the value, so the match is
 		// recorded in a flag next to the value itself
 		n := e.tmpName()
 		okName := e.tmpName()
 		e.line("%s %s = 0;\n", e.ctype(prim), n)
-		e.line("int32_t %s = ty_prim_match((void*)%s, %d, &%s);\n", okName, src, prim.Kind, n)
+		e.line("int32_t %s = 0;\n", okName)
 		e.patternOK[v] = okName
 		if pat.Sym != nil && !pat.Unnamed {
 			e.locals[pat.Sym] = n
 		}
 		return n
 	}
-	typeName := e.ctype(v.Type.Resolved)
 	n := e.tmpName()
-	// the bound variable holds the value only when the type test succeeds,
-	// which is what `x instanceof T t` means as a condition
-	e.line("%s %s = (%s)ty_instanceof((tyobj*)%s, %s) ? (%s)%s : NULL;\n",
-		typeName, n, typeName, src, e.instTarget(v), typeName, src)
+	e.line("%s %s = NULL;\n", e.ctype(v.Type.Resolved), n)
 	if len(pat.Decomp) > 0 {
-		e.bindComponents(pat, n)
+		// the components of a record pattern are part of the binding, so they
+		// are declared here and read out of the match in the condition
+		for _, b := range e.planComponents(pat, n) {
+			e.line("%s %s = %s;\n", b.ct, b.name, zeroOf(b.ct))
+		}
 		return n
 	}
 	if pat.Sym != nil && !pat.Unnamed {
 		e.locals[pat.Sym] = n
-		return n
 	}
 	return n
 }
@@ -785,6 +799,11 @@ type compBind struct {
 // planComponents walks a record pattern and returns the variables it binds,
 // with the accessor for each. Nested patterns get a temporary for the inner
 // record, declared before the variables read out of it.
+//
+// The name of that temporary is derived from the receiver rather than taken
+// from the counter, so that planning one pattern twice — once to declare its
+// variables, once to assign them — yields the same names. A pattern in the
+// condition of a loop is planned both ways.
 func (e *Emitter) planComponents(p *ast.Param, recv string) []compBind {
 	var out []compBind
 	var walk func(p *ast.Param, recv string)
@@ -796,7 +815,7 @@ func (e *Emitter) planComponents(p *ast.Param, recv string) []compBind {
 			comp := p.Comps[i]
 			accessor := fmt.Sprintf("(%s)->f_%s", recv, mangle(comp.Name))
 			if len(sub.Decomp) > 0 {
-				inner := e.tmpName()
+				inner := fmt.Sprintf("%s_n%d", recv, i)
 				out = append(out, compBind{e.ctype(comp.Type), inner, accessor})
 				walk(sub, inner)
 				continue

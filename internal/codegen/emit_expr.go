@@ -473,11 +473,8 @@ func (e *Emitter) cast(v *ast.Cast) string {
 
 func (e *Emitter) instanceOf(v *ast.InstanceOf) string {
 	if e.patternVars != nil {
-		if ok, isPrim := e.patternOK[v]; isPrim {
-			return "(" + ok + " != 0)"
-		}
 		if name, ok := e.patternVars[v]; ok {
-			return "(" + name + " != NULL)"
+			return e.assignPattern(v, name)
 		}
 	}
 	if prim, isPrim := e.prog.Erased(v.Type.Resolved).(*ast.PrimType); isPrim {
@@ -493,6 +490,45 @@ func (e *Emitter) instanceOf(v *ast.InstanceOf) string {
 		target = "&cls_" + mangle(e.prog.ArrayClass().Full)
 	}
 	return "ty_instanceof((tyobj*)" + e.refExpr(v.X) + ", " + target + ")"
+}
+
+// assignPattern renders a pattern whose variables hoistPatterns declared before
+// the loop. The test and the assignment travel together as one statement
+// expression, so the variable is bound on every evaluation of the condition —
+// which is what Java does — instead of once, when the loop was entered, which
+// would leave the body reading the value of the first iteration forever.
+//
+// The source expression is read once into a temporary: it may have side effects
+// (`xs[next()] instanceof String s`), and the test and the value that is bound
+// have to agree on the one reading.
+func (e *Emitter) assignPattern(v *ast.InstanceOf, name string) string {
+	src := "(" + e.expr(v.X) + ")"
+	if prim, isPrim := e.prog.Erased(v.Type.Resolved).(*ast.PrimType); isPrim {
+		// a primitive pattern asks about the value, so the match is recorded in
+		// the flag declareExprPattern left beside the value, and the value
+		// itself is written only when it converted exactly
+		okName := e.patternOK[v]
+		return "({ " + name + " = 0; " + okName + " = ty_prim_match((void*)" + src + ", " +
+			fmt.Sprint(prim.Kind) + ", &" + name + "); " + okName + " != 0; })"
+	}
+	ct := e.ctype(v.Type.Resolved)
+	obj := e.tmpName()
+	var b strings.Builder
+	b.WriteString("({ void* " + obj + " = (void*)" + src + "; ")
+	// the variable holds the value only when the type test succeeds, which is
+	// what `x instanceof T t` means as a condition
+	fmt.Fprintf(&b, "%s = ty_instanceof(%s, %s) ? (%s)%s : NULL; ", name, obj, e.instTarget(v), ct, obj)
+	if len(v.Binding.Decomp) > 0 {
+		// the components are part of the binding, so they are read out of the
+		// record again whenever it matches
+		fmt.Fprintf(&b, "if (%s) { ", name)
+		for _, c := range e.planComponents(v.Binding, name) {
+			fmt.Fprintf(&b, "%s = %s; ", c.name, c.accessor)
+		}
+		b.WriteString("} ")
+	}
+	fmt.Fprintf(&b, "%s != NULL; })", name)
+	return b.String()
 }
 
 // primMatchExpr renders the run time question a primitive type pattern asks,

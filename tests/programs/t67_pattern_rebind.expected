@@ -1,0 +1,35 @@
+while 0 a
+while 1 b
+while 2 c
+while i=3
+for 0 a
+for 1 b
+for 2 c
+do body 0
+do body 1
+do body 2
+do body 3
+do k=4
+if b
+side z0
+side z1
+side z2
+calls=3 m=3
+mixed m0
+mixed calls=2 n=1
+point 1,2
+point 3,4
+p=2
+line 1,1 -> 2,2
+line 3,3 -> 4,4
+multi a/true
+multi bb/true
+multi ccc/true
+u=3
+guard hi
+guard there
+v=2
+ternary alpha
+ternary t=1
+stale first
+g=1

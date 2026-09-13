@@ -1,0 +1,57 @@
+// Primitive type patterns (JEP 507) in the condition of a loop: the value and
+// the flag that says it matched are recomputed on every evaluation, exactly as
+// the type pattern above rebinds its variable. javac of this machine is 21 and
+// cannot compile these, so the expectations follow the semantics that
+// t53_primitive_patterns.teyru pins down for the same patterns in an `if`.
+class Main {
+  static int calls = 0
+
+  static int next() {
+    calls++
+    return calls - 1
+  }
+
+  public static void main(String[] args) {
+    // a value that stops converting exactly ends the loop
+    Object[] ns = {42, 7, "x", 9}
+    int i = 0
+    while (i < 4 && ns[i] instanceof int v) {
+      System.out.println("int " + v)
+      i++
+    }
+    System.out.println("i=" + i)
+
+    // the same for a for, where the binding lives in the update as well
+    Object[] ls = {1, 9007199254740993L, true}
+    for (int j = 0 : j < 3 && ls[j] instanceof long l : j++) {
+      System.out.println("long " + l)
+    }
+
+    // a boolean pattern guards its own value
+    Object[] bs = {false, true, true, "no"}
+    int b = 0
+    do {
+      b++
+    } while (b < 4 && bs[b] instanceof boolean t && t)
+    System.out.println("b=" + b)
+
+    // the source expression runs once per evaluation
+    Object[] zs = {5, 6, "s"}
+    calls = 0
+    int m = 0
+    while (m < 3 && zs[next()] instanceof int w && w > 0) {
+      System.out.println("side " + w)
+      m++
+    }
+    System.out.println("calls=" + calls + " m=" + m)
+
+    // a value outside the target range does not match
+    Object wide = 70000
+    int guard = 0
+    while (guard < 3 && wide instanceof short sh) {
+      System.out.println("never " + sh)
+      guard++
+    }
+    System.out.println("guard=" + guard)
+  }
+}
