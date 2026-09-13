@@ -479,15 +479,26 @@ for (String n : names) {
 7. 捕獲的區域變數不要求 effectively final。
 8. 沒有 annotation processor、沒有執行期反射、沒有 JNI。
 9. 泛型與 checked exception 的規則同 Java，但沒有 checked 檢查。
+10. 同名區域類別：Java 把區域類別限縮在它的區塊（JLS 6.3），所以同一個類別的
+    兩個方法可以各宣告一個 `class Local`；Teyru 以簡單名稱透過外圍型別解析，
+    這種寫法會回報 `TY-TYP-0001`。
+11. lambda 的型別引數推論不會從主體回推，`f.compose(v -> v * 10)` 這種沒有目標
+    型別的寫法需要寫出型別見證（javac 也拒絕該例，只是訊息不同）。
 
 ## 13. 尚未實作
 
 - checked exception 的編譯期檢查（`throws` 只被解析）
-- `sealed` 家族的窮盡性檢查
-- 反射、執行緒、`java.util` 集合、檔案與網路 I/O
+- `sealed` 的 `permits` 子句沒有被驗證：沒有 `permits` 的 sealed 型別在
+  switch 窮盡性上被視為不可判定而要求 `default`；switch **陳述式**的窮盡性
+  仍從寬
+- 反射、執行緒、檔案與網路 I/O
 - 與 Java 生態互通（JAR、JDK 類別庫、JNI）
 - 識別字中的 Unicode 逸出（`\u0041` 不能拼出識別字）
 - 泛型建構子的顯式型別引數 `new <T>Foo(...)`
 - 文字區塊的縮排細則（目前實作最小縮排去除）
-- 註解的執行期保留與讀取（`java.lang.annotation` 不存在）
+- 註解的執行期保留與讀取（`java.lang.annotation` 不存在；Lombok 的 `@onX`
+  只把註解複製到產生的成員上，不會有任何執行期效果）
 - 模組系統的語意（`import module X` 會被剖析後忽略，執行期沒有模組系統；`module-info` 不支援）
+- 陣列的執行期元素型別一律是 `teyru.Array`，所以 `String[].class` 與
+  `int[].class` 是同一個物件（Java 是兩個）
+- 標準程式庫缺口：`String.lines()`（需要 `Stream`）、`List.of(...)`
