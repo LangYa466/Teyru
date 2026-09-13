@@ -457,6 +457,18 @@ func (c *Checker) lookupClassName(env *typeEnv, name string) *ast.Class {
 				if cl := c.global[parts[k]]; cl != nil {
 					return c.nestedPath(cl, parts[k+1:])
 				}
+				// A member type named through its package: `pkg.Outer.Inner`
+				// is `Inner` inside `pkg.Outer`, and the package prefix is as
+				// many segments as the package has. Each segment used to be
+				// tried on its own, so `pkg.Outer` was never tried at all and
+				// `outer.new Inner()` in a file that declares a package did not
+				// compile -- the checker rewrites that name to the class's full
+				// name, which is the package plus the class path.
+				if k+1 < len(parts) {
+					if cl := c.global[strings.Join(parts[:k+1], ".")]; cl != nil {
+						return c.nestedPath(cl, parts[k+1:])
+					}
+				}
 			}
 			return nil
 		}
