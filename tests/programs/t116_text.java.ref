@@ -52,6 +52,18 @@ class Main {
       DecimalFormat d = new DecimalFormat(pats[i]);
       System.out.println("[" + pats[i] + "] => " + d.format(12345.678) + " | " + d.format(-12345.678) + " | " + d.format(0.5) + " | " + d.format(0.0) + " | " + d.toPattern());
     }
+    // the exponent is a multiple of the pattern's integer width, and how wide
+    // the mantissa comes out is what tells that rule from the one-place one
+    String[] exps = { "##0.0E0", "###0.0E0", "#,##,##0.0E0", "00.0E0" };
+    double[] expVals = { 0.5, 0.001, 12345.6, 1.0E10, 99999.9 };
+    for (var i = 0 ; i < exps.length ; i++) {
+      DecimalFormat x = new DecimalFormat(exps[i]);
+      StringBuilder line = new StringBuilder("E " + exps[i]);
+      for (var j = 0 ; j < expVals.length ; j++) {
+        line.append(" " + x.format(expVals[j]));
+      }
+      System.out.println(line.toString());
+    }
     DecimalFormat e = new DecimalFormat("#,##0.00");
     e.setGroupingUsed(false);
     System.out.println("nogroup " + e.format(12345.6));
