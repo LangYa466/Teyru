@@ -33,6 +33,10 @@ class Native {
 teyru build --native-header native.h program.teyru -o program
 ```
 
+標頭檔會在連結失敗之前就寫出來：這個命令仍然會嘗試連結，所以在你提供實作之前
+它會以 `undefined reference to 'tyn_...'` 結束。看到那些符號就代表標頭檔已經產生，
+接著做第三步即可。
+
 `native.h` 只包含你必須實作的東西：
 
 ```c
