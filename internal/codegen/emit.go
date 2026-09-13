@@ -660,8 +660,16 @@ func (e *Emitter) entry() string {
 	b.WriteString(e.clinitRefs())
 	b.WriteString("  TY_STRING = &cls_" + mangle(e.prog.Builtins.String.Full) + ";\n")
 	b.WriteString("  TY_OBJECT = &cls_" + mangle(e.prog.Builtins.Object.Full) + ";\n")
-	for k, cl := range e.prog.Builtins.Boxes {
-		fmt.Fprintf(&b, "  TY_BOX[%d] = &cls_%s;\n", int(k), mangle(cl.Full))
+	// sorted: iterating the map directly would emit TY_BOX assignments in a
+	// different order every run, so two builds of one program would not produce
+	// the same C and the output could not be diffed
+	boxKinds := make([]int, 0, len(e.prog.Builtins.Boxes))
+	for k := range e.prog.Builtins.Boxes {
+		boxKinds = append(boxKinds, int(k))
+	}
+	sort.Ints(boxKinds)
+	for _, k := range boxKinds {
+		fmt.Fprintf(&b, "  TY_BOX[%d] = &cls_%s;\n", k, mangle(e.prog.Builtins.Boxes[ast.PrimKind(k)].Full))
 	}
 	for _, pair := range [][2]any{
 		{"TY_NPE", e.prog.Builtins.NPE}, {"TY_AIOOBE", e.prog.Builtins.AIOOBE},
