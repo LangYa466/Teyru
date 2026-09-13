@@ -344,7 +344,20 @@ func (w *escWalk) expr(x ast.Expr) {
 		for _, a := range v.Args {
 			w.expr(a)
 		}
-		w.receiver(v.Outer)
+		// `x.new Inner()` writes x into the object it creates, as that object's
+		// enclosing instance: x lives exactly as long as the object does. This
+		// asked receiver() instead, which is right for `x.m()` -- the receiver
+		// of a call is read and not stored -- and wrong here. The object kept
+		// the address of what the analysis had put on the C stack and read it
+		// after the frame was gone, which AddressSanitizer reports as
+		// stack-use-after-scope:
+		//
+		//     Main m = new Main(12345); keep = m.new Inner();
+		if w.isTarget(v.Outer) {
+			w.mark("stored as the enclosing instance of a new object")
+		} else {
+			w.receiver(v.Outer)
+		}
 		w.closureTargets(v.Args)
 		if v.Body != nil && w.capturesTarget(v.GetType()) {
 			w.mark("captured by an anonymous class")
@@ -523,7 +536,7 @@ func (e *Emitter) computeleaksThis(m *ast.Method) bool {
 		// receiver; anything else without a body may do anything
 		return !m.Mods.Has(ast.ModNative)
 	}
-	w := &thisWalk{e: e, static: m.IsStatic()}
+	w := &thisWalk{e: e, static: m.IsStatic(), owner: m.Owner}
 	w.stmt(body)
 	return w.leaks
 }
@@ -532,7 +545,25 @@ func (e *Emitter) computeleaksThis(m *ast.Method) bool {
 type thisWalk struct {
 	e      *Emitter
 	static bool
+	owner  *ast.Class
 	leaks  bool
+}
+
+// storesThis reports whether the object this expression creates is given
+// `this` as its enclosing instance. An inner class is laid out with a field
+// holding the instance it was created in, so `new Inner()` in a method of the
+// class Inner is nested in stores the receiver -- and a method that returns
+// such an object has let its receiver outlive the call.
+func (w *thisWalk) storesThis(nw *ast.New) bool {
+	if w.static || w.owner == nil {
+		return false
+	}
+	ct, ok := nw.GetType().(*ast.ClassType)
+	if !ok {
+		return false
+	}
+	cl := ct.Class
+	return cl != nil && cl.Inner && cl.OuterField != nil && cl.Outer == w.owner
 }
 
 func (w *thisWalk) isThis(x ast.Expr) bool {
@@ -663,6 +694,15 @@ func (w *thisWalk) expr(x ast.Expr) {
 	case *ast.New:
 		for _, a := range v.Args {
 			w.expr(a)
+		}
+		// `new Inner()`, with no qualifier, is given this as its enclosing
+		// instance. Nothing here said so, and a method whose whole body is
+		// `return new Inner()` was reported as not retaining its receiver: the
+		// caller then kept the receiver on the C stack while the returned
+		// object held its address. AddressSanitizer reports the read as
+		// stack-use-after-scope.
+		if v.Outer == nil && w.storesThis(v) {
+			w.leaks = true
 		}
 		w.receiver(v.Outer)
 		if v.Body != nil {

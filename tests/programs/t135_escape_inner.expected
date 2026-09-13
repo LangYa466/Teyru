@@ -1,0 +1,14 @@
+== an inner object made through a local ==
+12345
+inner of 12345
+12345
+== an inner object returned from a method ==
+999
+999
+== and the same through this.new ==
+4242
+== the controls ==
+5
+7
+== the enclosing instances stay distinct ==
+1 2 1
