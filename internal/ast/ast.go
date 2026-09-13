@@ -389,6 +389,11 @@ type Case struct {
 	Guard   Expr
 	Body    []Stmt // colon form statements, or arrow body (single ExprStmt/Block/Throw)
 	ArrowX  Expr   // arrow form expression body
+	// Arrow records that the case was written with `->`, which the emitter needs
+	// to know: an arrow case never falls into the next one. The expression form
+	// says so by having an ArrowX, but a block and a throw both land in Body
+	// looking exactly like the statements of a colon case.
+	Arrow bool
 }
 
 func (*Block) stmtNode()      {}

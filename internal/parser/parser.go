@@ -1226,6 +1226,7 @@ func (p *parser) parseSwitch() *ast.Switch {
 		}
 		if arrow {
 			p.next()
+			c.Arrow = true
 			switch {
 			case p.is("{"):
 				c.Body = []ast.Stmt{p.parseBlock()}

@@ -1591,4 +1591,12 @@ func (e *Emitter) switchCaseBody(cs *ast.Case, resultTmp string, id int) {
 	for _, st := range cs.Body {
 		e.stmt(st)
 	}
+	// `case N -> { ... }` is a whole body that stops there, like the expression
+	// form above, and `case N -> throw ...` is one too -- a throw inside a try
+	// in the block can be caught, and Java still does not continue into the
+	// next case. Both are a Block or a statement in Body, which is what a colon
+	// case holds as well, so the case has to say which form it came from.
+	if cs.Arrow {
+		e.line("goto _end%d;\n", id)
+	}
 }
