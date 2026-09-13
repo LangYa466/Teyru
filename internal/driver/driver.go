@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 
 	"github.com/LangYa466/Teyru/internal/ast"
 	"github.com/LangYa466/Teyru/internal/codegen"
@@ -322,7 +323,14 @@ func Run(exe string, args []string) (int, error) {
 		return 0, nil
 	}
 	if ee, ok := err.(*exec.ExitError); ok {
-		return ee.ExitCode(), nil
+		code := ee.ExitCode()
+		if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			// a program killed by a signal has no exit status: Go reports 255,
+			// which is also what a program that really exits 255 reports. Say
+			// which signal it was, and use the status a shell would.
+			return 128 + int(ws.Signal()), nil
+		}
+		return code, nil
 	}
 	return 1, err
 }

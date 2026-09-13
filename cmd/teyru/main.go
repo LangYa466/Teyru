@@ -147,6 +147,10 @@ func run() int {
 		opts.Out = filepath.Join(dir, "program")
 		opts.CFile = filepath.Join(dir, "program.c")
 		opts.EmitLLVM = filepath.Join(dir, "program.ll")
+		// the IR is written before the link step, and nobody looks at the
+		// executable an `emit-llvm` run would produce: asking for the IR used to
+		// fail outright when that unrequested link failed
+		opts.CSourceOnly = true
 	}
 
 	start := time.Now()
@@ -173,6 +177,9 @@ func run() int {
 		code, err := driver.Run(res.Exe, progArgs)
 		if err != nil {
 			fail(err)
+		}
+		if code >= 128 && code < 256 {
+			fmt.Fprintf(os.Stderr, "teyru: the program was killed by signal %d\n", code-128)
 		}
 		return code
 	default:
