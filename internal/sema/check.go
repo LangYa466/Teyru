@@ -2887,13 +2887,21 @@ func (c *Checker) inferTypeArg(param, arg ast.Type, bind map[*ast.TypeVar]ast.Ty
 			return param
 		}
 		if p.Super {
-			// `? super T` names nothing of its own to bind, but T may already
-			// have a value -- from the receiver, or from an explicit witness --
-			// and the containment check has to see it. `Function<? super T, U>`
-			// with T = String must accept a Function<String, Integer>; left as
-			// written, the check asks whether `String` is a subtype of the bare
-			// variable T, which is false for every argument, so the call was
-			// rejected even with the witness spelled out.
+			// `Comparator<? super T>` against a `Comparator<String>` settles T =
+			// String: the argument's type is what the lower bound is asking
+			// about, and leaving T open makes the containment check ask whether
+			// String is a subtype of a bare variable -- false for every
+			// argument. This is the contravariant direction of the same rule
+			// the `? extends` case above follows.
+			if tv, isVar := p.Bound.(*ast.TypeVarType); isVar && arg != nil {
+				if v, bound := bind[tv.Var]; bound && v == nil {
+					bind[tv.Var] = arg
+					return &ast.WildcardType{Bound: arg, Super: true}
+				}
+			}
+			// T may also already have a value -- from the receiver, or from an
+			// explicit witness -- and the check has to see it: `Function<? super
+			// T, U>` with T = String must accept a Function<String, Integer>.
 			nb := c.subst(p.Bound, bind)
 			if nb == p.Bound {
 				return param
