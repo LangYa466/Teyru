@@ -1,0 +1,72 @@
+// A class literal (`A.class`, `int.class`, `A[].class`) is a Class object: the
+// same kind of value Object.getClass() returns, built by the same runtime
+// helper, equal to it, and an instance of the prelude's Class. The literal used
+// to be typed Object, so `A.class.getName()` did not compile, and it used to
+// evaluate to the raw tyclass handle, which killed the process when a class
+// object was printed: a tyclass starts with its name, exactly where an object
+// keeps its class pointer, so println dispatched on the name and jumped
+// through it.
+//
+// The first block below is byte for byte what javac 25 prints for the same
+// program. The second block is not, and every difference is Teyru's, not the
+// literal's:
+//   - Class.toString is getName (lib/01_core.teyru), so printing a Class object
+//     prints the bare name where Java prints "class Point" (as t77_getclass).
+//   - A prelude class is named by its Teyru package, so the class of a Class
+//     object is "teyru.Class" where Java says "java.lang.Class".
+//   - Every array value is an instance of one synthetic class, teyru.Array, so
+//     that is what `A[].class` names for any element type and `String[].class
+//     == int[].class` holds; Java gives each element type its own array class
+//     and spells them "[I" and "[Ljava.lang.String;". Naming those here would
+//     take per-element-type array classes, which the runtime and the array
+//     casts do not have -- and it would make the literal a class no array is an
+//     instance of, where Java keeps the two equal (the line above the block).
+//     The primitive forms are exact, because a primitive has no class of its
+//     own in the program and one can be named after the type.
+class Point {
+  public Point() {
+  }
+}
+
+class Outer {
+  class Inner {
+    public Inner() {
+    }
+  }
+}
+
+class Main {
+  public static void main(String[] args) {
+    System.out.println(Point.class.getName())
+    System.out.println(Point.class == Point.class)
+    System.out.println(Point.class == new Point().getClass())
+    Class c = Point.class
+    System.out.println(c.getName())
+    System.out.println(c == Point.class)
+    Object o = Point.class
+    System.out.println(o instanceof Class)
+    System.out.println(((Class) o).getName())
+    System.out.println(boolean.class.getName())
+    System.out.println(byte.class.getName())
+    System.out.println(short.class.getName())
+    System.out.println(char.class.getName())
+    System.out.println(int.class.getName())
+    System.out.println(long.class.getName())
+    System.out.println(float.class.getName())
+    System.out.println(double.class.getName())
+    System.out.println(void.class.getName())
+    System.out.println(int.class == int.class)
+    System.out.println(int.class == Integer.class)
+    System.out.println(Point.class == Integer.class)
+    Object arr = new String[0]
+    System.out.println(arr.getClass() == String[].class)
+    System.out.println(Outer.Inner.class.getName())
+
+    System.out.println(Point.class.getClass().getName())
+    System.out.println(Point.class)
+    System.out.println(Point.class.toString())
+    System.out.println(String[].class.getName())
+    System.out.println(int[].class.getName())
+    System.out.println(String[].class == int[].class)
+  }
+}

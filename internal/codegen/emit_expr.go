@@ -83,6 +83,59 @@ func (e *Emitter) coerce(v string, src, dst ast.Type) string {
 	return v
 }
 
+// classLiteralTarget is the C tyclass a class literal's Class object names.
+func (e *Emitter) classLiteralTarget(v *ast.ClassLit) string {
+	switch t := v.Type.Resolved.(type) {
+	case *ast.ClassType:
+		return "&cls_" + mangle(t.Class.Full)
+	case *ast.PrimType:
+		// A primitive type is not one of the program's classes and no value is
+		// ever an instance of it, so its class object names a class emitted for
+		// the literal itself (emitPrimClassMeta). Naming the wrapper class
+		// instead would answer "teyru.Integer" for int.class and make it equal
+		// to Integer.class, which Java keeps apart.
+		e.primClasses[t.Kind] = true
+		return "&cls_" + primClassName(t.Kind)
+	case *ast.ArrayType:
+		// Every array value is an instance of the one synthetic teyru.Array
+		// class, so that is the class `A[].class` denotes; naming a class per
+		// element type, as Java does, would make the literal a class no array
+		// is an instance of.
+		if a := e.prog.ArrayClass(); a != nil {
+			return "&cls_" + mangle(a.Full)
+		}
+	}
+	return "&cls_" + mangle(e.prog.Builtins.Object.Full)
+}
+
+// classObject renders a class literal as the Class object it denotes: the same
+// kind of value Object.getClass() returns, built by the same runtime helper and
+// equal to it, since the wrapper is cached per class.
+//
+// The literal used to render as the raw tyclass handle `(tyobj*)&cls_A`, which
+// every other consumer reads as an object: the class's *name* sits exactly
+// where an object keeps its class pointer, so println dispatched on the name
+// and jumped through it.
+//
+// ty_class_of_cls wraps the class of the object it is handed, so the named
+// tyclass rides in the header of a throwaway object -- a compound literal,
+// whose address is good for the enclosing statement expression. The second
+// argument is this program's Class, which the runtime needs to make the wrapper
+// an instance of it; dispatch, instanceof and casts then work as for any other
+// object.
+func (e *Emitter) classObject(v *ast.ClassLit) string {
+	cls := e.classLiteralTarget(v)
+	wrap, ok := v.GetType().(*ast.ClassType)
+	if !ok {
+		// The checker types every class literal as the prelude's Class
+		// (sema.classLiteralType); rendering the bare handle keeps an internal
+		// invariant from becoming a panic, which the compiler path forbids.
+		return "((tyobj*)" + cls + ")"
+	}
+	return "({ extern " + classOfProto + "; ty_class_of_cls(&(tyobj){(tyclass*)" + cls +
+		"}, (void*)&cls_" + mangle(wrap.Class.Full) + "); })"
+}
+
 func (e *Emitter) boxCall(v string, p *ast.PrimType, dst ast.Type) string {
 	fn := boxFn(p.Kind)
 	if fn == "" {
@@ -216,11 +269,7 @@ func (e *Emitter) expr(x ast.Expr) string {
 	case *ast.SuperExpr:
 		return "((void*)" + e.thisExpr() + ")"
 	case *ast.ClassLit:
-		t := v.Type.Resolved
-		if ct, ok := t.(*ast.ClassType); ok {
-			return "((tyobj*)&cls_" + mangle(ct.Class.Full) + ")"
-		}
-		return "((tyobj*)&cls_" + mangle(e.prog.Builtins.Object.Full) + ")"
+		return e.classObject(v)
 	case *ast.Lambda:
 		return e.lambdaExpr(v)
 	case *ast.MethodRef:

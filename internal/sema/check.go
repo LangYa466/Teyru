@@ -1017,15 +1017,30 @@ func (ctx *methodCtx) checkExpr(e ast.Expr, want ast.Type) {
 		v.SetType(rt)
 	case *ast.ClassLit:
 		t := c.resolveType(ctx.env, v.Type)
-		v.SetType(&ast.ClassType{Class: c.b.Object})
-		if _, ok := t.(*ast.ClassType); ok {
-			v.SetType(&ast.ClassType{Class: c.b.Object})
-		}
+		// A class literal denotes a Class object -- the same kind of value
+		// Object.getClass() returns -- so that is its static type. It used to
+		// be Object, which made `A.class.getName()` unresolvable.
+		v.SetType(c.classLiteralType())
 		v.Type.Resolved = t
 	default:
 		ctx.errf(e.GetPos(), "TY-INT-0002", "unsupported expression %T", e)
 		e.SetType(ast.ErrorType{})
 	}
+}
+
+// preludeClassFull is the prelude class a class literal's value is an instance
+// of, teyru.Class (lib/01_core.teyru). Object.getClass() returns the same kind
+// of value, and code generation hands the runtime this same class.
+const preludeClassFull = "teyru.Class"
+
+// classLiteralType is the static type of a class literal: the prelude's Class.
+func (c *Checker) classLiteralType() ast.Type {
+	if cl := c.global[preludeClassFull]; cl != nil {
+		return &ast.ClassType{Class: cl}
+	}
+	// The prelude always declares Class; a prelude without it has already been
+	// reported by initBuiltins, and Object keeps the checker going.
+	return &ast.ClassType{Class: c.b.Object}
 }
 
 func blockYieldType(b *ast.Block) ast.Type {
