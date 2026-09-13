@@ -293,9 +293,6 @@ func (e *Emitter) emitClassMeta(cl *ast.Class) {
 				continue
 			}
 			if impl := e.prog.Implements(cl, m); impl != nil {
-				if _, isAbs := impl.SynthKind, false; isAbs {
-					_ = isAbs
-				}
 				imap[m.Selector] = "(void*)" + e.cfunc(impl)
 			}
 		}
@@ -707,9 +704,6 @@ func (e *Emitter) entry() string {
 	b.WriteString("  return 0;\n}\n")
 	return b.String()
 }
-
-// emitStringTable writes the interned string literals collected so far.
-func (e *Emitter) emitStringTable() string { return "" }
 
 // capture runs fn with a fresh output buffer and returns what it wrote.
 func (e *Emitter) capture(fn func()) string {

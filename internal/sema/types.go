@@ -477,6 +477,3 @@ func (c *Checker) constEval(e ast.Expr) constValue {
 	}
 	return constValue{}
 }
-
-// fieldSlotType returns the fields of cl including inherited, in slot order.
-func (c *Checker) allFields(cl *ast.Class) []*ast.Field { return cl.InstFields }

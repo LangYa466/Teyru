@@ -44,17 +44,6 @@ func (f *File) Position(off int) (line, col int) {
 	return i + 1, off - f.lines[i] + 1
 }
 
-// LineStart returns the byte offset of a 0-based line.
-func (f *File) LineStart(line int) int {
-	if line < 0 {
-		return 0
-	}
-	if line >= len(f.lines) {
-		return len(f.Text)
-	}
-	return f.lines[line]
-}
-
 // Pos is a location inside a file.
 type Pos struct {
 	File *File
@@ -102,11 +91,6 @@ type Diagnostics struct {
 // Errorf records an error.
 func (d *Diagnostics) Errorf(pos Pos, code, format string, args ...any) {
 	d.List = append(d.List, Diagnostic{Pos: pos, End: pos.Off, Code: code, Message: fmt.Sprintf(format, args...)})
-}
-
-// Warnf records a warning.
-func (d *Diagnostics) Warnf(pos Pos, code, format string, args ...any) {
-	d.List = append(d.List, Diagnostic{Pos: pos, End: pos.Off, Severity: Warning, Code: code, Message: fmt.Sprintf(format, args...)})
 }
 
 // HasErrors reports whether any error was recorded.

@@ -53,9 +53,6 @@ type Checker struct {
 	extensions map[*ast.Class][]*ast.Class
 }
 
-// c keeps a back pointer for the exported helpers used by code generation.
-var _ = 0
-
 // Check analyses the prelude plus user files.
 func Check(files []*ast.File, diags *source.Diagnostics) *Program {
 	c := &Checker{diags: diags, files: files, global: map[string]*ast.Class{}, anonN: map[*ast.Class]int{}, Props: map[ast.Expr]ast.Expr{}, Direct: map[ast.Expr]bool{}}
