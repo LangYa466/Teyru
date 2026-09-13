@@ -484,6 +484,23 @@ func needsClinit(cl *ast.Class, seen map[*ast.Class]bool) bool {
 	return false
 }
 
+// fieldRead reads an instance field through a receiver expression. Java reads
+// the receiver before the field, so a null one has to answer with a
+// NullPointerException instead of a load from address zero: the receiver is
+// bound once, tested, and only then dereferenced. The test is a compare and a
+// branch the compiler folds away when it can see the receiver is not null, and
+// that the branch predictor answers the same way when it cannot.
+//
+// A read of an implicit `this.f` does not come through here — ident renders it
+// directly, and `this` is null only for a method that was entered through a call
+// the generator binds without a test, which is a gap of its own.
+func (e *Emitter) fieldRead(f *ast.Field, recv ast.Expr) string {
+	n := e.tmpName()
+	ct := cname(f.Owner)
+	return "({ " + ct + "* " + n + " = (" + ct + "*)" + e.expr(recv) + ";" +
+		" if (!" + n + ") ty_npe(); " + n + "->f_" + mangle(f.Name) + "; })"
+}
+
 // fieldAccess renders a field read through a receiver expression.
 func (e *Emitter) fieldAccess(f *ast.Field, recv string) string {
 	if f.Owner == nil {
@@ -509,8 +526,7 @@ func (e *Emitter) selectExpr(v *ast.Select) string {
 		if f.Mods.Has(ast.ModStatic) {
 			return e.fieldAccess(f, "")
 		}
-		recv := e.expr(v.X)
-		return e.fieldAccess(f, e.tmpRef(recv))
+		return e.fieldRead(f, v.X)
 	}
 	return "0"
 }
@@ -1158,6 +1174,15 @@ func (e *Emitter) targetClinit(x ast.Expr) string {
 
 func (e *Emitter) assign(v *ast.Assign) string {
 	pre := e.targetClinit(v.X)
+	// A plain store of a reference into an array element goes through the
+	// runtime's checked store, which is what makes an array reject a value its
+	// element class never promised. targetClinit never wraps an index target, so
+	// the check for one costs nothing here.
+	if ix, ok := v.X.(*ast.Index); ok && v.Op == "=" && pre == "" {
+		if selem := e.elemClass(ix.GetType()); selem != "" {
+			return e.refElemStore(ix, selem, e.coerce(e.expr(v.Y), v.Y.GetType(), v.X.GetType()))
+		}
+	}
 	if v.Op == "=" {
 		lv := e.lvalue(v.X)
 		if pre != "" {
@@ -1224,6 +1249,25 @@ func (e *Emitter) assignInner(v *ast.Assign, lv string) string {
 		return "(" + lv + " = (" + e.ctype(xt) + ")" + fn + "(" + lv + ", " + e.expr(v.Y) + "))"
 	}
 	return "(" + lv + " " + op + "= " + e.operand(v.Y, v.OpType) + ")"
+}
+
+// refElemStore renders the store of val into ix, an element of an array of
+// references, as one statement expression. selem is the element class at the
+// store site, which the runtime store check compares the array's own element
+// class against (see ty_array_store_ref in tyrt.h).
+//
+// The order is Java's for an array assignment: the array, then the index, then
+// the value, and only then the tests, which is why the value is bound to a
+// temporary first. The result of the assignment is the stored value, so it is
+// the last expression of the statement expression.
+func (e *Emitter) refElemStore(ix *ast.Index, selem, val string) string {
+	n := e.tmpName()
+	k := e.tmpName()
+	v := e.tmpName()
+	t := e.ctype(ix.GetType())
+	return "({ tyarr* " + n + " = (tyarr*)" + e.expr(ix.X) + "; int64_t " + k + " = (int64_t)(" +
+		e.expr(ix.Index) + "); " + t + " " + v + " = (" + t + ")(" + val + ");" +
+		" ty_array_store_ref(" + n + ", " + selem + ", " + k + ", (void*)" + v + "); " + v + "; })"
 }
 
 // ---------------------------------------------------------------- calls
@@ -1444,6 +1488,30 @@ func (e *Emitter) outerArg(v *ast.New, outer *ast.Class) string {
 	return e.outerAccess(outer)
 }
 
+// elemClass is the C expression for the one class an array of elem promises its
+// elements are, or "" when the element type is not a single class. A primitive
+// array holds no references, and Teyru has one runtime class for every array
+// type, so an array of arrays cannot name the class its elements have either.
+func (e *Emitter) elemClass(elem ast.Type) string {
+	ct, ok := e.prog.Erased(elem).(*ast.ClassType)
+	if !ok {
+		return ""
+	}
+	return "&cls_" + mangle(ct.Class.Full)
+}
+
+// elemPromise renders the statement that records what an array promises for its
+// elements, which is what the store check in tyrt.h compares a value against,
+// or "" when the element type names no single class (see elemClass). An array
+// created without one is stored into unchecked, as every array was before the
+// promise was recorded.
+func (e *Emitter) elemPromise(name string, elem ast.Type) string {
+	if c := e.elemClass(elem); c != "" {
+		return " " + name + "->elemcls = " + c + ";"
+	}
+	return ""
+}
+
 func (e *Emitter) newArray(v *ast.NewArray) string {
 	elem := v.Elem.Resolved
 	es := e.elemSize(elem)
@@ -1454,14 +1522,17 @@ func (e *Emitter) newArray(v *ast.NewArray) string {
 	if v.Init != nil {
 		return e.arrayInitOf(v.Init, elem)
 	}
+	promise := e.elemPromise("_a", elem)
 	if len(v.Dims) == 0 {
-		return "({ tyarr* _a = ty_array_new(0, " + es + "); _a->refs = " + refs + "; _a; })"
+		return "({ tyarr* _a = ty_array_new(0, " + es + "); _a->refs = " + refs + ";" + promise + " _a; })"
 	}
 	dim := e.expr(v.Dims[0])
 	if len(v.Dims) == 1 {
-		return "({ tyarr* _a = ty_array_new(" + dim + ", " + es + "); _a->refs = " + refs + "; _a; })"
+		return "({ tyarr* _a = ty_array_new(" + dim + ", " + es + "); _a->refs = " + refs + ";" + promise + " _a; })"
 	}
-	// multi-dimensional creation allocates the inner arrays as well
+	// multi-dimensional creation allocates the inner arrays as well. The outer
+	// arrays hold arrays, so they carry no promise; the recursive call gives the
+	// innermost ones theirs.
 	elemDims := &ast.NewArray{ExprBase: ast.ExprBase{Pos: v.Pos, T: v.GetType()}, Elem: v.Elem, Dims: v.Dims[1:], Extra: v.Extra}
 	inner := e.newArray(elemDims)
 	n := e.tmpName()
@@ -1485,7 +1556,7 @@ func (e *Emitter) arrayInitOf(v *ast.ArrayInit, elem ast.Type) string {
 	}
 	var b strings.Builder
 	n := e.tmpName()
-	fmt.Fprintf(&b, "({ tyarr* %s = ty_array_new(%d, %s); %s->refs = %s;", n, len(v.Elems), es, n, refs)
+	fmt.Fprintf(&b, "({ tyarr* %s = ty_array_new(%d, %s); %s->refs = %s;%s", n, len(v.Elems), es, n, refs, e.elemPromise(n, elem))
 	for i, el := range v.Elems {
 		val := e.arrayElemValue(el, elem)
 		if e.isRefElem(elem) {

@@ -75,7 +75,17 @@
 
 `T[]`、`T[][]`、`new int[10]`、`new int[2][3]`（會建立內層陣列）、
 `new String[]{"a","b"}`、`{1,2,3}` 初始化列表。陣列有 `length` 欄位與
-`clone()` 方法；元素存取會做邊界檢查。
+`clone()` 方法；元素存取會做邊界檢查（讀取與寫入都是，null 陣列先丟
+`NullPointerException` 再檢查邊界，順序與 Java 相同）。
+
+陣列是共變的（`Object[] o = new String[2]` 合法），但建立時就記下元素型別，
+所以透過較寬的視角寫入不符合的值會丟 `ArrayStoreException`：
+
+```teyru
+Object[] o = new String[2]
+o[0] = "hello"
+o[0] = Integer.valueOf(5)   // ArrayStoreException
+```
 
 ### 3.4 `var` 與 `val`
 
@@ -409,7 +419,10 @@ try {
 - `Throwable` 家族：`Exception`、`RuntimeException`、`NullPointerException`、
   `ArithmeticException`、`ArrayIndexOutOfBoundsException`、`ClassCastException`、
   `IllegalArgumentException`、`IllegalStateException`、`NoSuchElementException`、
-  `NegativeArraySizeException`、`AssertionError`、`UnsupportedOperationException`。
+  `NegativeArraySizeException`、`ArrayStoreException`、`AssertionError`、
+  `UnsupportedOperationException`。
+- 讀取 null 參考的欄位、呼叫 null 參考的方法、對 null 參考賦值都會丟
+  `NullPointerException`。
 - `catch` 多型別用 `|`；`finally` 一定會執行（含 catch 內再拋出的情況）。
 - **沒有 checked exception 檢查**：`throws` 會被剖析但不強制。
 - 未捕捉的例外會印出訊息並以狀態 1 結束。
