@@ -122,12 +122,18 @@ class PetController {
 | `@PathVariable` | 路徑裡 `{name}` 的值，會轉成參數的型別 |
 | `@RequestParam` | 查詢參數，`defaultValue` 可給預設 |
 | `@RequestHeader` | 請求標頭（名稱不分大小寫），`defaultValue` 可給預設 |
-| `@RequestBody` | 請求主體 |
+| `@RequestBody` | 請求主體；參數是 `String` 就原樣拿到，是類別（或 record）就以 Gson 綁定解析 |
 | `@ResponseBody` | 已宣告；`@RestController` 本來就隱含，所以有沒有都一樣 |
 
 **參數轉型**：路徑與查詢參數都是字串，所以 `int`、`long`、`double`、`float`、
 `short`、`byte`、`boolean` 的參數會經由對應的 `parseX` 轉換（`int` 用
 `Integer.parseInt`）。
+
+**請求主體**：`@RequestBody` 的參數是 `String` 時拿到原樣的主體（想自己看的
+payload 就是這樣接），是類別或 record 時由**編譯器為該型別產生的 Gson 綁定**解析
+——Spring 依 `Content-Type` 挑訊息轉換器，這裡型別在編譯期就知道了，轉換器就是那
+個綁定。解析失敗丟的是同一個 `JsonSyntaxException`。沒有 JSON 映射的型別是編譯
+錯誤，不是第一次請求時的例外。
 
 **回應**：回傳 `HttpResponse` 就完全自己決定；回傳 `String` 是 `text/plain`；回傳
 `void` 是空主體；其他型別以 Gson 綁定序列化成 `application/json`（見
