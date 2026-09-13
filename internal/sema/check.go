@@ -3218,7 +3218,10 @@ func (ctx *methodCtx) checkQualifiedSuper(v *ast.Call) {
 
 func (ctx *methodCtx) checkThisCtor(v *ast.Call) {
 	if ctx.m == nil || !ctx.m.IsCtor {
-		ctx.errf(v.Pos, "TY-TYP-0074", "constructor call must be the first statement of a constructor")
+		// Not "must be the first statement": statements may precede it, which is
+		// JEP 513 and what the emitter implements. This fires when there is no
+		// constructor around the call at all.
+		ctx.errf(v.Pos, "TY-TYP-0074", "this(...) and super(...) may only be called from a constructor")
 	}
 	if v.Super {
 		if ctx.cl.Super == nil {

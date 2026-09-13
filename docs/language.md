@@ -185,7 +185,9 @@ class Counter {
 ```
 
 - 靜態與實例初始化區塊：`static { … }` 與 `{ … }`。
-- 建構子可以多載；`this(...)`／`super(...)` 必須是建構子第一句。
+- 建構子可以多載；`this(...)`／`super(...)` 只能寫在建構子裡，但**不必是**第一句——
+  `super()` 之前的敘述會先執行（JEP 513，Java 25 的彈性建構子主體），實際輸出與
+  javac 25 相同。
 - 可變參數：`void log(String fmt, Object... args)`。
 - 抽象方法只能在抽象類別或介面中；介面方法有 body 時必須是
   `default`、`static` 或 `private`。

@@ -149,7 +149,7 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 | TY-TYP-0071 | `an enclosing instance of %s is required` | 內部類別需要在有外層實例的地方建立。 |
 | TY-TYP-0072 | `no suitable constructor found for %s(%s)` | 沒有相符的建構子；檢查參數數量與型別。 |
 | TY-TYP-0073 | `array clone takes no arguments` | `clone()` 不接受參數。 |
-| TY-TYP-0074 | `constructor call must be the first statement of a constructor` | `this(...)`／`super(...)` 必須是第一句。 |
+| TY-TYP-0074 | `this(...) and super(...) may only be called from a constructor` | `this(...)`／`super(...)` 只能寫在建構子裡（可以是 JEP 513 允許的「`super()` 之前的敘述」之一，見 docs/language.md §4.2）。 |
 | TY-TYP-0075 | `recursive constructor invocation` | 建構子遞迴呼叫自己。 |
 
 ### 方法解析、lambda 與 pattern（0076–0094）
