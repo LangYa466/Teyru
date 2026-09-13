@@ -67,6 +67,13 @@ func (e *Emitter) emitSynthetic(cl *ast.Class, m *ast.Method) {
 			} else {
 				e.line("return this->f_%s;\n", mangle(m.Accessor.Prop.Name))
 			}
+		} else if m.Mods.Has(ast.ModNative) {
+			// A native method of a built-in class has no entry in the native
+			// table, so nothing implements it. An empty body would return
+			// whatever the register happened to hold -- teyru.Double.compareTo
+			// returned a pointer-sized number and teyru.Byte.valueOf a Bad
+			// pointer -- so fail with the method's name instead.
+			e.line("ty_unimplemented(%s);\n", e.cstr(cl.Full+"."+m.Name))
 		} else {
 			e.line("/* empty */\n")
 		}
