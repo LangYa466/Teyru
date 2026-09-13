@@ -12,8 +12,53 @@ abstract class Number extends Object {
   public abstract short shortValue()
 }
 
-class Byte extends Number {
+/* The parsing helpers every wrapper shares. Java's parseXxx throws
+   NumberFormatException for a string that is not a number of that type, and the
+   throw has to happen in Teyru: the runtime cannot raise a class whose tyclass
+   the generated startup does not install (see the TY_* table in emit.go). So
+   each parse is a test -- a native predicate that answers "is this string a
+   number of this type in this radix" -- followed by a native conversion that
+   assumes the answer was yes, and the exception in between.
+
+   The messages are Java's, down to the quotes and the radix suffix, because a
+   program that prints the exception's message should print what Java prints. */
+
+class Byte extends Number implements Comparable<Byte> {
+  public static final byte MIN_VALUE = -128
+  public static final byte MAX_VALUE = 127
+  public static final int SIZE = 8
+  public static final int BYTES = 1
+
   public static native Byte valueOf(byte v)
+  public static Byte valueOf(String s) {
+    return valueOf(parseByte(s))
+  }
+  public static Byte valueOf(String s, int radix) {
+    return valueOf(parseByte(s, radix))
+  }
+  /* Byte.parseByte is Integer.parseInt with a range test around it, which is
+     how the JDK writes it too: the digits and the sign are the int parser's
+     business, the byte's range is this class's. */
+  public static byte parseByte(String s) {
+    return parseByte(s, 10)
+  }
+  public static byte parseByte(String s, int radix) {
+    int v = Integer.parseInt(s, radix)
+    if (v < -128 || v > 127) {
+      throw new NumberFormatException("Value out of range. Value:\"" + s + "\" Radix:" + radix)
+    }
+    return (byte) v
+  }
+  public static native String toString(byte v)
+  public static native int compare(byte a, byte b)
+  public static native int hashCode(byte v)
+  public static int toUnsignedInt(byte x) {
+    return x & 0xFF
+  }
+  public static long toUnsignedLong(byte x) {
+    return x & 0xFFL
+  }
+
   public native byte byteValue()
   public native int hashCode()
   public native String toString()
@@ -22,10 +67,45 @@ class Byte extends Number {
   public native double doubleValue()
   public native float floatValue()
   public native short shortValue()
+  public native boolean equals(Object o)
+  public int compareTo(Byte o) {
+    return compare(byteValue(), o.byteValue())
+  }
 }
 
-class Short extends Number {
+class Short extends Number implements Comparable<Short> {
+  public static final short MIN_VALUE = -32768
+  public static final short MAX_VALUE = 32767
+  public static final int SIZE = 16
+  public static final int BYTES = 2
+
   public static native Short valueOf(short v)
+  public static Short valueOf(String s) {
+    return valueOf(parseShort(s))
+  }
+  public static Short valueOf(String s, int radix) {
+    return valueOf(parseShort(s, radix))
+  }
+  public static short parseShort(String s) {
+    return parseShort(s, 10)
+  }
+  public static short parseShort(String s, int radix) {
+    int v = Integer.parseInt(s, radix)
+    if (v < -32768 || v > 32767) {
+      throw new NumberFormatException("Value out of range. Value:\"" + s + "\" Radix:" + radix)
+    }
+    return (short) v
+  }
+  public static native String toString(short v)
+  public static native int compare(short a, short b)
+  public static native int hashCode(short v)
+  public static int toUnsignedInt(short x) {
+    return x & 0xFFFF
+  }
+  public static long toUnsignedLong(short x) {
+    return x & 0xFFFFL
+  }
+
   public native short shortValue()
   public native int hashCode()
   public native String toString()
@@ -34,20 +114,98 @@ class Short extends Number {
   public native double doubleValue()
   public native float floatValue()
   public native byte byteValue()
+  public native boolean equals(Object o)
+  public int compareTo(Short o) {
+    return compare(shortValue(), o.shortValue())
+  }
 }
 
 class Integer extends Number implements Comparable<Integer> {
-  public static native int parseInt(String s)
+  public static final int MIN_VALUE = -2147483648
+  public static final int MAX_VALUE = 2147483647
+  public static final int SIZE = 32
+  public static final int BYTES = 4
+
+  public static int parseInt(String s) {
+    return parseInt(s, 10)
+  }
+  /* The radix test comes first, then the null test, then the digits: Java
+     answers a radix of 1 or of 37 with a message about the radix whatever the
+     string is, and a null string with a message about the string. */
+  public static int parseInt(String s, int radix) {
+    if (radix < 2 || radix > 36) {
+      throw new NumberFormatException("radix " + radix + " was thrown")
+    }
+    if (s == null) {
+      throw new NumberFormatException("Cannot parse null string")
+    }
+    if (!parsable(s, radix)) {
+      if (radix == 10) {
+        throw new NumberFormatException("For input string: \"" + s + "\"")
+      }
+      throw new NumberFormatException("For input string: \"" + s + "\" under radix " + radix)
+    }
+    return parseIntDigits(s, radix)
+  }
+  private static native boolean parsable(String s, int radix)
+  private static native int parseIntDigits(String s, int radix)
+
   public static native Integer valueOf(int v)
+  public static Integer valueOf(String s) {
+    return valueOf(parseInt(s))
+  }
+  public static Integer valueOf(String s, int radix) {
+    return valueOf(parseInt(s, radix))
+  }
   public static native int compare(int a, int b)
-  public static native int max(int a, int b)
-  public static native int min(int a, int b)
+  public static native int compareUnsigned(int a, int b)
+  public static int max(int a, int b) {
+    return a >= b ? a : b
+  }
+  public static int min(int a, int b) {
+    return a <= b ? a : b
+  }
+  public static int sum(int a, int b) {
+    return a + b
+  }
+  public static native int signum(int v)
+  public static native int bitCount(int v)
+  public static native int numberOfLeadingZeros(int v)
+  public static native int numberOfTrailingZeros(int v)
+  public static native int highestOneBit(int v)
+  public static native int lowestOneBit(int v)
+  public static native int reverse(int v)
+  public static native int reverseBytes(int v)
+  public static native int rotateLeft(int v, int distance)
+  public static native int rotateRight(int v, int distance)
+  public static native int hashCode(int v)
+
+  public static String toString(int v) {
+    return String.valueOf(v)
+  }
+  /* Signed in every radix, as Java's is: Integer.toString(-1, 16) is "-1",
+     while toHexString(-1) is "ffffffff" -- the binary, octal and hex forms
+     read the value as unsigned, which is what makes them useful for masks. */
+  public static native String toString(int v, int radix)
+  public static String toBinaryString(int v) {
+    return toUnsignedString(v, 2)
+  }
+  public static String toOctalString(int v) {
+    return toUnsignedString(v, 8)
+  }
+  public static String toHexString(int v) {
+    return toUnsignedString(v, 16)
+  }
+  public static String toUnsignedString(int v) {
+    return toUnsignedString(v, 10)
+  }
+  public static native String toUnsignedString(int v, int radix)
+
   public native int intValue()
   public native int hashCode()
   public native boolean equals(Object o)
   public native int compareTo(Integer o)
   public native String toString()
-  public static native String toString(int v)
   public native long longValue()
   public native double doubleValue()
   public native float floatValue()
@@ -56,18 +214,86 @@ class Integer extends Number implements Comparable<Integer> {
 }
 
 class Long extends Number implements Comparable<Long> {
-  public static native long parseLong(String s)
+  public static final long MIN_VALUE = -9223372036854775808L
+  public static final long MAX_VALUE = 9223372036854775807L
+  public static final int SIZE = 64
+  public static final int BYTES = 8
+
+  public static long parseLong(String s) {
+    return parseLong(s, 10)
+  }
+  public static long parseLong(String s, int radix) {
+    if (radix < 2 || radix > 36) {
+      throw new NumberFormatException("radix " + radix + " was thrown")
+    }
+    if (s == null) {
+      throw new NumberFormatException("Cannot parse null string")
+    }
+    if (!parsableLong(s, radix)) {
+      if (radix == 10) {
+        throw new NumberFormatException("For input string: \"" + s + "\"")
+      }
+      throw new NumberFormatException("For input string: \"" + s + "\" under radix " + radix)
+    }
+    return parseLongDigits(s, radix)
+  }
+  private static native boolean parsableLong(String s, int radix)
+  private static native long parseLongDigits(String s, int radix)
+
   public static native Long valueOf(long v)
+  public static Long valueOf(String s) {
+    return valueOf(parseLong(s))
+  }
+  public static Long valueOf(String s, int radix) {
+    return valueOf(parseLong(s, radix))
+  }
   public static native int compare(long a, long b)
-  public static native long max(long a, long b)
-  public static native long min(long a, long b)
+  public static native int compareUnsigned(long a, long b)
+  public static long max(long a, long b) {
+    return a >= b ? a : b
+  }
+  public static long min(long a, long b) {
+    return a <= b ? a : b
+  }
+  public static long sum(long a, long b) {
+    return a + b
+  }
+  public static native int signum(long v)
+  public static native int bitCount(long v)
+  public static native int numberOfLeadingZeros(long v)
+  public static native int numberOfTrailingZeros(long v)
+  public static native long highestOneBit(long v)
+  public static native long lowestOneBit(long v)
+  public static native long reverse(long v)
+  public static native long reverseBytes(long v)
+  public static native long rotateLeft(long v, int distance)
+  public static native long rotateRight(long v, int distance)
+  public static native int hashCode(long v)
+
+  public static String toString(long v) {
+    return String.valueOf(v)
+  }
+  public static native String toString(long v, int radix)
+  public static String toBinaryString(long v) {
+    return toUnsignedString(v, 2)
+  }
+  public static String toOctalString(long v) {
+    return toUnsignedString(v, 8)
+  }
+  public static String toHexString(long v) {
+    return toUnsignedString(v, 16)
+  }
+  public static String toUnsignedString(long v) {
+    return toUnsignedString(v, 10)
+  }
+  public static native String toUnsignedString(long v, int radix)
+
   public native long longValue()
   public native int intValue()
   public native int hashCode()
   public native boolean equals(Object o)
   public native int compareTo(Long o)
   public native String toString()
-  public static native String toString(long v)
   public native double doubleValue()
   public native float floatValue()
   public native byte byteValue()
@@ -75,9 +301,46 @@ class Long extends Number implements Comparable<Long> {
 }
 
 class Float extends Number implements Comparable<Float> {
-  public static native float parseFloat(String s)
+  public static final float MAX_VALUE = 3.4028235E38f
+  public static final float MIN_VALUE = 1.4E-45f
+  public static final float POSITIVE_INFINITY = 1.0f / 0.0f
+  public static final float NEGATIVE_INFINITY = -1.0f / 0.0f
+  public static final float NaN = 0.0f / 0.0f
+  public static final int SIZE = 32
+  public static final int BYTES = 4
+
+  public static float parseFloat(String s) {
+    if (s == null) {
+      throw new NumberFormatException("Cannot parse null string")
+    }
+    if (!parsableFloat(s)) {
+      throw new NumberFormatException("For input string: \"" + s + "\"")
+    }
+    return parseFloatDigits(s)
+  }
+  private static native boolean parsableFloat(String s)
+  private static native float parseFloatDigits(String s)
+
   public static native Float valueOf(float v)
+  public static Float valueOf(String s) {
+    return valueOf(parseFloat(s))
+  }
   public static native int compare(float a, float b)
+  public static native float max(float a, float b)
+  public static native float min(float a, float b)
+  public static float sum(float a, float b) {
+    return a + b
+  }
+  public static native boolean isNaN(float v)
+  public static native boolean isInfinite(float v)
+  public static native boolean isFinite(float v)
+  public static native int hashCode(float v)
+  public static native int floatToIntBits(float v)
+  public static native int floatToRawIntBits(float v)
+  public static native float intBitsToFloat(int bits)
+
+  public static native String toString(float v)
+
   public native float floatValue()
   public native int hashCode()
   public native boolean equals(Object o)
@@ -91,16 +354,51 @@ class Float extends Number implements Comparable<Float> {
 }
 
 class Double extends Number implements Comparable<Double> {
-  public static native double parseDouble(String s)
+  public static final double MAX_VALUE = 1.7976931348623157E308
+  public static final double MIN_VALUE = 4.9E-324
+  public static final double POSITIVE_INFINITY = 1.0 / 0.0
+  public static final double NEGATIVE_INFINITY = -1.0 / 0.0
+  public static final double NaN = 0.0 / 0.0
+  public static final int SIZE = 64
+  public static final int BYTES = 8
+
+  public static double parseDouble(String s) {
+    if (s == null) {
+      throw new NumberFormatException("Cannot parse null string")
+    }
+    if (!parsableDouble(s)) {
+      throw new NumberFormatException("For input string: \"" + s + "\"")
+    }
+    return parseDoubleDigits(s)
+  }
+  private static native boolean parsableDouble(String s)
+  private static native double parseDoubleDigits(String s)
+
   public static native Double valueOf(double v)
+  public static Double valueOf(String s) {
+    return valueOf(parseDouble(s))
+  }
   public static native int compare(double a, double b)
+  public static native double max(double a, double b)
+  public static native double min(double a, double b)
+  public static double sum(double a, double b) {
+    return a + b
+  }
   public static native boolean isNaN(double v)
+  public static native boolean isInfinite(double v)
+  public static native boolean isFinite(double v)
+  public static native int hashCode(double v)
+  public static native long doubleToLongBits(double v)
+  public static native long doubleToRawLongBits(double v)
+  public static native double longBitsToDouble(long bits)
+
+  public static native String toString(double v)
+
   public native double doubleValue()
   public native int hashCode()
   public native boolean equals(Object o)
   public native int compareTo(Double o)
   public native String toString()
-  public static native String toString(double v)
   public native int intValue()
   public native long longValue()
   public native float floatValue()
@@ -109,10 +407,29 @@ class Double extends Number implements Comparable<Double> {
 }
 
 class Character extends Object implements Comparable<Character> {
+  public static final char MIN_VALUE = 0
+  public static final char MAX_VALUE = 65535
+  public static final int MIN_RADIX = 2
+  public static final int MAX_RADIX = 36
+  public static final int SIZE = 16
+  public static final int BYTES = 2
+
   public static native Character valueOf(char c)
   public static native boolean isDigit(char c)
   public static native boolean isLetter(char c)
+  public static native boolean isLetterOrDigit(char c)
+  public static native boolean isAlphabetic(char c)
+  public static native boolean isUpperCase(char c)
+  public static native boolean isLowerCase(char c)
   public static native boolean isWhitespace(char c)
+  public static native char toUpperCase(char c)
+  public static native char toLowerCase(char c)
+  public static native int getNumericValue(char c)
+  public static native int digit(char c, int radix)
+  public static native int compare(char a, char b)
+  public static native String toString(char c)
+  public static native int hashCode(char c)
+
   public native char charValue()
   public native int hashCode()
   public native boolean equals(Object o)
@@ -120,11 +437,46 @@ class Character extends Object implements Comparable<Character> {
   public native String toString()
 }
 
-class Boolean extends Object {
-  public static native boolean parseBoolean(String s)
+class Boolean extends Object implements Comparable<Boolean> {
+  public static final Boolean TRUE = Boolean.valueOf(true)
+  public static final Boolean FALSE = Boolean.valueOf(false)
+
+  /* Java's parser is case-insensitive: only "true" in any case is true, and a
+     null is false. The runtime helper compares against "true" exactly, so the
+     fold happens here. */
+  public static boolean parseBoolean(String s) {
+    return s != null && s.equalsIgnoreCase("true")
+  }
+  public static Boolean valueOf(String s) {
+    return parseBoolean(s) ? TRUE : FALSE
+  }
   public static native Boolean valueOf(boolean v)
+  public static native String toString(boolean v)
+  public static int compare(boolean a, boolean b) {
+    if (a == b) {
+      return 0
+    }
+    return a ? 1 : -1
+  }
+  public static native int hashCode(boolean v)
+  public static boolean logicalAnd(boolean a, boolean b) {
+    return a && b
+  }
+  public static boolean logicalOr(boolean a, boolean b) {
+    return a || b
+  }
+  public static boolean logicalXor(boolean a, boolean b) {
+    return a != b
+  }
+  public static boolean logicalNot(boolean a) {
+    return !a
+  }
+
   public native boolean booleanValue()
   public native int hashCode()
   public native boolean equals(Object o)
   public native String toString()
+  public int compareTo(Boolean o) {
+    return compare(booleanValue(), o.booleanValue())
+  }
 }

@@ -175,10 +175,28 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 | TY-TYP-0092 | `a primitive pattern needs a name to bind the value to` | 原生型別 pattern 一定要綁定變數：`o instanceof int i`，不能只寫 `o instanceof int`。 |
 | TY-TYP-0093 | `boolean cannot be converted to %s` | `boolean` 只能和 `boolean` pattern 配對。 |
 | TY-TYP-0094 | `primitive pattern %s needs a boxed value, found %s` | 選擇子既不是參考型別也不是原生數值。 |
+| TY-IO-0101 | 模組檔本身的錯誤（`teyru.mod` 無法解析、版本語法不對…） | 訊息來自 `internal/mod`，指出檔案與原因。 |
+| TY-IO-0102 | `cannot read package %s: %v` | 匯入的套件在模組快取裡找不到，或它的原始檔讀不出來。先跑 `teyru mod tidy` 或 `teyru get`。 |
+| TY-IO-0103 | `teyru.sum` 的雜湊不符 | 快取裡的模組內容與 `teyru.sum` 記的不一樣。要嘛是依賴被改過，要嘛是快取被動過；建置會停下來而不是用下去。 |
+| TY-IO-0104 | `%s declares package %s, but %s in the same directory declares %s` | 同一個目錄裡的兩個檔案宣告了不同的套件。 |
 | TY-TYP-0095 | `cannot infer the type arguments of %s(%s)` | 泛型方法的型別引數推不出來：沒有帶型別的引數，也沒有目標型別可用（lambda 參數最常見）。寫出型別引數或給一個有型別的引數。 |
 | TY-TYP-0096 | `switch expression does not cover all possible input values` | switch **運算式**必須窮盡：`int`／`String` 選擇子一定要有 `default`，列舉選擇子要涵蓋每一個常數。switch 陳述式不受此限。 |
 | TY-TYP-0097 | `native methods %s and %s both need the C symbol %s` | 兩個多載 native 方法編碼後得到同一個 C 符號（例如類別名 `AI` 與 `int[]`）。改名或改參數型別。 |
 | TY-TYP-0098 | `non-static %s cannot be referenced from a static context` | lambda 主體用到撰寫處的 `this`（含未限定的實例方法呼叫、裸欄位名與 `super`），但 lambda 寫在 static 方法或 static 初始化區塊裡，沒有實例可捕獲。Java 同樣拒絕。 |
+| TY-TYP-0108 | `%s is a prelude class; it has no generated JSON binding` | 對前置類別（String、JsonObject…）要求產生 JSON 綁定。 |
+| TY-TYP-0109 | `two fields of %s both map to the JSON name %s` | 兩個欄位經 `@SerializedName` 後同名。 |
+| TY-TYP-0112 | `%s is bound from JSON but has no no-argument constructor; ...` | Gson 用 Unsafe 繞過建構子配置物件，Teyru 沒有，所以從 JSON 讀取的類別需要一個無參建構子。 |
+| TY-TYP-0111 | `%s answers with %s, which has no JSON mapping; ...` | controller 方法的回傳型別沒有 JSON 映射（陣列、List…）。改回傳 String 或 HttpResponse，或是一個綁定走得完的類別。 |
+| TY-TYP-0110 | `%s has no JSON mapping for its type %s` | 欄位型別沒有 JSON 映射。Gson 在執行期才拋，這裡在綁定的那一行就報。 |
+| TY-TYP-0100 | `two beans are named %s: %s and %s` | 兩個 bean 取了同一個名字（`@Component("x")` 或 `@Bean("x")`）。 |
+| TY-TYP-0101 | `%s is declared by the framework and cannot be redefined` | `__TeyruFramework` 是容器註冊用的合成類別，名字被保留。 |
+| TY-TYP-0102 | `@Bean method %s ...` | `@Bean` 方法必須不是 static、且回傳型別是一個類別（基本型別會裝箱）。 |
+| TY-TYP-0103 | `no bean of type %s to inject into %s` | 某個 `@Autowired` 的型別沒有任何 bean。Spring 在啟動時才發現，這裡在編譯期。 |
+| TY-TYP-0104 | `%d beans of type %s: name one with @Qualifier` | 同型別有多個 bean，沒有 `@Primary` 也沒有 `@Qualifier`。 |
+| TY-TYP-0105 | `two constructors of %s are annotated @Autowired` / `%s has %d constructors and none is annotated @Autowired` | 建構子注入的選擇規則：單一建構子、或標了 `@Autowired` 的那一個。 |
+| TY-TYP-0106 | `@PostConstruct method %s must take no arguments and return void` | 生命週期回呼的簽章。 |
+| TY-TYP-0107 | `circular dependency: %s` | bean 之間的相依形成環。Spring 在啟動時拋例外，這裡在編譯期就拒絕。 |
+| TY-TYP-0099 | `reference to %s is ambiguous: it is declared in both %s and %s` | 兩個 `import p.*` 都提供同一個簡單名稱（JLS 6.5.5.1）。寫出完整名稱或用單一類型匯入（`import a.Widget`）消歧義。 |
 
 ## TY-PROP：原生 property
 

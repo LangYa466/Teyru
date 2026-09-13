@@ -1,0 +1,1278 @@
+package teyru
+
+/* The List and Deque implementations: the sublist view ArrayList.subList
+ * returns, LinkedList, and ArrayDeque.
+ */
+
+/* A view, not a copy: every read and write goes to the backing list at an
+   offset, which is what makes `list.subList(1, 3).set(0, x)` put x at index 1
+   of `list`. Java's ArrayList.SubList is the same shape.
+ *
+ * Nested sublists work because a sublist of a sublist is another ListSubList
+ * over the same root with a larger offset.
+ *
+ * What is missing against the JDK: there is no modCount, so a structural
+ * modification of the root during iteration is undefined here instead of a
+ * ConcurrentModificationException (see docs/language.md §13). */
+class ListSubList<T> implements List<T>, Collection<T> {
+  private List<T> root
+  private int offset
+  private int count
+
+  public ListSubList(List<T> r, int from, int to) {
+    root = r
+    offset = from
+    count = to - from
+  }
+
+  private int at(int i) {
+    return offset + i
+  }
+
+  private void checkIndex(int i) {
+    if (i < 0 || i >= count) {
+      throw new IndexOutOfBoundsException("index " + i + ", size " + count)
+    }
+  }
+
+  private void checkIndexForAdd(int i) {
+    if (i < 0 || i > count) {
+      throw new IndexOutOfBoundsException("index " + i + ", size " + count)
+    }
+  }
+
+  public int size() {
+    return count
+  }
+
+  public boolean isEmpty() {
+    return count == 0
+  }
+
+  public T get(int i) {
+    checkIndex(i)
+    return root.get(at(i))
+  }
+
+  public T set(int i, T e) {
+    checkIndex(i)
+    return root.set(at(i), e)
+  }
+
+  public void add(int i, T e) {
+    checkIndexForAdd(i)
+    root.add(at(i), e)
+    count++
+  }
+
+  public boolean add(T e) {
+    root.add(at(count), e)
+    count++
+    return true
+  }
+
+  public T remove(int i) {
+    checkIndex(i)
+    T old = root.remove(at(i))
+    count--
+    return old
+  }
+
+  public boolean remove(Object o) {
+    int i = indexOf(o)
+    if (i < 0) {
+      return false
+    }
+    root.remove(at(i))
+    count--
+    return true
+  }
+
+  public int indexOf(Object o) {
+    for (int i = 0 : i < count : i++) {
+      if (Objects.equals(o, root.get(at(i)))) {
+        return i
+      }
+    }
+    return -1
+  }
+
+  public int lastIndexOf(Object o) {
+    for (int i = count - 1 : i >= 0 : i--) {
+      if (Objects.equals(o, root.get(at(i)))) {
+        return i
+      }
+    }
+    return -1
+  }
+
+  public boolean contains(Object o) {
+    return indexOf(o) >= 0
+  }
+
+  public Object[] toArray() {
+    Object[] out = new Object[count]
+    for (int i = 0 : i < count : i++) {
+      out[i] = root.get(at(i))
+    }
+    return out
+  }
+
+  public boolean containsAll(Collection<?> c) {
+    for (Object o : c) {
+      if (!contains(o)) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public boolean addAll(Collection<? extends T> c) {
+    return addAll(count, c)
+  }
+
+  public boolean addAll(int index, Collection<? extends T> c) {
+    checkIndexForAdd(index)
+    Object[] a = c.toArray()
+    if (a.length == 0) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      root.add(at(index + i), (T) a[i])
+    }
+    count += a.length
+    return true
+  }
+
+  /* A sublist removes through the root, one index at a time, walking
+     backwards so that the indices still ahead of the cursor do not shift. */
+  public boolean removeAll(Collection<?> c) {
+    boolean changed = false
+    for (int i = count - 1 : i >= 0 : i--) {
+      if (c.contains(root.get(at(i)))) {
+        root.remove(at(i))
+        count--
+        changed = true
+      }
+    }
+    return changed
+  }
+
+  public boolean retainAll(Collection<?> c) {
+    boolean changed = false
+    for (int i = count - 1 : i >= 0 : i--) {
+      if (!c.contains(root.get(at(i)))) {
+        root.remove(at(i))
+        count--
+        changed = true
+      }
+    }
+    return changed
+  }
+
+  public void clear() {
+    // from the end, so each removal is the last element of the view
+    while (count > 0) {
+      root.remove(at(count - 1))
+      count--
+    }
+  }
+
+  public Iterator<T> iterator() {
+    return listIterator()
+  }
+
+  public ListIterator<T> listIterator() {
+    return listIterator(0)
+  }
+
+  public ListIterator<T> listIterator(int index) {
+    if (index < 0 || index > count) {
+      throw new IndexOutOfBoundsException("index " + index + ", size " + count)
+    }
+    return new ListSubListIterator<T>(this, index)
+  }
+
+  public List<T> subList(int from, int to) {
+    if (from < 0 || to > count || from > to) {
+      throw new IndexOutOfBoundsException("from " + from + ", to " + to + ", size " + count)
+    }
+    return new ListSubList<T>(root, at(from), at(to))
+  }
+
+  // the List contract, as in ArrayList
+  public boolean equals(Object o) {
+    if (o == this) {
+      return true
+    }
+    if (!(o instanceof List)) {
+      return false
+    }
+    List<Object> other = (List<Object>) o
+    if (other.size() != count) {
+      return false
+    }
+    Iterator<Object> it = other.iterator()
+    for (int i = 0 : i < count : i++) {
+      if (!Objects.equals(root.get(at(i)), it.next())) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public int hashCode() {
+    int h = 1
+    for (int i = 0 : i < count : i++) {
+      h = 31 * h + Objects.hashCode(root.get(at(i)))
+    }
+    return h
+  }
+
+  public String toString() {
+    return CollectionSupport.toString(this)
+  }
+}
+
+/* The sublist's iterator walks its own view; remove() and set() go through
+   the view so the offsets stay right. */
+class ListSubListIterator<T> implements ListIterator<T>, Iterator<T> {
+  private ListSubList<T> list
+  private int cursor
+  private int lastRet = -1
+
+  public ListSubListIterator(ListSubList<T> l, int index) {
+    list = l
+    cursor = index
+  }
+
+  public boolean hasNext() {
+    return cursor < list.size()
+  }
+
+  public T next() {
+    if (!hasNext()) {
+      throw new NoSuchElementException("no more elements")
+    }
+    T v = list.get(cursor)
+    lastRet = cursor
+    cursor++
+    return v
+  }
+
+  public boolean hasPrevious() {
+    return cursor > 0
+  }
+
+  public T previous() {
+    if (!hasPrevious()) {
+      throw new NoSuchElementException("no more elements")
+    }
+    cursor--
+    lastRet = cursor
+    return list.get(cursor)
+  }
+
+  public int nextIndex() {
+    return cursor
+  }
+
+  public int previousIndex() {
+    return cursor - 1
+  }
+
+  public void remove() {
+    if (lastRet < 0) {
+      throw new IllegalStateException("remove() before next()")
+    }
+    list.remove(lastRet)
+    cursor = lastRet
+    lastRet = -1
+  }
+
+  public void set(T e) {
+    if (lastRet < 0) {
+      throw new IllegalStateException("set() before next()")
+    }
+    list.set(lastRet, e)
+  }
+
+  public void add(T e) {
+    list.add(cursor, e)
+    cursor++
+    lastRet = -1
+  }
+}
+
+// ---------------------------------------------------------------- LinkedList
+
+/* A doubly linked list that is also a Deque: Java's LinkedList is both, and
+   the two roles share the same chain. */
+class LinkedNode<T> {
+  T item
+  LinkedNode<T> prev
+  LinkedNode<T> next
+
+  LinkedNode(T item) {
+    this.item = item
+  }
+}
+
+class LinkedList<T> implements List<T>, Collection<T>, Deque<T>, Queue<T> {
+  int count
+  LinkedNode<T> first
+  LinkedNode<T> last
+
+  public LinkedList() {
+  }
+
+  public LinkedList(Collection<? extends T> c) {
+    addAll(c)
+  }
+
+  // the chain itself, which the iterators walk
+
+  LinkedNode<T> nodeAt(int index) {
+    if (index < count / 2) {
+      LinkedNode<T> n = first
+      for (int i = 0 : i < index : i++) {
+        n = n.next
+      }
+      return n
+    }
+    LinkedNode<T> n = last
+    for (int i = count - 1 : i > index : i--) {
+      n = n.prev
+    }
+    return n
+  }
+
+  LinkedNode<T> linkFirst(T e) {
+    LinkedNode<T> n = new LinkedNode<T>(e)
+    n.next = first
+    if (first == null) {
+      last = n
+    } else {
+      first.prev = n
+    }
+    first = n
+    count++
+    return n
+  }
+
+  LinkedNode<T> linkLast(T e) {
+    LinkedNode<T> n = new LinkedNode<T>(e)
+    n.prev = last
+    if (last == null) {
+      first = n
+    } else {
+      last.next = n
+    }
+    last = n
+    count++
+    return n
+  }
+
+  LinkedNode<T> linkBefore(T e, LinkedNode<T> succ) {
+    if (succ == null) {
+      return linkLast(e)
+    }
+    LinkedNode<T> n = new LinkedNode<T>(e)
+    n.prev = succ.prev
+    n.next = succ
+    succ.prev = n
+    if (n.prev == null) {
+      first = n
+    } else {
+      n.prev.next = n
+    }
+    count++
+    return n
+  }
+
+  T unlink(LinkedNode<T> n) {
+    T e = n.item
+    if (n.prev == null) {
+      first = n.next
+    } else {
+      n.prev.next = n.next
+    }
+    if (n.next == null) {
+      last = n.prev
+    } else {
+      n.next.prev = n.prev
+    }
+    n.item = null
+    n.prev = null
+    n.next = null
+    count--
+    return e
+  }
+
+  private void checkIndex(int i) {
+    if (i < 0 || i >= count) {
+      throw new IndexOutOfBoundsException("index " + i + ", size " + count)
+    }
+  }
+
+  public int size() {
+    return count
+  }
+
+  public boolean isEmpty() {
+    return count == 0
+  }
+
+  public T get(int i) {
+    checkIndex(i)
+    return nodeAt(i).item
+  }
+
+  public T set(int i, T e) {
+    checkIndex(i)
+    LinkedNode<T> n = nodeAt(i)
+    T old = n.item
+    n.item = e
+    return old
+  }
+
+  public void add(int i, T e) {
+    if (i < 0 || i > count) {
+      throw new IndexOutOfBoundsException("index " + i + ", size " + count)
+    }
+    if (i == count) {
+      linkLast(e)
+    } else {
+      linkBefore(e, nodeAt(i))
+    }
+  }
+
+  public T remove(int i) {
+    checkIndex(i)
+    return unlink(nodeAt(i))
+  }
+
+  public int indexOf(Object o) {
+    int i = 0
+    for (LinkedNode<T> n = first : n != null : n = n.next) {
+      if (Objects.equals(o, n.item)) {
+        return i
+      }
+      i++
+    }
+    return -1
+  }
+
+  public int lastIndexOf(Object o) {
+    int i = count - 1
+    for (LinkedNode<T> n = last : n != null : n = n.prev) {
+      if (Objects.equals(o, n.item)) {
+        return i
+      }
+      i--
+    }
+    return -1
+  }
+
+  public boolean contains(Object o) {
+    return indexOf(o) >= 0
+  }
+
+  public boolean add(T e) {
+    linkLast(e)
+    return true
+  }
+
+  public boolean remove(Object o) {
+    for (LinkedNode<T> n = first : n != null : n = n.next) {
+      if (Objects.equals(o, n.item)) {
+        unlink(n)
+        return true
+      }
+    }
+    return false
+  }
+
+  public boolean containsAll(Collection<?> c) {
+    for (Object o : c) {
+      if (!contains(o)) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public boolean addAll(Collection<? extends T> c) {
+    return addAll(count, c)
+  }
+
+  public boolean addAll(int index, Collection<? extends T> c) {
+    if (index < 0 || index > count) {
+      throw new IndexOutOfBoundsException("index " + index + ", size " + count)
+    }
+    Object[] a = c.toArray()
+    if (a.length == 0) {
+      return false
+    }
+    LinkedNode<T> succ = index == count ? null : nodeAt(index)
+    for (int i = 0 : i < a.length : i++) {
+      // linkBefore with a null successor appends, so the whole batch lands in
+      // front of the node that was at `index`
+      linkBefore((T) a[i], succ)
+    }
+    return true
+  }
+
+  public boolean removeAll(Collection<?> c) {
+    boolean changed = false
+    LinkedNode<T> n = first
+    while (n != null) {
+      LinkedNode<T> next = n.next
+      if (c.contains(n.item)) {
+        unlink(n)
+        changed = true
+      }
+      n = next
+    }
+    return changed
+  }
+
+  public boolean retainAll(Collection<?> c) {
+    boolean changed = false
+    LinkedNode<T> n = first
+    while (n != null) {
+      LinkedNode<T> next = n.next
+      if (!c.contains(n.item)) {
+        unlink(n)
+        changed = true
+      }
+      n = next
+    }
+    return changed
+  }
+
+  public void clear() {
+    LinkedNode<T> n = first
+    while (n != null) {
+      LinkedNode<T> next = n.next
+      n.item = null
+      n.prev = null
+      n.next = null
+      n = next
+    }
+    first = null
+    last = null
+    count = 0
+  }
+
+  public Object[] toArray() {
+    Object[] out = new Object[count]
+    int i = 0
+    for (LinkedNode<T> n = first : n != null : n = n.next) {
+      out[i] = n.item
+      i++
+    }
+    return out
+  }
+
+  public Iterator<T> iterator() {
+    return new LinkedListIterator<T>(this)
+  }
+
+  public ListIterator<T> listIterator() {
+    return new LinkedListIterator<T>(this)
+  }
+
+  public ListIterator<T> listIterator(int index) {
+    if (index < 0 || index > count) {
+      throw new IndexOutOfBoundsException("index " + index + ", size " + count)
+    }
+    return new LinkedListIterator<T>(this, index)
+  }
+
+  public List<T> subList(int from, int to) {
+    if (from < 0 || to > count || from > to) {
+      throw new IndexOutOfBoundsException("from " + from + ", to " + to + ", size " + count)
+    }
+    return new ListSubList<T>(this, from, to)
+  }
+
+  // ------------------------------------------------------------------ Deque
+
+  public void addFirst(T e) {
+    linkFirst(e)
+  }
+
+  public void addLast(T e) {
+    linkLast(e)
+  }
+
+  public boolean offerFirst(T e) {
+    linkFirst(e)
+    return true
+  }
+
+  public boolean offerLast(T e) {
+    linkLast(e)
+    return true
+  }
+
+  public boolean offer(T e) {
+    linkLast(e)
+    return true
+  }
+
+  public T removeFirst() {
+    if (first == null) {
+      throw new NoSuchElementException("list is empty")
+    }
+    return unlink(first)
+  }
+
+  public T removeLast() {
+    if (last == null) {
+      throw new NoSuchElementException("list is empty")
+    }
+    return unlink(last)
+  }
+
+  public T pollFirst() {
+    return first == null ? null : unlink(first)
+  }
+
+  public T pollLast() {
+    return last == null ? null : unlink(last)
+  }
+
+  public T getFirst() {
+    if (first == null) {
+      throw new NoSuchElementException("list is empty")
+    }
+    return first.item
+  }
+
+  public T getLast() {
+    if (last == null) {
+      throw new NoSuchElementException("list is empty")
+    }
+    return last.item
+  }
+
+  public T peekFirst() {
+    return first == null ? null : first.item
+  }
+
+  public T peekLast() {
+    return last == null ? null : last.item
+  }
+
+  // Queue's no-argument pair, which is Deque's removeFirst/peekFirst
+  public T remove() {
+    return removeFirst()
+  }
+
+  public T poll() {
+    return pollFirst()
+  }
+
+  public T element() {
+    return getFirst()
+  }
+
+  public T peek() {
+    return peekFirst()
+  }
+
+  public void push(T e) {
+    linkFirst(e)
+  }
+
+  public T pop() {
+    return removeFirst()
+  }
+
+  public boolean removeFirstOccurrence(Object o) {
+    for (LinkedNode<T> n = first : n != null : n = n.next) {
+      if (Objects.equals(o, n.item)) {
+        unlink(n)
+        return true
+      }
+    }
+    return false
+  }
+
+  public boolean removeLastOccurrence(Object o) {
+    for (LinkedNode<T> n = last : n != null : n = n.prev) {
+      if (Objects.equals(o, n.item)) {
+        unlink(n)
+        return true
+      }
+    }
+    return false
+  }
+
+  public Iterator<T> descendingIterator() {
+    return new LinkedListDescendingIterator<T>(this)
+  }
+
+  // the List contract, as in ArrayList
+  public boolean equals(Object o) {
+    if (o == this) {
+      return true
+    }
+    if (!(o instanceof List)) {
+      return false
+    }
+    List<Object> other = (List<Object>) o
+    if (other.size() != count) {
+      return false
+    }
+    Iterator<Object> it = other.iterator()
+    for (LinkedNode<T> n = first : n != null : n = n.next) {
+      if (!Objects.equals(n.item, it.next())) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public int hashCode() {
+    int h = 1
+    for (LinkedNode<T> n = first : n != null : n = n.next) {
+      h = 31 * h + Objects.hashCode(n.item)
+    }
+    return h
+  }
+
+  public String toString() {
+    return CollectionSupport.toString(this)
+  }
+}
+
+class LinkedListIterator<T> implements ListIterator<T>, Iterator<T> {
+  private LinkedList<T> list
+  private LinkedNode<T> nextNode
+  private int nextIdx
+  private LinkedNode<T> lastRet
+
+  public LinkedListIterator(LinkedList<T> l) {
+    list = l
+    nextNode = l.first
+  }
+
+  public LinkedListIterator(LinkedList<T> l, int index) {
+    list = l
+    nextIdx = index
+    nextNode = index == l.count ? null : l.nodeAt(index)
+  }
+
+  public boolean hasNext() {
+    return nextIdx < list.count
+  }
+
+  public T next() {
+    if (nextNode == null) {
+      throw new NoSuchElementException("no more elements")
+    }
+    lastRet = nextNode
+    nextNode = nextNode.next
+    nextIdx++
+    return lastRet.item
+  }
+
+  public boolean hasPrevious() {
+    return nextIdx > 0
+  }
+
+  public T previous() {
+    if (nextIdx == 0) {
+      throw new NoSuchElementException("no more elements")
+    }
+    nextNode = nextIdx == list.count ? list.last : nextNode.prev
+    lastRet = nextNode
+    nextIdx--
+    return lastRet.item
+  }
+
+  public int nextIndex() {
+    return nextIdx
+  }
+
+  public int previousIndex() {
+    return nextIdx - 1
+  }
+
+  public void remove() {
+    if (lastRet == null) {
+      throw new IllegalStateException("remove() before next()")
+    }
+    // removing the element previous() just returned leaves the cursor where it
+    // is; removing next()'s element has to move the cursor back one step
+    if (lastRet == nextNode) {
+      nextNode = lastRet.next
+    } else {
+      nextIdx--
+    }
+    list.unlink(lastRet)
+    lastRet = null
+  }
+
+  public void set(T e) {
+    if (lastRet == null) {
+      throw new IllegalStateException("set() before next()")
+    }
+    lastRet.item = e
+  }
+
+  public void add(T e) {
+    list.linkBefore(e, nextNode)
+    nextIdx++
+    lastRet = null
+  }
+}
+
+class LinkedListDescendingIterator<T> implements Iterator<T> {
+  private LinkedList<T> list
+  private LinkedNode<T> nextNode
+
+  public LinkedListDescendingIterator(LinkedList<T> l) {
+    list = l
+    nextNode = l.last
+  }
+
+  public boolean hasNext() {
+    return nextNode != null
+  }
+
+  public T next() {
+    if (nextNode == null) {
+      throw new NoSuchElementException("no more elements")
+    }
+    T e = nextNode.item
+    nextNode = nextNode.prev
+    return e
+  }
+}
+
+// ------------------------------------------------------------------ ArrayDeque
+
+/* Java's ArrayDeque: a circular array that grows by doubling. head is the
+   index of the first element, tail the index one past the last, so the deque
+   is empty exactly when the two are equal and full when tail + 1 wraps onto
+   head -- one slot is always left unused, which is why the capacity is a power
+   of two and never smaller than 8. */
+class ArrayDeque<T> implements Deque<T>, Queue<T>, Collection<T> {
+  private Object[] elements
+  // package-visible, like LinkedList's chain: the iterators walk the ring
+  int head
+  int tail
+
+  private static final int MIN_CAPACITY = 8
+
+  /* The ring is a power of two long, so the wrap is `& (length - 1)`. Java
+     reaches the same place from the other side: its mask is `length - 1` too,
+     and its length is a power of two. A ring of length 2^k + 1 with the same
+     mask would only ever land on indices 0 and 2^k. */
+  public ArrayDeque() {
+    elements = new Object[MIN_CAPACITY]
+  }
+
+  public ArrayDeque(int numElements) {
+    int cap = MIN_CAPACITY
+    while (cap < numElements) {
+      cap = cap << 1
+    }
+    elements = new Object[cap]
+  }
+
+  public ArrayDeque(Collection<? extends T> c) {
+    this(c.size())
+    for (Object o : c) {
+      addLast((T) o)
+    }
+  }
+
+  private int mask() {
+    return elements.length - 1
+  }
+
+  // for the iterators, which cannot see the array itself
+  Object getAt(int index) {
+    return elements[index]
+  }
+
+  int maskOf() {
+    return elements.length - 1
+  }
+
+  private void doubleCapacity() {
+    // only ever called when head == tail, i.e. the ring is full
+    int n = elements.length
+    Object[] next = new Object[n << 1]
+    // the live region is head..end followed by 0..tail; copy it as two runs so
+    // that head lands on 0 and tail on the element count
+    int r = n - head
+    for (int i = 0 : i < r : i++) {
+      next[i] = elements[head + i]
+    }
+    for (int i = 0 : i < tail : i++) {
+      next[r + i] = elements[i]
+    }
+    elements = next
+    head = 0
+    tail = n
+  }
+
+  public void addFirst(T e) {
+    head = (head - 1) & mask()
+    elements[head] = e
+    if (head == tail) {
+      doubleCapacity()
+    }
+  }
+
+  public void addLast(T e) {
+    elements[tail] = e
+    tail = (tail + 1) & mask()
+    if (tail == head) {
+      doubleCapacity()
+    }
+  }
+
+  public boolean offerFirst(T e) {
+    addFirst(e)
+    return true
+  }
+
+  public boolean offerLast(T e) {
+    addLast(e)
+    return true
+  }
+
+  public boolean offer(T e) {
+    addLast(e)
+    return true
+  }
+
+  private T removeAt(int index) {
+    T old = (T) elements[index]
+    int h = head
+    int t = tail
+    boolean front = index < h ? index - h + elements.length < t - index
+        : index - h < t - index
+    if (front) {
+      // shift the run in front of the hole forward, towards the hole
+      while (index != h) {
+        int prev = (index - 1) & mask()
+        elements[index] = elements[prev]
+        index = prev
+      }
+      elements[h] = null
+      head = (h + 1) & mask()
+    } else {
+      while (index != t) {
+        int next = (index + 1) & mask()
+        elements[index] = elements[next]
+        index = next
+      }
+      elements[t] = null
+      tail = (t - 1) & mask()
+    }
+    return old
+  }
+
+  public T removeFirst() {
+    if (head == tail) {
+      throw new NoSuchElementException("deque is empty")
+    }
+    T old = (T) elements[head]
+    elements[head] = null
+    head = (head + 1) & mask()
+    return old
+  }
+
+  public T removeLast() {
+    if (head == tail) {
+      throw new NoSuchElementException("deque is empty")
+    }
+    tail = (tail - 1) & mask()
+    T old = (T) elements[tail]
+    elements[tail] = null
+    return old
+  }
+
+  public T pollFirst() {
+    return head == tail ? null : removeFirst()
+  }
+
+  public T pollLast() {
+    return head == tail ? null : removeLast()
+  }
+
+  public T getFirst() {
+    if (head == tail) {
+      throw new NoSuchElementException("deque is empty")
+    }
+    return (T) elements[head]
+  }
+
+  public T getLast() {
+    if (head == tail) {
+      throw new NoSuchElementException("deque is empty")
+    }
+    return (T) elements[(tail - 1) & mask()]
+  }
+
+  public T peekFirst() {
+    return head == tail ? null : (T) elements[head]
+  }
+
+  public T peekLast() {
+    return head == tail ? null : (T) elements[(tail - 1) & mask()]
+  }
+
+  public T remove() {
+    return removeFirst()
+  }
+
+  public T poll() {
+    return pollFirst()
+  }
+
+  public T element() {
+    return getFirst()
+  }
+
+  public T peek() {
+    return peekFirst()
+  }
+
+  public void push(T e) {
+    addFirst(e)
+  }
+
+  public T pop() {
+    return removeFirst()
+  }
+
+  public int size() {
+    return (tail - head) & mask()
+  }
+
+  public boolean isEmpty() {
+    return head == tail
+  }
+
+  private int indexOf(Object o) {
+    int n = size()
+    for (int i = 0 : i < n : i++) {
+      if (Objects.equals(o, elements[(head + i) & mask()])) {
+        return (head + i) & mask()
+      }
+    }
+    return -1
+  }
+
+  private int lastIndexOf(Object o) {
+    int n = size()
+    for (int i = n - 1 : i >= 0 : i--) {
+      if (Objects.equals(o, elements[(head + i) & mask()])) {
+        return (head + i) & mask()
+      }
+    }
+    return -1
+  }
+
+  public boolean contains(Object o) {
+    return indexOf(o) >= 0
+  }
+
+  public boolean add(T e) {
+    addLast(e)
+    return true
+  }
+
+  public boolean remove(Object o) {
+    int i = indexOf(o)
+    if (i < 0) {
+      return false
+    }
+    removeAt(i)
+    return true
+  }
+
+  public boolean removeFirstOccurrence(Object o) {
+    return remove(o)
+  }
+
+  public boolean removeLastOccurrence(Object o) {
+    int i = lastIndexOf(o)
+    if (i < 0) {
+      return false
+    }
+    removeAt(i)
+    return true
+  }
+
+  public boolean containsAll(Collection<?> c) {
+    for (Object o : c) {
+      if (!contains(o)) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public boolean addAll(Collection<? extends T> c) {
+    Object[] a = c.toArray()
+    if (a.length == 0) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      addLast((T) a[i])
+    }
+    return true
+  }
+
+  /* Java rebuilds the array here rather than shifting one hole at a time.
+     removeAt is the same operation for a single element, and this is that
+     repeated -- but a bulk removal over a full deque would be quadratic, and
+     this is the shape the JDK uses: keep the survivors, in order. */
+  public boolean removeAll(Collection<?> c) {
+    int n = size()
+    boolean changed = false
+    Object[] out = new Object[n]
+    int kept = 0
+    for (int i = 0 : i < n : i++) {
+      Object o = elements[(head + i) & mask()]
+      if (c.contains(o)) {
+        changed = true
+      } else {
+        out[kept] = o
+        kept++
+      }
+    }
+    if (changed) {
+      rebuild(out, kept)
+    }
+    return changed
+  }
+
+  public boolean retainAll(Collection<?> c) {
+    int n = size()
+    boolean changed = false
+    Object[] out = new Object[n]
+    int kept = 0
+    for (int i = 0 : i < n : i++) {
+      Object o = elements[(head + i) & mask()]
+      if (c.contains(o)) {
+        out[kept] = o
+        kept++
+      } else {
+        changed = true
+      }
+    }
+    if (changed) {
+      rebuild(out, kept)
+    }
+    return changed
+  }
+
+  private void rebuild(Object[] kept, int n) {
+    // strictly greater than n: a full ring is indistinguishable from an empty
+    // one, so the rebuilt one keeps a slot spare
+    int cap = MIN_CAPACITY
+    while (cap <= n) {
+      cap = cap << 1
+    }
+    Object[] next = new Object[cap]
+    for (int i = 0 : i < n : i++) {
+      next[i] = kept[i]
+    }
+    elements = next
+    head = 0
+    tail = n & (cap - 1)
+  }
+
+  public void clear() {
+    for (int i = 0 : i < elements.length : i++) {
+      elements[i] = null
+    }
+    head = 0
+    tail = 0
+  }
+
+  public Object[] toArray() {
+    Object[] out = new Object[size()]
+    int n = size()
+    for (int i = 0 : i < n : i++) {
+      out[i] = elements[(head + i) & mask()]
+    }
+    return out
+  }
+
+  public Iterator<T> iterator() {
+    return new ArrayDequeIterator<T>(this)
+  }
+
+  public Iterator<T> descendingIterator() {
+    return new ArrayDequeDescendingIterator<T>(this)
+  }
+
+  // ArrayDeque keeps Object's identity equality, as Java's does -- a Deque is
+  // not a Set or a List -- but AbstractCollection.toString is overridden
+  public String toString() {
+    return CollectionSupport.toString(this)
+  }
+}
+
+class ArrayDequeIterator<T> implements Iterator<T> {
+  private ArrayDeque<T> deque
+  private int index
+  private int remaining
+
+  public ArrayDequeIterator(ArrayDeque<T> d) {
+    deque = d
+    index = d.head
+    remaining = d.size()
+  }
+
+  public boolean hasNext() {
+    return remaining > 0
+  }
+
+  public T next() {
+    if (remaining <= 0) {
+      throw new NoSuchElementException("no more elements")
+    }
+    T e = deque.getAt(index)
+    index = (index + 1) & deque.maskOf()
+    remaining--
+    return e
+  }
+}
+
+class ArrayDequeDescendingIterator<T> implements Iterator<T> {
+  private ArrayDeque<T> deque
+  private int cursor
+  private int remaining
+
+  public ArrayDequeDescendingIterator(ArrayDeque<T> d) {
+    deque = d
+    cursor = d.tail
+    remaining = d.size()
+  }
+
+  public boolean hasNext() {
+    return remaining > 0
+  }
+
+  public T next() {
+    if (remaining <= 0) {
+      throw new NoSuchElementException("no more elements")
+    }
+    cursor = (cursor - 1) & deque.maskOf()
+    remaining--
+    return deque.getAt(cursor)
+  }
+}

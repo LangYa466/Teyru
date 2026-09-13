@@ -1,0 +1,1067 @@
+package teyru
+
+/* java.util.Collections, the shared helper the views are built on, and the
+ * unmodifiable/singleton/nCopies views themselves.
+ *
+ * The unmodifiable views are classes rather than anonymous subclasses: Teyru
+ * refuses an anonymous class that has to implement a generic interface method
+ * (docs/language.md §13), and every one of these implements a generic one.
+ */
+
+/* The pieces of java.util.AbstractCollection and java.util.AbstractMap that
+   the views share. They are static helpers on a class rather than default
+   methods, because equals/hashCode/toString cannot be given defaults on an
+   interface: they are Object's, and a default would override Object. */
+class CollectionSupport {
+  private CollectionSupport() {
+  }
+
+  // AbstractCollection.toString: "[a, b]", "[a]" for one element, "[]" for none
+  public static String toString(Collection<?> c) {
+    Iterator<?> it = c.iterator()
+    if (!it.hasNext()) {
+      return "[]"
+    }
+    StringBuilder sb = new StringBuilder()
+    sb.append("[")
+    boolean first = true
+    while (it.hasNext()) {
+      if (!first) {
+        sb.append(", ")
+      }
+      sb.append(it.next())
+      first = false
+    }
+    sb.append("]")
+    return sb.toString()
+  }
+
+  /* AbstractSet.equals: same size, and every element of one is in the other.
+     A List is not equal to a Set even with the same elements, which is why
+     this asks instanceof Set rather than iterating anything. */
+  public static boolean setEquals(Collection<?> c, Object o) {
+    if (o == c) {
+      return true
+    }
+    if (!(o instanceof Set)) {
+      return false
+    }
+    Set<Object> other = (Set<Object>) o
+    if (other.size() != c.size()) {
+      return false
+    }
+    return c.containsAll(other)
+  }
+
+  // AbstractSet.hashCode: the sum of the elements' hash codes
+  public static int setHash(Collection<?> c) {
+    int h = 0
+    Iterator<?> it = c.iterator()
+    while (it.hasNext()) {
+      Object e = it.next()
+      if (e != null) {
+        h += e.hashCode()
+      }
+    }
+    return h
+  }
+
+  // AbstractMap.toString: "{k=v, k2=v2}"
+  public static String mapToString(Map<?, ?> m) {
+    Iterator<?> it = m.entrySet().iterator()
+    if (!it.hasNext()) {
+      return "{}"
+    }
+    StringBuilder sb = new StringBuilder()
+    sb.append("{")
+    boolean first = true
+    while (it.hasNext()) {
+      Object e = it.next()
+      if (!first) {
+        sb.append(", ")
+      }
+      sb.append(e)
+      first = false
+    }
+    sb.append("}")
+    return sb.toString()
+  }
+
+  // AbstractMap.equals: same size, and every key maps to an equal value
+  public static boolean mapEquals(Map<?, ?> m, Object o) {
+    if (o == m) {
+      return true
+    }
+    if (!(o instanceof Map)) {
+      return false
+    }
+    Map<Object, Object> other = (Map<Object, Object>) o
+    if (other.size() != m.size()) {
+      return false
+    }
+    Iterator<?> it = m.entrySet().iterator()
+    while (it.hasNext()) {
+      Map.Entry<Object, Object> e = (Map.Entry<Object, Object>) it.next()
+      if (!other.containsKey(e.getKey())) {
+        return false
+      }
+      if (!Objects.equals(e.getValue(), other.get(e.getKey()))) {
+        return false
+      }
+    }
+    return true
+  }
+
+  // AbstractMap.hashCode: the sum of the entries' hash codes
+  public static int mapHash(Map<?, ?> m) {
+    int h = 0
+    Iterator<?> it = m.entrySet().iterator()
+    while (it.hasNext()) {
+      Object e = it.next()
+      h += e.hashCode()
+    }
+    return h
+  }
+}
+
+/* Collections.
+ *
+ * sort(list, comparator) is List.sort, which is the one merge sort in this
+ * library; sort(list) hands it a comparator over the natural ordering, since
+ * the merge would otherwise have to ask each element for compareTo.
+ *
+ * shuffle uses Math.random(): Java takes a java.util.Random so that a caller
+ * can reproduce a shuffle, and there is no Random in this library yet, so a
+ * shuffle cannot be seeded (docs/language.md §13). */
+class Collections {
+  private Collections() {
+  }
+
+  public static <T> void sort(List<T> list) {
+    list.sort(new NaturalOrderComparator<T>())
+  }
+
+  public static <T> void sort(List<T> list, Comparator<T> c) {
+    list.sort(c)
+  }
+
+  /* Java declares these three over List<?>. A wildcard parameter cannot be
+     written to (set takes a T), so the element type is a method type variable
+     instead: every call that compiles against the JDK's spelling compiles
+     against this one. */
+  public static <T> void reverse(List<T> list) {
+    int n = list.size()
+    for (int i = 0 : i < n / 2 : i++) {
+      T tmp = list.get(i)
+      list.set(i, list.get(n - 1 - i))
+      list.set(n - 1 - i, tmp)
+    }
+  }
+
+  public static <T> void shuffle(List<T> list) {
+    for (int i = list.size() - 1 : i > 0 : i--) {
+      int j = (int) (Math.random() * (i + 1))
+      T tmp = list.get(i)
+      list.set(i, list.get(j))
+      list.set(j, tmp)
+    }
+  }
+
+  public static <T> void swap(List<T> list, int i, int j) {
+    list.set(i, list.set(j, list.get(i)))
+  }
+
+  public static <T> T min(Collection<T> c) {
+    return min(c, new NaturalOrderComparator<T>())
+  }
+
+  public static <T> T min(Collection<T> c, Comparator<T> comp) {
+    Iterator<T> it = c.iterator()
+    if (!it.hasNext()) {
+      throw new NoSuchElementException("collection is empty")
+    }
+    T best = it.next()
+    while (it.hasNext()) {
+      T e = it.next()
+      if (comp.compare(e, best) < 0) {
+        best = e
+      }
+    }
+    return best
+  }
+
+  public static <T> T max(Collection<T> c) {
+    return max(c, new NaturalOrderComparator<T>())
+  }
+
+  public static <T> T max(Collection<T> c, Comparator<T> comp) {
+    Iterator<T> it = c.iterator()
+    if (!it.hasNext()) {
+      throw new NoSuchElementException("collection is empty")
+    }
+    T best = it.next()
+    while (it.hasNext()) {
+      T e = it.next()
+      if (comp.compare(e, best) > 0) {
+        best = e
+      }
+    }
+    return best
+  }
+
+  public static int frequency(Collection<?> c, Object o) {
+    int n = 0
+    Iterator<?> it = c.iterator()
+    while (it.hasNext()) {
+      if (Objects.equals(o, it.next())) {
+        n++
+      }
+    }
+    return n
+  }
+
+  public static boolean disjoint(Collection<?> a, Collection<?> b) {
+    // walk the smaller one and ask the larger
+    Collection<?> small = a
+    Collection<?> big = b
+    if (a.size() > b.size()) {
+      small = b
+      big = a
+    }
+    Iterator<?> it = small.iterator()
+    while (it.hasNext()) {
+      if (big.contains(it.next())) {
+        return false
+      }
+    }
+    return true
+  }
+
+  /* Java takes Collection<? super T> here. A wildcard on a parameter whose
+     type argument also has to come from a varargs array makes the call site
+     un-inferable in this dialect, so the parameter is invariant: the argument
+     is a Collection<T>, which is what a caller passes anyway. */
+  public static <T> boolean addAll(Collection<T> c, T... elements) {
+    boolean changed = false
+    for (int i = 0 : i < elements.length : i++) {
+      if (c.add(elements[i])) {
+        changed = true
+      }
+    }
+    return changed
+  }
+
+  public static <T> Comparator<T> reverseOrder() {
+    return new ReverseComparator<T>(new NaturalOrderComparator<T>())
+  }
+
+  public static <T> Comparator<T> reverseOrder(Comparator<T> c) {
+    return new ReverseComparator<T>(c)
+  }
+
+  // the views ---------------------------------------------------------------
+
+  public static <T> Collection<T> unmodifiableCollection(Collection<T> c) {
+    return new UnmodifiableCollection<T>(c)
+  }
+
+  public static <T> List<T> unmodifiableList(List<T> list) {
+    return new UnmodifiableList<T>(list)
+  }
+
+  public static <T> Set<T> unmodifiableSet(Set<T> s) {
+    return new UnmodifiableSet<T>(s)
+  }
+
+  public static <K, V> Map<K, V> unmodifiableMap(Map<K, V> m) {
+    return new UnmodifiableMap<K, V>(m)
+  }
+
+  public static <T> List<T> singletonList(T o) {
+    return new SingletonList<T>(o)
+  }
+
+  // Java's ImmutableCollections.EMPTY_LIST is a class of its own; nCopies with
+  // a count of zero is the same list -- no elements, nothing to return from
+  // get, and a toString of "[]" -- so that is what this returns
+  public static <T> List<T> emptyList() {
+    return new NCopiesList<T>(0, null)
+  }
+
+  public static <T> Set<T> emptySet() {
+    return new UnmodifiableSet<T>(new HashSet<T>())
+  }
+
+  public static <K, V> Map<K, V> emptyMap() {
+    return new UnmodifiableMap<K, V>(new HashMap<K, V>())
+  }
+
+  public static <T> Iterator<T> emptyIterator() {
+    return new EmptyIterator<T>()
+  }
+
+  public static <T> List<T> nCopies(int n, T o) {
+    if (n < 0) {
+      throw new IllegalArgumentException("n is negative")
+    }
+    return new NCopiesList<T>(n, o)
+  }
+}
+
+class NaturalOrderComparator<T> implements Comparator<T> {
+  public int compare(T a, T b) {
+    Comparable<T> x = (Comparable<T>) a
+    return x.compareTo(b)
+  }
+}
+
+class ReverseComparator<T> implements Comparator<T> {
+  private Comparator<T> inner
+
+  public ReverseComparator(Comparator<T> c) {
+    inner = c
+  }
+
+  public int compare(T a, T b) {
+    return inner.compare(b, a)
+  }
+}
+
+class EmptyIterator<T> implements Iterator<T> {
+  public boolean hasNext() {
+    return false
+  }
+
+  public T next() {
+    throw new NoSuchElementException("no more elements")
+  }
+}
+
+// ------------------------------------------------------- unmodifiable views
+
+/* The mutators throw; everything else is the backing collection's own answer.
+   Java's removeIf on an unmodifiable collection reaches removeAll and throws
+   the same way, which is what the inherited default here does too. */
+class UnmodifiableCollection<T> implements Collection<T>, Iterable<T> {
+  Collection<T> c
+
+  public UnmodifiableCollection(Collection<T> backing) {
+    if (backing == null) {
+      throw new NullPointerException("collection")
+    }
+    c = backing
+  }
+
+  public int size() {
+    return c.size()
+  }
+
+  public boolean isEmpty() {
+    return c.isEmpty()
+  }
+
+  public boolean contains(Object o) {
+    return c.contains(o)
+  }
+
+  public Object[] toArray() {
+    return c.toArray()
+  }
+
+  public boolean containsAll(Collection<?> other) {
+    return c.containsAll(other)
+  }
+
+  public Iterator<T> iterator() {
+    return c.iterator()
+  }
+
+  public boolean add(T e) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public boolean remove(Object o) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public boolean addAll(Collection<? extends T> other) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public boolean removeAll(Collection<?> other) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public boolean retainAll(Collection<?> other) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public void clear() {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public boolean equals(Object o) {
+    return c.equals(o)
+  }
+
+  public int hashCode() {
+    return c.hashCode()
+  }
+
+  public String toString() {
+    return c.toString()
+  }
+}
+
+class UnmodifiableList<T> implements List<T>, Collection<T> {
+  private List<T> list
+
+  public UnmodifiableList(List<T> backing) {
+    if (backing == null) {
+      throw new NullPointerException("list")
+    }
+    list = backing
+  }
+
+  public int size() {
+    return list.size()
+  }
+
+  public boolean isEmpty() {
+    return list.isEmpty()
+  }
+
+  public boolean contains(Object o) {
+    return list.contains(o)
+  }
+
+  public Object[] toArray() {
+    return list.toArray()
+  }
+
+  public boolean containsAll(Collection<?> other) {
+    return list.containsAll(other)
+  }
+
+  public T get(int i) {
+    return list.get(i)
+  }
+
+  public int indexOf(Object o) {
+    return list.indexOf(o)
+  }
+
+  public int lastIndexOf(Object o) {
+    return list.lastIndexOf(o)
+  }
+
+  public ListIterator<T> listIterator() {
+    return list.listIterator()
+  }
+
+  public ListIterator<T> listIterator(int index) {
+    return list.listIterator(index)
+  }
+
+  public List<T> subList(int from, int to) {
+    // the sublist of an unmodifiable list is unmodifiable as well; Java
+    // returns the backing list's own sublist, which is why a write through it
+    // throws here too rather than silently succeeding
+    return new UnmodifiableList<T>(list.subList(from, to))
+  }
+
+  public Iterator<T> iterator() {
+    return list.iterator()
+  }
+
+  public T set(int i, T e) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public void add(int i, T e) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public boolean add(T e) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public T remove(int i) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public boolean remove(Object o) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public boolean addAll(Collection<? extends T> other) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public boolean addAll(int index, Collection<? extends T> other) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public boolean removeAll(Collection<?> other) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public boolean retainAll(Collection<?> other) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public void clear() {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public void sort(Comparator<T> c) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public boolean equals(Object o) {
+    return list.equals(o)
+  }
+
+  public int hashCode() {
+    return list.hashCode()
+  }
+
+  public String toString() {
+    return list.toString()
+  }
+}
+
+class UnmodifiableSet<T> implements Set<T>, Collection<T> {
+  Collection<T> c
+
+  public UnmodifiableSet(Collection<T> backing) {
+    if (backing == null) {
+      throw new NullPointerException("set")
+    }
+    c = backing
+  }
+
+  public int size() {
+    return c.size()
+  }
+
+  public boolean isEmpty() {
+    return c.isEmpty()
+  }
+
+  public boolean contains(Object o) {
+    return c.contains(o)
+  }
+
+  public Object[] toArray() {
+    return c.toArray()
+  }
+
+  public boolean containsAll(Collection<?> other) {
+    return c.containsAll(other)
+  }
+
+  public Iterator<T> iterator() {
+    return c.iterator()
+  }
+
+  public boolean add(T e) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public boolean remove(Object o) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public boolean addAll(Collection<? extends T> other) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public boolean removeAll(Collection<?> other) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public boolean retainAll(Collection<?> other) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public void clear() {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public boolean equals(Object o) {
+    return CollectionSupport.setEquals(c, o)
+  }
+
+  public int hashCode() {
+    return c.hashCode()
+  }
+
+  public String toString() {
+    return c.toString()
+  }
+}
+
+class UnmodifiableMap<K, V> implements Map<K, V> {
+  private Map<K, V> map
+
+  public UnmodifiableMap(Map<K, V> backing) {
+    if (backing == null) {
+      throw new NullPointerException("map")
+    }
+    map = backing
+  }
+
+  public int size() {
+    return map.size()
+  }
+
+  public boolean isEmpty() {
+    return map.isEmpty()
+  }
+
+  public boolean containsKey(Object key) {
+    return map.containsKey(key)
+  }
+
+  public boolean containsValue(Object value) {
+    return map.containsValue(value)
+  }
+
+  public V get(Object key) {
+    return map.get(key)
+  }
+
+  public Set<K> keySet() {
+    return new UnmodifiableSet<K>(map.keySet())
+  }
+
+  public List<V> values() {
+    return new UnmodifiableList<V>(map.values())
+  }
+
+  public Set<Map.Entry<K, V>> entrySet() {
+    return new UnmodifiableSet<Map.Entry<K, V>>(map.entrySet())
+  }
+
+  public V put(K key, V value) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public V remove(Object key) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public void putAll(Map<? extends K, ? extends V> other) {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public void clear() {
+    throw new UnsupportedOperationException("unmodifiable")
+  }
+
+  public boolean equals(Object o) {
+    return map.equals(o)
+  }
+
+  public int hashCode() {
+    return map.hashCode()
+  }
+
+  public String toString() {
+    return map.toString()
+  }
+}
+
+/* Java's singleton lists are a class per arity; this is the one-element case
+   of nCopies, which is the same list: fixed size one, every get returns the
+   same reference, and the mutators throw. */
+class SingletonList<T> implements List<T>, Collection<T> {
+  private T only
+
+  public SingletonList(T o) {
+    only = o
+  }
+
+  public int size() {
+    return 1
+  }
+
+  public boolean isEmpty() {
+    return false
+  }
+
+  public T get(int i) {
+    if (i != 0) {
+      throw new IndexOutOfBoundsException("index " + i + ", size 1")
+    }
+    return only
+  }
+
+  public int indexOf(Object o) {
+    return Objects.equals(o, only) ? 0 : -1
+  }
+
+  public int lastIndexOf(Object o) {
+    return indexOf(o)
+  }
+
+  public boolean contains(Object o) {
+    return Objects.equals(o, only)
+  }
+
+  public Object[] toArray() {
+    Object[] out = new Object[1]
+    out[0] = only
+    return out
+  }
+
+  public boolean containsAll(Collection<?> c) {
+    for (Object o : c) {
+      if (!contains(o)) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public Iterator<T> iterator() {
+    return listIterator()
+  }
+
+  public ListIterator<T> listIterator() {
+    return new SingletonListIterator<T>(this, 0)
+  }
+
+  public ListIterator<T> listIterator(int index) {
+    if (index < 0 || index > 1) {
+      throw new IndexOutOfBoundsException("index " + index + ", size 1")
+    }
+    return new SingletonListIterator<T>(this, index)
+  }
+
+  public List<T> subList(int from, int to) {
+    if (from < 0 || to > 1 || from > to) {
+      throw new IndexOutOfBoundsException("from " + from + ", to " + to + ", size 1")
+    }
+    return new ListSubList<T>(this, from, to)
+  }
+
+  public T set(int i, T e) {
+    throw new UnsupportedOperationException("set")
+  }
+
+  public void add(int i, T e) {
+    throw new UnsupportedOperationException("add")
+  }
+
+  public boolean add(T e) {
+    throw new UnsupportedOperationException("add")
+  }
+
+  public T remove(int i) {
+    throw new UnsupportedOperationException("remove")
+  }
+
+  public boolean remove(Object o) {
+    throw new UnsupportedOperationException("remove")
+  }
+
+  public boolean addAll(Collection<? extends T> c) {
+    throw new UnsupportedOperationException("addAll")
+  }
+
+  public boolean addAll(int index, Collection<? extends T> c) {
+    throw new UnsupportedOperationException("addAll")
+  }
+
+  public boolean removeAll(Collection<?> c) {
+    throw new UnsupportedOperationException("removeAll")
+  }
+
+  public boolean retainAll(Collection<?> c) {
+    throw new UnsupportedOperationException("retainAll")
+  }
+
+  public void clear() {
+    throw new UnsupportedOperationException("clear")
+  }
+
+  public boolean equals(Object o) {
+    if (o == this) {
+      return true
+    }
+    if (!(o instanceof List)) {
+      return false
+    }
+    List<Object> other = (List<Object>) o
+    return other.size() == 1 && Objects.equals(only, other.get(0))
+  }
+
+  public int hashCode() {
+    return 31 + Objects.hashCode(only)
+  }
+
+  public String toString() {
+    return "[" + only + "]"
+  }
+}
+
+class SingletonListIterator<T> implements ListIterator<T>, Iterator<T> {
+  private SingletonList<T> list
+  private int cursor
+
+  public SingletonListIterator(SingletonList<T> l, int index) {
+    list = l
+    cursor = index
+  }
+
+  public boolean hasNext() {
+    return cursor < 1
+  }
+
+  public T next() {
+    if (cursor >= 1) {
+      throw new NoSuchElementException("no more elements")
+    }
+    cursor++
+    return list.get(0)
+  }
+
+  public boolean hasPrevious() {
+    return cursor > 0
+  }
+
+  public T previous() {
+    if (cursor <= 0) {
+      throw new NoSuchElementException("no more elements")
+    }
+    cursor--
+    return list.get(0)
+  }
+
+  public int nextIndex() {
+    return cursor
+  }
+
+  public int previousIndex() {
+    return cursor - 1
+  }
+
+  public void remove() {
+    throw new UnsupportedOperationException("remove")
+  }
+
+  public void set(T e) {
+    throw new UnsupportedOperationException("set")
+  }
+
+  public void add(T e) {
+    throw new UnsupportedOperationException("add")
+  }
+}
+
+/* nCopies, and the empty list with a count of zero. The elements are all the
+   same reference, so get returns it without touching any storage. */
+class NCopiesList<T> implements List<T>, Collection<T> {
+  private int n
+  private T value
+
+  public NCopiesList(int count, T o) {
+    n = count
+    value = o
+  }
+
+  public int size() {
+    return n
+  }
+
+  public boolean isEmpty() {
+    return n == 0
+  }
+
+  public T get(int i) {
+    if (i < 0 || i >= n) {
+      throw new IndexOutOfBoundsException("index " + i + ", size " + n)
+    }
+    return value
+  }
+
+  public int indexOf(Object o) {
+    return n > 0 && Objects.equals(o, value) ? 0 : -1
+  }
+
+  public int lastIndexOf(Object o) {
+    return n > 0 && Objects.equals(o, value) ? n - 1 : -1
+  }
+
+  public boolean contains(Object o) {
+    return n > 0 && Objects.equals(o, value)
+  }
+
+  public Object[] toArray() {
+    Object[] out = new Object[n]
+    for (int i = 0 : i < n : i++) {
+      out[i] = value
+    }
+    return out
+  }
+
+  public boolean containsAll(Collection<?> c) {
+    for (Object o : c) {
+      if (!contains(o)) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public Iterator<T> iterator() {
+    return listIterator()
+  }
+
+  public ListIterator<T> listIterator() {
+    return new NCopiesIterator<T>(this, 0)
+  }
+
+  public ListIterator<T> listIterator(int index) {
+    if (index < 0 || index > n) {
+      throw new IndexOutOfBoundsException("index " + index + ", size " + n)
+    }
+    return new NCopiesIterator<T>(this, index)
+  }
+
+  public List<T> subList(int from, int to) {
+    if (from < 0 || to > n || from > to) {
+      throw new IndexOutOfBoundsException("from " + from + ", to " + to + ", size " + n)
+    }
+    // a sublist of n copies is just fewer copies, and Java returns a view
+    // here too -- an immutable one either way
+    return new NCopiesList<T>(to - from, value)
+  }
+
+  public T set(int i, T e) {
+    throw new UnsupportedOperationException("set")
+  }
+
+  public void add(int i, T e) {
+    throw new UnsupportedOperationException("add")
+  }
+
+  public boolean add(T e) {
+    throw new UnsupportedOperationException("add")
+  }
+
+  public T remove(int i) {
+    throw new UnsupportedOperationException("remove")
+  }
+
+  public boolean remove(Object o) {
+    throw new UnsupportedOperationException("remove")
+  }
+
+  public boolean addAll(Collection<? extends T> c) {
+    throw new UnsupportedOperationException("addAll")
+  }
+
+  public boolean addAll(int index, Collection<? extends T> c) {
+    throw new UnsupportedOperationException("addAll")
+  }
+
+  public boolean removeAll(Collection<?> c) {
+    throw new UnsupportedOperationException("removeAll")
+  }
+
+  public boolean retainAll(Collection<?> c) {
+    throw new UnsupportedOperationException("retainAll")
+  }
+
+  public void clear() {
+    throw new UnsupportedOperationException("clear")
+  }
+
+  public boolean equals(Object o) {
+    if (o == this) {
+      return true
+    }
+    if (!(o instanceof List)) {
+      return false
+    }
+    List<Object> other = (List<Object>) o
+    if (other.size() != n) {
+      return false
+    }
+    for (int i = 0 : i < n : i++) {
+      if (!Objects.equals(value, other.get(i))) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public int hashCode() {
+    int h = 1
+    for (int i = 0 : i < n : i++) {
+      h = 31 * h + Objects.hashCode(value)
+    }
+    return h
+  }
+
+  public String toString() {
+    return CollectionSupport.toString(this)
+  }
+}
+
+class NCopiesIterator<T> implements ListIterator<T>, Iterator<T> {
+  private NCopiesList<T> list
+  private int cursor
+
+  public NCopiesIterator(NCopiesList<T> l, int index) {
+    list = l
+    cursor = index
+  }
+
+  public boolean hasNext() {
+    return cursor < list.size()
+  }
+
+  public T next() {
+    if (!hasNext()) {
+      throw new NoSuchElementException("no more elements")
+    }
+    cursor++
+    return list.get(cursor - 1)
+  }
+
+  public boolean hasPrevious() {
+    return cursor > 0
+  }
+
+  public T previous() {
+    if (!hasPrevious()) {
+      throw new NoSuchElementException("no more elements")
+    }
+    cursor--
+    return list.get(cursor)
+  }
+
+  public int nextIndex() {
+    return cursor
+  }
+
+  public int previousIndex() {
+    return cursor - 1
+  }
+
+  public void remove() {
+    throw new UnsupportedOperationException("remove")
+  }
+
+  public void set(T e) {
+    throw new UnsupportedOperationException("set")
+  }
+
+  public void add(T e) {
+    throw new UnsupportedOperationException("add")
+  }
+}

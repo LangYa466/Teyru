@@ -1,0 +1,60 @@
+// java.util.regex: Pattern and Matcher.
+//
+// The engine is a backtracking matcher over a parsed tree, and each node is a
+// function from a position to "can the rest match from here" -- which is what
+// the Cont interface is, and what makes a regex engine expressible in this
+// language at all.
+//
+// What it does not have is as important as what it does: possessive
+// quantifiers, atomic groups, lookahead and lookbehind, backreferences and
+// \p{...} classes are refused by compile() with a message naming them rather
+// than silently matching something else. A pattern that cannot be honoured
+// should not be accepted.
+//
+// Expected output is javac 25's, including the exact text of
+// PatternSyntaxException.getMessage -- reason and index, the pattern, and a
+// caret under the offending character when the index is inside the pattern.
+
+import java.util.regex.Matcher
+import java.util.regex.Pattern
+
+class Main {
+  public static void main(String[] args) {
+    System.out.println(Pattern.matches("a+b", "aaab"))
+    System.out.println(Pattern.matches("a+b", "aaac"))
+
+    Pattern p = Pattern.compile("(\\d+)-(\\d+)")
+    Matcher m = p.matcher("range 12-345 end")
+    System.out.println(m.find())
+    System.out.println(m.group())
+    System.out.println(m.group(1) + "|" + m.group(2))
+    System.out.println(m.start() + " " + m.end())
+    System.out.println(m.replaceAll("[$2:$1]"))
+
+    // walking every match, which is what find() in a loop is for
+    Pattern words = Pattern.compile("\\w+")
+    Matcher w = words.matcher("one two three")
+    int n = 0
+    while (w.find()) {
+      n++
+    }
+    System.out.println("words=" + n)
+
+    System.out.println(Pattern.compile("^a.*z$").matcher("abcz").matches())
+    System.out.println(Pattern.compile("a{2,3}").matcher("aaaa").find())
+    System.out.println(Pattern.compile("[^0-9]+").matcher("12abc34").replaceAll("#"))
+    System.out.println(Pattern.compile("(?:ab)+").matcher("ababab").matches())
+    System.out.println(Pattern.compile("x|yz").matcher("yz").matches())
+    System.out.println(Pattern.compile("colou?r").matcher("color").matches())
+
+    // a lazy quantifier, which is the whole reason replaceAll needs to
+    // backtrack rather than scan
+    System.out.println(Pattern.compile("<(.+?)>").matcher("<a><b>").replaceAll("[$1]"))
+
+    try {
+      Pattern.compile("a(b")
+    } catch (Exception e) {
+      System.out.println("rejected: " + e.getMessage())
+    }
+  }
+}

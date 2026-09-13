@@ -1,0 +1,1724 @@
+package teyru
+
+/* java.util.Arrays.
+ *
+ * Every method that Java writes once per primitive type is written once per
+ * primitive type here too, because that is what the overload set is: `sort`
+ * on an int[] and `sort` on an Object[] are different methods with different
+ * behaviour, not one generic method with a widening conversion.
+ *
+ * The sorts are merge sorts. Java's primitive sorts are dual-pivot quicksort
+ * and its object sorts are TimSort; both are unstable and stable respectively
+ * in ways this library does not reproduce. What is reproduced is what a caller
+ * can see: `sort(Object[])` and `sort(T[], Comparator)` are stable, and the
+ * primitive sorts put the array in ascending order.
+ *
+ * Not here, and each for a reason worth naming: the streams and spliterators
+ * (there is no java.util.stream to return them in), the parallel sorts (no
+ * threads), `setAll` (a generator lambda per element type for a method nothing
+ * else needs), the range forms `sort(a, from, to)` and `fill(a, from, to, v)`
+ * (the JDK's own range checking, AIOOBE and IAE, for a shape the whole-array
+ * forms already cover), and `mismatch`/`compare` (Java 9; they are a loop each,
+ * but they were not asked for and nothing else in this library calls them).
+ * `deepToString` and `deepEquals` also carry the per-primitive 2-D overloads
+ * Java does not have -- see the note on deepEquals, it is a memory-safety
+ * matter rather than an API preference.
+ */
+
+class Arrays {
+  private Arrays() {
+  }
+
+  // ----------------------------------------------------------------- sorts
+
+  public static void sort(int[] a) {
+    int n = a.length
+    int[] buf = new int[n]
+    for (int w = 1 : w < n : w = w * 2) {
+      for (int lo = 0 : lo < n : lo = lo + 2 * w) {
+        int mid = lo + w < n ? lo + w : n
+        int hi = lo + 2 * w < n ? lo + 2 * w : n
+        mergeInt(a, buf, lo, mid, hi)
+      }
+    }
+  }
+
+  private static void mergeInt(int[] a, int[] buf, int lo, int mid, int hi) {
+    for (int i = lo : i < hi : i++) {
+      buf[i] = a[i]
+    }
+    int i = lo
+    int j = mid
+    for (int k = lo : k < hi : k++) {
+      if (i >= mid) {
+        a[k] = buf[j]
+        j++
+      } else if (j >= hi) {
+        a[k] = buf[i]
+        i++
+      } else if (buf[j] < buf[i]) {
+        a[k] = buf[j]
+        j++
+      } else {
+        a[k] = buf[i]
+        i++
+      }
+    }
+  }
+
+  public static void sort(long[] a) {
+    int n = a.length
+    long[] buf = new long[n]
+    for (int w = 1 : w < n : w = w * 2) {
+      for (int lo = 0 : lo < n : lo = lo + 2 * w) {
+        int mid = lo + w < n ? lo + w : n
+        int hi = lo + 2 * w < n ? lo + 2 * w : n
+        mergeLong(a, buf, lo, mid, hi)
+      }
+    }
+  }
+
+  private static void mergeLong(long[] a, long[] buf, int lo, int mid, int hi) {
+    for (int i = lo : i < hi : i++) {
+      buf[i] = a[i]
+    }
+    int i = lo
+    int j = mid
+    for (int k = lo : k < hi : k++) {
+      if (i >= mid) {
+        a[k] = buf[j]
+        j++
+      } else if (j >= hi) {
+        a[k] = buf[i]
+        i++
+      } else if (buf[j] < buf[i]) {
+        a[k] = buf[j]
+        j++
+      } else {
+        a[k] = buf[i]
+        i++
+      }
+    }
+  }
+
+  public static void sort(short[] a) {
+    int n = a.length
+    short[] buf = new short[n]
+    for (int w = 1 : w < n : w = w * 2) {
+      for (int lo = 0 : lo < n : lo = lo + 2 * w) {
+        int mid = lo + w < n ? lo + w : n
+        int hi = lo + 2 * w < n ? lo + 2 * w : n
+        mergeShort(a, buf, lo, mid, hi)
+      }
+    }
+  }
+
+  private static void mergeShort(short[] a, short[] buf, int lo, int mid, int hi) {
+    for (int i = lo : i < hi : i++) {
+      buf[i] = a[i]
+    }
+    int i = lo
+    int j = mid
+    for (int k = lo : k < hi : k++) {
+      if (i >= mid) {
+        a[k] = buf[j]
+        j++
+      } else if (j >= hi) {
+        a[k] = buf[i]
+        i++
+      } else if (buf[j] < buf[i]) {
+        a[k] = buf[j]
+        j++
+      } else {
+        a[k] = buf[i]
+        i++
+      }
+    }
+  }
+
+  public static void sort(char[] a) {
+    int n = a.length
+    char[] buf = new char[n]
+    for (int w = 1 : w < n : w = w * 2) {
+      for (int lo = 0 : lo < n : lo = lo + 2 * w) {
+        int mid = lo + w < n ? lo + w : n
+        int hi = lo + 2 * w < n ? lo + 2 * w : n
+        mergeChar(a, buf, lo, mid, hi)
+      }
+    }
+  }
+
+  private static void mergeChar(char[] a, char[] buf, int lo, int mid, int hi) {
+    for (int i = lo : i < hi : i++) {
+      buf[i] = a[i]
+    }
+    int i = lo
+    int j = mid
+    for (int k = lo : k < hi : k++) {
+      if (i >= mid) {
+        a[k] = buf[j]
+        j++
+      } else if (j >= hi) {
+        a[k] = buf[i]
+        i++
+      } else if (buf[j] < buf[i]) {
+        a[k] = buf[j]
+        j++
+      } else {
+        a[k] = buf[i]
+        i++
+      }
+    }
+  }
+
+  public static void sort(byte[] a) {
+    int n = a.length
+    byte[] buf = new byte[n]
+    for (int w = 1 : w < n : w = w * 2) {
+      for (int lo = 0 : lo < n : lo = lo + 2 * w) {
+        int mid = lo + w < n ? lo + w : n
+        int hi = lo + 2 * w < n ? lo + 2 * w : n
+        mergeByte(a, buf, lo, mid, hi)
+      }
+    }
+  }
+
+  private static void mergeByte(byte[] a, byte[] buf, int lo, int mid, int hi) {
+    for (int i = lo : i < hi : i++) {
+      buf[i] = a[i]
+    }
+    int i = lo
+    int j = mid
+    for (int k = lo : k < hi : k++) {
+      if (i >= mid) {
+        a[k] = buf[j]
+        j++
+      } else if (j >= hi) {
+        a[k] = buf[i]
+        i++
+      } else if (buf[j] < buf[i]) {
+        a[k] = buf[j]
+        j++
+      } else {
+        a[k] = buf[i]
+        i++
+      }
+    }
+  }
+
+  public static void sort(float[] a) {
+    int n = a.length
+    float[] buf = new float[n]
+    for (int w = 1 : w < n : w = w * 2) {
+      for (int lo = 0 : lo < n : lo = lo + 2 * w) {
+        int mid = lo + w < n ? lo + w : n
+        int hi = lo + 2 * w < n ? lo + 2 * w : n
+        mergeFloat(a, buf, lo, mid, hi)
+      }
+    }
+  }
+
+  private static void mergeFloat(float[] a, float[] buf, int lo, int mid, int hi) {
+    for (int i = lo : i < hi : i++) {
+      buf[i] = a[i]
+    }
+    int i = lo
+    int j = mid
+    for (int k = lo : k < hi : k++) {
+      if (i >= mid) {
+        a[k] = buf[j]
+        j++
+      } else if (j >= hi) {
+        a[k] = buf[i]
+        i++
+      } else if (buf[j] < buf[i]) {
+        a[k] = buf[j]
+        j++
+      } else {
+        a[k] = buf[i]
+        i++
+      }
+    }
+  }
+
+  public static void sort(double[] a) {
+    int n = a.length
+    double[] buf = new double[n]
+    for (int w = 1 : w < n : w = w * 2) {
+      for (int lo = 0 : lo < n : lo = lo + 2 * w) {
+        int mid = lo + w < n ? lo + w : n
+        int hi = lo + 2 * w < n ? lo + 2 * w : n
+        mergeDouble(a, buf, lo, mid, hi)
+      }
+    }
+  }
+
+  private static void mergeDouble(double[] a, double[] buf, int lo, int mid, int hi) {
+    for (int i = lo : i < hi : i++) {
+      buf[i] = a[i]
+    }
+    int i = lo
+    int j = mid
+    for (int k = lo : k < hi : k++) {
+      if (i >= mid) {
+        a[k] = buf[j]
+        j++
+      } else if (j >= hi) {
+        a[k] = buf[i]
+        i++
+      } else if (buf[j] < buf[i]) {
+        a[k] = buf[j]
+        j++
+      } else {
+        a[k] = buf[i]
+        i++
+      }
+    }
+  }
+
+  /* Java's sort(Object[]) is a TimSort over Comparable elements and throws
+     ClassCastException when two elements refuse to compare. The same contract
+     with a merge sort: the cast below is where the ClassCastException comes
+     from, and it is thrown from the comparison, as in the JDK. */
+  public static void sort(Object[] a) {
+    if (a.length < 2) {
+      return
+    }
+    Object[] buf = new Object[a.length]
+    mergeNatural(a, buf, 0, a.length)
+  }
+
+  public static <T> void sort(T[] a, Comparator<T> c) {
+    if (a.length < 2) {
+      return
+    }
+    Object[] buf = new Object[a.length]
+    mergeObjects(a, buf, 0, a.length, c)
+  }
+
+  /* The natural ordering is a merge of its own rather than the same merge with
+     a null comparator: a null literal gives the checker nothing to infer the
+     comparator's type argument from, which is the one place in this file where
+     the dialect's inference is weaker than Java's. */
+  private static void mergeNatural(Object[] a, Object[] buf, int lo, int hi) {
+    if (hi - lo < 2) {
+      return
+    }
+    int mid = lo + (hi - lo) / 2
+    mergeNatural(a, buf, lo, mid)
+    mergeNatural(a, buf, mid, hi)
+    if (compareNatural(a[mid - 1], a[mid]) <= 0) {
+      return
+    }
+    for (int i = lo : i < hi : i++) {
+      buf[i] = a[i]
+    }
+    int i = lo
+    int j = mid
+    for (int k = lo : k < hi : k++) {
+      if (i >= mid) {
+        a[k] = buf[j]
+        j++
+      } else if (j >= hi) {
+        a[k] = buf[i]
+        i++
+      } else if (compareNatural(buf[j], buf[i]) < 0) {
+        a[k] = buf[j]
+        j++
+      } else {
+        a[k] = buf[i]
+        i++
+      }
+    }
+  }
+
+  private static int compareNatural(Object a, Object b) {
+    Comparable<Object> x = (Comparable<Object>) a
+    return x.compareTo(b)
+  }
+
+  private static <T> void mergeObjects(Object[] a, Object[] buf, int lo, int hi, Comparator<T> c) {
+    if (hi - lo < 2) {
+      return
+    }
+    int mid = lo + (hi - lo) / 2
+    mergeObjects(a, buf, lo, mid, c)
+    mergeObjects(a, buf, mid, hi, c)
+    if (compareObjects((T) a[mid - 1], (T) a[mid], c) <= 0) {
+      return
+    }
+    // only the range being merged is copied out, so the recursion stays
+    // in place and the array is written once per level
+    for (int i = lo : i < hi : i++) {
+      buf[i] = a[i]
+    }
+    int i = lo
+    int j = mid
+    for (int k = lo : k < hi : k++) {
+      if (i >= mid) {
+        a[k] = buf[j]
+        j++
+      } else if (j >= hi) {
+        a[k] = buf[i]
+        i++
+      } else if (compareObjects((T) buf[j], (T) buf[i], c) < 0) {
+        a[k] = buf[j]
+        j++
+      } else {
+        a[k] = buf[i]
+        i++
+      }
+    }
+  }
+
+  /* A null comparator means the natural ordering, as it does in Java. The
+     dispatch is here rather than at the call site so that the comparator's
+     type argument still comes from a variable, not from a null literal. */
+  private static <T> int compareObjects(Object a, Object b, Comparator<T> c) {
+    if (c == null) {
+      return compareNatural(a, b)
+    }
+    return c.compare((T) a, (T) b)
+  }
+
+  // -------------------------------------------------------------- searches
+
+  public static int binarySearch(int[] a, int key) {
+    int lo = 0
+    int hi = a.length - 1
+    while (lo <= hi) {
+      int mid = (lo + hi) >>> 1
+      int v = a[mid]
+      if (v < key) {
+        lo = mid + 1
+      } else if (v > key) {
+        hi = mid - 1
+      } else {
+        return mid
+      }
+    }
+    return -(lo + 1)
+  }
+
+  public static int binarySearch(long[] a, long key) {
+    int lo = 0
+    int hi = a.length - 1
+    while (lo <= hi) {
+      int mid = (lo + hi) >>> 1
+      long v = a[mid]
+      if (v < key) {
+        lo = mid + 1
+      } else if (v > key) {
+        hi = mid - 1
+      } else {
+        return mid
+      }
+    }
+    return -(lo + 1)
+  }
+
+  public static int binarySearch(short[] a, short key) {
+    int lo = 0
+    int hi = a.length - 1
+    while (lo <= hi) {
+      int mid = (lo + hi) >>> 1
+      short v = a[mid]
+      if (v < key) {
+        lo = mid + 1
+      } else if (v > key) {
+        hi = mid - 1
+      } else {
+        return mid
+      }
+    }
+    return -(lo + 1)
+  }
+
+  public static int binarySearch(char[] a, char key) {
+    int lo = 0
+    int hi = a.length - 1
+    while (lo <= hi) {
+      int mid = (lo + hi) >>> 1
+      char v = a[mid]
+      if (v < key) {
+        lo = mid + 1
+      } else if (v > key) {
+        hi = mid - 1
+      } else {
+        return mid
+      }
+    }
+    return -(lo + 1)
+  }
+
+  public static int binarySearch(byte[] a, byte key) {
+    int lo = 0
+    int hi = a.length - 1
+    while (lo <= hi) {
+      int mid = (lo + hi) >>> 1
+      byte v = a[mid]
+      if (v < key) {
+        lo = mid + 1
+      } else if (v > key) {
+        hi = mid - 1
+      } else {
+        return mid
+      }
+    }
+    return -(lo + 1)
+  }
+
+  public static int binarySearch(float[] a, float key) {
+    int lo = 0
+    int hi = a.length - 1
+    while (lo <= hi) {
+      int mid = (lo + hi) >>> 1
+      float v = a[mid]
+      if (v < key) {
+        lo = mid + 1
+      } else if (v > key) {
+        hi = mid - 1
+      } else {
+        return mid
+      }
+    }
+    return -(lo + 1)
+  }
+
+  public static int binarySearch(double[] a, double key) {
+    int lo = 0
+    int hi = a.length - 1
+    while (lo <= hi) {
+      int mid = (lo + hi) >>> 1
+      double v = a[mid]
+      if (v < key) {
+        lo = mid + 1
+      } else if (v > key) {
+        hi = mid - 1
+      } else {
+        return mid
+      }
+    }
+    return -(lo + 1)
+  }
+
+  public static int binarySearch(Object[] a, Object key) {
+    int lo = 0
+    int hi = a.length - 1
+    while (lo <= hi) {
+      int mid = (lo + hi) >>> 1
+      int c = compareNatural(a[mid], key)
+      if (c < 0) {
+        lo = mid + 1
+      } else if (c > 0) {
+        hi = mid - 1
+      } else {
+        return mid
+      }
+    }
+    return -(lo + 1)
+  }
+
+  public static <T> int binarySearch(T[] a, T key, Comparator<T> c) {
+    int lo = 0
+    int hi = a.length - 1
+    while (lo <= hi) {
+      int mid = (lo + hi) >>> 1
+      int r = compareObjects(a[mid], key, c)
+      if (r < 0) {
+        lo = mid + 1
+      } else if (r > 0) {
+        hi = mid - 1
+      } else {
+        return mid
+      }
+    }
+    return -(lo + 1)
+  }
+
+  // -------------------------------------------------------------- equality
+
+  public static boolean equals(int[] a, int[] b) {
+    if (a == b) {
+      return true
+    }
+    if (a == null || b == null || a.length != b.length) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      if (a[i] != b[i]) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public static boolean equals(long[] a, long[] b) {
+    if (a == b) {
+      return true
+    }
+    if (a == null || b == null || a.length != b.length) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      if (a[i] != b[i]) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public static boolean equals(short[] a, short[] b) {
+    if (a == b) {
+      return true
+    }
+    if (a == null || b == null || a.length != b.length) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      if (a[i] != b[i]) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public static boolean equals(char[] a, char[] b) {
+    if (a == b) {
+      return true
+    }
+    if (a == null || b == null || a.length != b.length) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      if (a[i] != b[i]) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public static boolean equals(byte[] a, byte[] b) {
+    if (a == b) {
+      return true
+    }
+    if (a == null || b == null || a.length != b.length) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      if (a[i] != b[i]) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public static boolean equals(boolean[] a, boolean[] b) {
+    if (a == b) {
+      return true
+    }
+    if (a == null || b == null || a.length != b.length) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      if (a[i] != b[i]) {
+        return false
+      }
+    }
+    return true
+  }
+
+  /* The floating-point pairs are the ones where != is not the same as
+     not-equal: NaN is not equal to itself, so two arrays holding NaN are
+     equal if and only if Float.floatToIntBits agrees, which is how the JDK
+     writes it too. */
+  public static boolean equals(float[] a, float[] b) {
+    if (a == b) {
+      return true
+    }
+    if (a == null || b == null || a.length != b.length) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      if (Float.valueOf(a[i]).hashCode() != Float.valueOf(b[i]).hashCode()) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public static boolean equals(double[] a, double[] b) {
+    if (a == b) {
+      return true
+    }
+    if (a == null || b == null || a.length != b.length) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      if (Double.valueOf(a[i]).hashCode() != Double.valueOf(b[i]).hashCode()) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public static boolean equals(Object[] a, Object[] b) {
+    if (a == b) {
+      return true
+    }
+    if (a == null || b == null || a.length != b.length) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      if (!Objects.equals(a[i], b[i])) {
+        return false
+      }
+    }
+    return true
+  }
+
+  /* deepEquals, for arrays whose elements are themselves arrays.
+   *
+   * Java decides "is this element an array" from the runtime element type. It
+   * cannot be decided that way here: every Teyru array is one class
+   * (docs/language.md §13), so `x instanceof Object[]` answers true for an
+   * int[] as well -- and reading one as Object[] reinterprets its ints as
+   * pointers, which is memory corruption, not a wrong answer. What IS known
+   * statically is the element type at the call site, so the primitive 2-D
+   * overloads below take the arrays Java would have reached through this one,
+   * and this one is left with the object arrays it can read. */
+  public static boolean deepEquals(Object[] a, Object[] b) {
+    if (a == b) {
+      return true
+    }
+    if (a == null || b == null || a.length != b.length) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      Object x = a[i]
+      Object y = b[i]
+      if (x == y) {
+        continue
+      }
+      if (x == null || y == null) {
+        return false
+      }
+      if (x instanceof Object[] && y instanceof Object[]) {
+        if (!deepEquals((Object[]) x, (Object[]) y)) {
+          return false
+        }
+      } else if (!x.equals(y)) {
+        return false
+      }
+    }
+    return true
+  }
+
+  /* The primitive 2-D overloads. Each one is the shape Java reaches by
+     recursing, written out so that the element read is typed: `a[i]` on an
+     int[][] is an int[], which equals() can compare, where the same read
+     through an Object[] would not be an int[]. */
+  public static boolean deepEquals(int[][] a, int[][] b) {
+    if (a == b) {
+      return true
+    }
+    if (a == null || b == null || a.length != b.length) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      if (!equals(a[i], b[i])) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public static boolean deepEquals(long[][] a, long[][] b) {
+    if (a == b) {
+      return true
+    }
+    if (a == null || b == null || a.length != b.length) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      if (!equals(a[i], b[i])) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public static boolean deepEquals(double[][] a, double[][] b) {
+    if (a == b) {
+      return true
+    }
+    if (a == null || b == null || a.length != b.length) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      if (!equals(a[i], b[i])) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public static boolean deepEquals(float[][] a, float[][] b) {
+    if (a == b) {
+      return true
+    }
+    if (a == null || b == null || a.length != b.length) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      if (!equals(a[i], b[i])) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public static boolean deepEquals(char[][] a, char[][] b) {
+    if (a == b) {
+      return true
+    }
+    if (a == null || b == null || a.length != b.length) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      if (!equals(a[i], b[i])) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public static boolean deepEquals(short[][] a, short[][] b) {
+    if (a == b) {
+      return true
+    }
+    if (a == null || b == null || a.length != b.length) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      if (!equals(a[i], b[i])) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public static boolean deepEquals(byte[][] a, byte[][] b) {
+    if (a == b) {
+      return true
+    }
+    if (a == null || b == null || a.length != b.length) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      if (!equals(a[i], b[i])) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public static boolean deepEquals(boolean[][] a, boolean[][] b) {
+    if (a == b) {
+      return true
+    }
+    if (a == null || b == null || a.length != b.length) {
+      return false
+    }
+    for (int i = 0 : i < a.length : i++) {
+      if (!equals(a[i], b[i])) {
+        return false
+      }
+    }
+    return true
+  }
+
+  // ------------------------------------------------------------ hash codes
+
+  public static int hashCode(int[] a) {
+    if (a == null) {
+      return 0
+    }
+    int h = 1
+    for (int i = 0 : i < a.length : i++) {
+      h = 31 * h + a[i]
+    }
+    return h
+  }
+
+  public static int hashCode(long[] a) {
+    if (a == null) {
+      return 0
+    }
+    int h = 1
+    for (int i = 0 : i < a.length : i++) {
+      h = 31 * h + (int) (a[i] ^ (a[i] >>> 32))
+    }
+    return h
+  }
+
+  public static int hashCode(short[] a) {
+    if (a == null) {
+      return 0
+    }
+    int h = 1
+    for (int i = 0 : i < a.length : i++) {
+      h = 31 * h + a[i]
+    }
+    return h
+  }
+
+  public static int hashCode(char[] a) {
+    if (a == null) {
+      return 0
+    }
+    int h = 1
+    for (int i = 0 : i < a.length : i++) {
+      h = 31 * h + a[i]
+    }
+    return h
+  }
+
+  public static int hashCode(byte[] a) {
+    if (a == null) {
+      return 0
+    }
+    int h = 1
+    for (int i = 0 : i < a.length : i++) {
+      h = 31 * h + a[i]
+    }
+    return h
+  }
+
+  public static int hashCode(boolean[] a) {
+    if (a == null) {
+      return 0
+    }
+    int h = 1
+    for (int i = 0 : i < a.length : i++) {
+      h = 31 * h + (a[i] ? 1231 : 1237)
+    }
+    return h
+  }
+
+  public static int hashCode(float[] a) {
+    if (a == null) {
+      return 0
+    }
+    int h = 1
+    for (int i = 0 : i < a.length : i++) {
+      h = 31 * h + Float.valueOf(a[i]).hashCode()
+    }
+    return h
+  }
+
+  public static int hashCode(double[] a) {
+    if (a == null) {
+      return 0
+    }
+    int h = 1
+    for (int i = 0 : i < a.length : i++) {
+      // Double.hashCode() is the int form of doubleToLongBits, already folded
+      h = 31 * h + Double.valueOf(a[i]).hashCode()
+    }
+    return h
+  }
+
+  public static int hashCode(Object[] a) {
+    if (a == null) {
+      return 0
+    }
+    int h = 1
+    for (int i = 0 : i < a.length : i++) {
+      h = 31 * h + Objects.hashCode(a[i])
+    }
+    return h
+  }
+
+  // ------------------------------------------------------------------ fill
+
+  public static void fill(int[] a, int val) {
+    for (int i = 0 : i < a.length : i++) {
+      a[i] = val
+    }
+  }
+
+  public static void fill(long[] a, long val) {
+    for (int i = 0 : i < a.length : i++) {
+      a[i] = val
+    }
+  }
+
+  public static void fill(short[] a, short val) {
+    for (int i = 0 : i < a.length : i++) {
+      a[i] = val
+    }
+  }
+
+  public static void fill(char[] a, char val) {
+    for (int i = 0 : i < a.length : i++) {
+      a[i] = val
+    }
+  }
+
+  public static void fill(byte[] a, byte val) {
+    for (int i = 0 : i < a.length : i++) {
+      a[i] = val
+    }
+  }
+
+  public static void fill(boolean[] a, boolean val) {
+    for (int i = 0 : i < a.length : i++) {
+      a[i] = val
+    }
+  }
+
+  public static void fill(float[] a, float val) {
+    for (int i = 0 : i < a.length : i++) {
+      a[i] = val
+    }
+  }
+
+  public static void fill(double[] a, double val) {
+    for (int i = 0 : i < a.length : i++) {
+      a[i] = val
+    }
+  }
+
+  public static void fill(Object[] a, Object val) {
+    for (int i = 0 : i < a.length : i++) {
+      a[i] = val
+    }
+  }
+
+  // --------------------------------------------------------------- copies
+
+  public static int[] copyOf(int[] original, int newLength) {
+    int[] out = new int[newLength]
+    int n = original.length < newLength ? original.length : newLength
+    for (int i = 0 : i < n : i++) {
+      out[i] = original[i]
+    }
+    return out
+  }
+
+  public static long[] copyOf(long[] original, int newLength) {
+    long[] out = new long[newLength]
+    int n = original.length < newLength ? original.length : newLength
+    for (int i = 0 : i < n : i++) {
+      out[i] = original[i]
+    }
+    return out
+  }
+
+  public static short[] copyOf(short[] original, int newLength) {
+    short[] out = new short[newLength]
+    int n = original.length < newLength ? original.length : newLength
+    for (int i = 0 : i < n : i++) {
+      out[i] = original[i]
+    }
+    return out
+  }
+
+  public static char[] copyOf(char[] original, int newLength) {
+    char[] out = new char[newLength]
+    int n = original.length < newLength ? original.length : newLength
+    for (int i = 0 : i < n : i++) {
+      out[i] = original[i]
+    }
+    return out
+  }
+
+  public static byte[] copyOf(byte[] original, int newLength) {
+    byte[] out = new byte[newLength]
+    int n = original.length < newLength ? original.length : newLength
+    for (int i = 0 : i < n : i++) {
+      out[i] = original[i]
+    }
+    return out
+  }
+
+  public static boolean[] copyOf(boolean[] original, int newLength) {
+    boolean[] out = new boolean[newLength]
+    int n = original.length < newLength ? original.length : newLength
+    for (int i = 0 : i < n : i++) {
+      out[i] = original[i]
+    }
+    return out
+  }
+
+  public static float[] copyOf(float[] original, int newLength) {
+    float[] out = new float[newLength]
+    int n = original.length < newLength ? original.length : newLength
+    for (int i = 0 : i < n : i++) {
+      out[i] = original[i]
+    }
+    return out
+  }
+
+  public static double[] copyOf(double[] original, int newLength) {
+    double[] out = new double[newLength]
+    int n = original.length < newLength ? original.length : newLength
+    for (int i = 0 : i < n : i++) {
+      out[i] = original[i]
+    }
+    return out
+  }
+
+  /* The generic form, which the dialect can express: the array a caller gets
+     back has the element type the compiler asked for, because a T[] here is
+     an Object[] at run time and no element check is made on store -- exactly
+     the hole Java's own generic arrays have, and why an int[] can never be
+     passed to this method. */
+  public static <T> T[] copyOf(T[] original, int newLength) {
+    Object[] out = new Object[newLength]
+    int n = original.length < newLength ? original.length : newLength
+    for (int i = 0 : i < n : i++) {
+      out[i] = original[i]
+    }
+    return (T[]) out
+  }
+
+  public static int[] copyOfRange(int[] original, int from, int to) {
+    checkRange(original.length, from, to)
+    int[] out = new int[to - from]
+    for (int i = from : i < to : i++) {
+      out[i - from] = original[i]
+    }
+    return out
+  }
+
+  public static long[] copyOfRange(long[] original, int from, int to) {
+    checkRange(original.length, from, to)
+    long[] out = new long[to - from]
+    for (int i = from : i < to : i++) {
+      out[i - from] = original[i]
+    }
+    return out
+  }
+
+  public static short[] copyOfRange(short[] original, int from, int to) {
+    checkRange(original.length, from, to)
+    short[] out = new short[to - from]
+    for (int i = from : i < to : i++) {
+      out[i - from] = original[i]
+    }
+    return out
+  }
+
+  public static char[] copyOfRange(char[] original, int from, int to) {
+    checkRange(original.length, from, to)
+    char[] out = new char[to - from]
+    for (int i = from : i < to : i++) {
+      out[i - from] = original[i]
+    }
+    return out
+  }
+
+  public static byte[] copyOfRange(byte[] original, int from, int to) {
+    checkRange(original.length, from, to)
+    byte[] out = new byte[to - from]
+    for (int i = from : i < to : i++) {
+      out[i - from] = original[i]
+    }
+    return out
+  }
+
+  public static boolean[] copyOfRange(boolean[] original, int from, int to) {
+    checkRange(original.length, from, to)
+    boolean[] out = new boolean[to - from]
+    for (int i = from : i < to : i++) {
+      out[i - from] = original[i]
+    }
+    return out
+  }
+
+  public static float[] copyOfRange(float[] original, int from, int to) {
+    checkRange(original.length, from, to)
+    float[] out = new float[to - from]
+    for (int i = from : i < to : i++) {
+      out[i - from] = original[i]
+    }
+    return out
+  }
+
+  public static double[] copyOfRange(double[] original, int from, int to) {
+    checkRange(original.length, from, to)
+    double[] out = new double[to - from]
+    for (int i = from : i < to : i++) {
+      out[i - from] = original[i]
+    }
+    return out
+  }
+
+  public static <T> T[] copyOfRange(T[] original, int from, int to) {
+    checkRange(original.length, from, to)
+    Object[] out = new Object[to - from]
+    for (int i = from : i < to : i++) {
+      out[i - from] = original[i]
+    }
+    return (T[]) out
+  }
+
+  /* Java's range rules: from must be inside the array and not past to, while
+     to may run past the end, in which case the copy is padded -- with zero
+     for a primitive array and with null for an object one, which is what the
+     untouched elements of the array above already hold. */
+  private static void checkRange(int length, int from, int to) {
+    if (from < 0 || from > length || from > to) {
+      throw new IllegalArgumentException("from " + from + ", to " + to + ", length " + length)
+    }
+  }
+
+  // --------------------------------------------------------------- printing
+
+  public static String toString(int[] a) {
+    if (a == null) {
+      return "null"
+    }
+    StringBuilder sb = new StringBuilder()
+    sb.append("[")
+    for (int i = 0 : i < a.length : i++) {
+      if (i > 0) {
+        sb.append(", ")
+      }
+      sb.append(a[i])
+    }
+    sb.append("]")
+    return sb.toString()
+  }
+
+  public static String toString(long[] a) {
+    if (a == null) {
+      return "null"
+    }
+    StringBuilder sb = new StringBuilder()
+    sb.append("[")
+    for (int i = 0 : i < a.length : i++) {
+      if (i > 0) {
+        sb.append(", ")
+      }
+      sb.append(a[i])
+    }
+    sb.append("]")
+    return sb.toString()
+  }
+
+  public static String toString(short[] a) {
+    if (a == null) {
+      return "null"
+    }
+    StringBuilder sb = new StringBuilder()
+    sb.append("[")
+    for (int i = 0 : i < a.length : i++) {
+      if (i > 0) {
+        sb.append(", ")
+      }
+      sb.append(a[i])
+    }
+    sb.append("]")
+    return sb.toString()
+  }
+
+  public static String toString(char[] a) {
+    if (a == null) {
+      return "null"
+    }
+    StringBuilder sb = new StringBuilder()
+    sb.append("[")
+    for (int i = 0 : i < a.length : i++) {
+      if (i > 0) {
+        sb.append(", ")
+      }
+      sb.append(a[i])
+    }
+    sb.append("]")
+    return sb.toString()
+  }
+
+  public static String toString(byte[] a) {
+    if (a == null) {
+      return "null"
+    }
+    StringBuilder sb = new StringBuilder()
+    sb.append("[")
+    for (int i = 0 : i < a.length : i++) {
+      if (i > 0) {
+        sb.append(", ")
+      }
+      sb.append(a[i])
+    }
+    sb.append("]")
+    return sb.toString()
+  }
+
+  public static String toString(boolean[] a) {
+    if (a == null) {
+      return "null"
+    }
+    StringBuilder sb = new StringBuilder()
+    sb.append("[")
+    for (int i = 0 : i < a.length : i++) {
+      if (i > 0) {
+        sb.append(", ")
+      }
+      sb.append(a[i])
+    }
+    sb.append("]")
+    return sb.toString()
+  }
+
+  public static String toString(float[] a) {
+    if (a == null) {
+      return "null"
+    }
+    StringBuilder sb = new StringBuilder()
+    sb.append("[")
+    for (int i = 0 : i < a.length : i++) {
+      if (i > 0) {
+        sb.append(", ")
+      }
+      sb.append(a[i])
+    }
+    sb.append("]")
+    return sb.toString()
+  }
+
+  public static String toString(double[] a) {
+    if (a == null) {
+      return "null"
+    }
+    StringBuilder sb = new StringBuilder()
+    sb.append("[")
+    for (int i = 0 : i < a.length : i++) {
+      if (i > 0) {
+        sb.append(", ")
+      }
+      sb.append(a[i])
+    }
+    sb.append("]")
+    return sb.toString()
+  }
+
+  public static String toString(Object[] a) {
+    if (a == null) {
+      return "null"
+    }
+    StringBuilder sb = new StringBuilder()
+    sb.append("[")
+    for (int i = 0 : i < a.length : i++) {
+      if (i > 0) {
+        sb.append(", ")
+      }
+      sb.append(a[i])
+    }
+    sb.append("]")
+    return sb.toString()
+  }
+
+  public static String deepToString(Object[] a) {
+    if (a == null) {
+      return "null"
+    }
+    StringBuilder sb = new StringBuilder()
+    deepAppend(sb, a)
+    return sb.toString()
+  }
+
+  /* The primitive 2-D overloads, for the reason deepEquals has them: the
+     element type is known at the call site and nowhere else, and a nested
+     primitive array read through an Object[] is memory corruption rather than
+     a wrong answer. Java reaches these arrays through deepToString(Object[]);
+     the result is the same string. */
+  public static String deepToString(int[][] a) {
+    if (a == null) {
+      return "null"
+    }
+    String[] rendered = new String[a.length]
+    for (int i = 0 : i < a.length : i++) {
+      rendered[i] = toString(a[i])
+    }
+    return rows(rendered)
+  }
+
+  public static String deepToString(long[][] a) {
+    if (a == null) {
+      return "null"
+    }
+    String[] rendered = new String[a.length]
+    for (int i = 0 : i < a.length : i++) {
+      rendered[i] = toString(a[i])
+    }
+    return rows(rendered)
+  }
+
+  public static String deepToString(double[][] a) {
+    if (a == null) {
+      return "null"
+    }
+    String[] rendered = new String[a.length]
+    for (int i = 0 : i < a.length : i++) {
+      rendered[i] = toString(a[i])
+    }
+    return rows(rendered)
+  }
+
+  public static String deepToString(float[][] a) {
+    if (a == null) {
+      return "null"
+    }
+    String[] rendered = new String[a.length]
+    for (int i = 0 : i < a.length : i++) {
+      rendered[i] = toString(a[i])
+    }
+    return rows(rendered)
+  }
+
+  public static String deepToString(char[][] a) {
+    if (a == null) {
+      return "null"
+    }
+    String[] rendered = new String[a.length]
+    for (int i = 0 : i < a.length : i++) {
+      rendered[i] = toString(a[i])
+    }
+    return rows(rendered)
+  }
+
+  public static String deepToString(short[][] a) {
+    if (a == null) {
+      return "null"
+    }
+    String[] rendered = new String[a.length]
+    for (int i = 0 : i < a.length : i++) {
+      rendered[i] = toString(a[i])
+    }
+    return rows(rendered)
+  }
+
+  public static String deepToString(byte[][] a) {
+    if (a == null) {
+      return "null"
+    }
+    String[] rendered = new String[a.length]
+    for (int i = 0 : i < a.length : i++) {
+      rendered[i] = toString(a[i])
+    }
+    return rows(rendered)
+  }
+
+  public static String deepToString(boolean[][] a) {
+    if (a == null) {
+      return "null"
+    }
+    String[] rendered = new String[a.length]
+    for (int i = 0 : i < a.length : i++) {
+      rendered[i] = toString(a[i])
+    }
+    return rows(rendered)
+  }
+
+  // the brackets and separators every deepToString shares; a null row is the
+  // string "null", which is what the row's own toString returns for it
+  private static String rows(String[] rendered) {
+    StringBuilder sb = new StringBuilder()
+    sb.append("[")
+    for (int i = 0 : i < rendered.length : i++) {
+      if (i > 0) {
+        sb.append(", ")
+      }
+      sb.append(rendered[i])
+    }
+    sb.append("]")
+    return sb.toString()
+  }
+
+  /* An element that is itself an array is printed as an array, one level at a
+     time. Java also breaks a cycle by printing "[...]" for an array that is
+     already being printed; that bookkeeping is not here, so a self-referencing
+     array does not terminate (docs/language.md §13). */
+  private static void deepAppend(StringBuilder sb, Object[] a) {
+    sb.append("[")
+    for (int i = 0 : i < a.length : i++) {
+      if (i > 0) {
+        sb.append(", ")
+      }
+      Object o = a[i]
+      if (o instanceof Object[]) {
+        deepAppend(sb, (Object[]) o)
+      } else {
+        sb.append(o)
+      }
+    }
+    sb.append("]")
+  }
+
+  // ---------------------------------------------------------------- asList
+
+  /* Java's asList: a fixed-size list backed by the array it was given, so
+     `asList(a).set(0, x)` writes into a. Java's List.of is the copying one,
+     and is not here. */
+  public static <T> List<T> asList(T... a) {
+    return new ArrayAsList<T>(a)
+  }
+}
+
+/* The List Arrays.asList returns. Every method that would change the length
+   throws, as Java's does; set() writes through to the array. */
+class ArrayAsList<T> implements List<T>, Collection<T> {
+  private T[] a
+
+  public ArrayAsList(T[] array) {
+    a = array
+  }
+
+  public int size() {
+    return a.length
+  }
+
+  public boolean isEmpty() {
+    return a.length == 0
+  }
+
+  public T get(int i) {
+    checkIndex(i)
+    return a[i]
+  }
+
+  public T set(int i, T e) {
+    checkIndex(i)
+    T old = a[i]
+    a[i] = e
+    return old
+  }
+
+  public int indexOf(Object o) {
+    for (int i = 0 : i < a.length : i++) {
+      if (Objects.equals(o, a[i])) {
+        return i
+      }
+    }
+    return -1
+  }
+
+  public int lastIndexOf(Object o) {
+    for (int i = a.length - 1 : i >= 0 : i--) {
+      if (Objects.equals(o, a[i])) {
+        return i
+      }
+    }
+    return -1
+  }
+
+  public boolean contains(Object o) {
+    return indexOf(o) >= 0
+  }
+
+  public Object[] toArray() {
+    Object[] out = new Object[a.length]
+    for (int i = 0 : i < a.length : i++) {
+      out[i] = a[i]
+    }
+    return out
+  }
+
+  public boolean containsAll(Collection<?> c) {
+    for (Object o : c) {
+      if (!contains(o)) {
+        return false
+      }
+    }
+    return true
+  }
+
+  /* removeAll and retainAll are inherited from AbstractCollection in Java,
+     where they remove through an iterator whose remove() throws -- so a
+     removal throws and a no-op returns false. Same here. */
+  public boolean removeAll(Collection<?> c) {
+    if (!changedBy(c, false)) {
+      return false
+    }
+    throw new UnsupportedOperationException("removeAll")
+  }
+
+  public boolean retainAll(Collection<?> c) {
+    if (!changedBy(c, true)) {
+      return false
+    }
+    throw new UnsupportedOperationException("retainAll")
+  }
+
+  private boolean changedBy(Collection<?> c, boolean keep) {
+    for (int i = 0 : i < a.length : i++) {
+      if (c.contains(a[i]) == keep) {
+        return true
+      }
+    }
+    return false
+  }
+
+  public boolean add(T e) {
+    throw new UnsupportedOperationException("add")
+  }
+
+  public void add(int index, T element) {
+    throw new UnsupportedOperationException("add")
+  }
+
+  public boolean addAll(Collection<? extends T> c) {
+    // Java's AbstractCollection returns false for an empty collection without
+    // ever reaching the iterator that throws
+    if (c.isEmpty()) {
+      return false
+    }
+    throw new UnsupportedOperationException("addAll")
+  }
+
+  public boolean addAll(int index, Collection<? extends T> c) {
+    throw new UnsupportedOperationException("addAll")
+  }
+
+  public T remove(int index) {
+    throw new UnsupportedOperationException("remove")
+  }
+
+  public boolean remove(Object o) {
+    throw new UnsupportedOperationException("remove")
+  }
+
+  public void clear() {
+    throw new UnsupportedOperationException("clear")
+  }
+
+  public Iterator<T> iterator() {
+    return listIterator()
+  }
+
+  public ListIterator<T> listIterator() {
+    return new ArrayAsListIterator<T>(this, a, 0)
+  }
+
+  public ListIterator<T> listIterator(int index) {
+    checkIndexForAdd(index)
+    return new ArrayAsListIterator<T>(this, a, index)
+  }
+
+  public List<T> subList(int from, int to) {
+    if (from < 0 || to > a.length || from > to) {
+      throw new IndexOutOfBoundsException("from " + from + ", to " + to + ", size " + a.length)
+    }
+    return new ListSubList<T>(this, from, to)
+  }
+
+  public boolean equals(Object o) {
+    if (o == this) {
+      return true
+    }
+    if (!(o instanceof List)) {
+      return false
+    }
+    List<Object> other = (List<Object>) o
+    if (other.size() != a.length) {
+      return false
+    }
+    Iterator<Object> it = other.iterator()
+    for (int i = 0 : i < a.length : i++) {
+      if (!Objects.equals(a[i], it.next())) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public int hashCode() {
+    int h = 1
+    for (int i = 0 : i < a.length : i++) {
+      h = 31 * h + Objects.hashCode(a[i])
+    }
+    return h
+  }
+
+  public String toString() {
+    return CollectionSupport.toString(this)
+  }
+
+  private void checkIndex(int i) {
+    if (i < 0 || i >= a.length) {
+      throw new IndexOutOfBoundsException("index " + i + ", size " + a.length)
+    }
+  }
+
+  private void checkIndexForAdd(int i) {
+    if (i < 0 || i > a.length) {
+      throw new IndexOutOfBoundsException("index " + i + ", size " + a.length)
+    }
+  }
+}
+
+class ArrayAsListIterator<T> implements ListIterator<T>, Iterator<T> {
+  private ArrayAsList<T> list
+  private T[] a
+  private int cursor
+  private int lastRet = -1
+
+  public ArrayAsListIterator(ArrayAsList<T> l, T[] array, int index) {
+    list = l
+    a = array
+    cursor = index
+  }
+
+  public boolean hasNext() {
+    return cursor < a.length
+  }
+
+  public T next() {
+    if (!hasNext()) {
+      throw new NoSuchElementException("no more elements")
+    }
+    T v = a[cursor]
+    lastRet = cursor
+    cursor++
+    return v
+  }
+
+  public boolean hasPrevious() {
+    return cursor > 0
+  }
+
+  public T previous() {
+    if (!hasPrevious()) {
+      throw new NoSuchElementException("no more elements")
+    }
+    cursor--
+    lastRet = cursor
+    return a[cursor]
+  }
+
+  public int nextIndex() {
+    return cursor
+  }
+
+  public int previousIndex() {
+    return cursor - 1
+  }
+
+  public void remove() {
+    throw new UnsupportedOperationException("remove")
+  }
+
+  public void set(T e) {
+    if (lastRet < 0) {
+      throw new IllegalStateException("set() before next()")
+    }
+    a[lastRet] = e
+  }
+
+  public void add(T e) {
+    throw new UnsupportedOperationException("add")
+  }
+}

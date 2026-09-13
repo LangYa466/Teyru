@@ -1,0 +1,9 @@
+two ports: true
+a: alpha
+b: beta
+sa: one
+sb: two
+distinct: true
+same server: true
+a closed: true true
+b alive: still here

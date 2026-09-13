@@ -496,12 +496,26 @@ func (e *Emitter) argsFor(recv string, list []ast.Expr, m *ast.Method, call *ast
 	for i, a := range list {
 		var want ast.Type
 		if m != nil {
-			if i < len(m.Params) {
-				want = m.Params[i]
-			} else if m.Varargs && len(m.Params) > 0 {
-				if arr, ok := m.Params[len(m.Params)-1].(*ast.ArrayType); ok {
+			// A variable-arity call gives every argument from the array
+			// parameter's position on the *element* type, not the array's:
+			// the argument at index len(Params)-1 is the first vararg, and
+			// treating it as the array is what left `String.format("%d", 7)`
+			// passing a bare 7 where an Object* goes -- the value was never
+			// boxed, and the callee read address 7.
+			if m.Varargs && len(m.Params) > 0 && i >= len(m.Params)-1 {
+				last := m.Params[len(m.Params)-1]
+				if arr, ok := last.(*ast.ArrayType); ok {
 					want = arr.Elem
+					// An argument that is already the array is passed through
+					// as one: `printf("%d", new Object[]{n})` hands over the
+					// array, and coercing it to the element type would wrap it
+					// in a second array whose single element is the first.
+					if _, isArr := a.GetType().(*ast.ArrayType); isArr {
+						want = last
+					}
 				}
+			} else if i < len(m.Params) {
+				want = m.Params[i]
 			}
 		}
 		parts = append(parts, e.coerce(e.expr(a), a.GetType(), want))

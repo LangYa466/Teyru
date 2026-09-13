@@ -1334,12 +1334,12 @@ func (e *Emitter) callExpr(v *ast.Call) string {
 	}
 	if v.Recv == nil {
 		if m.Selector >= 0 || m.VIndex >= 0 {
-			return e.virtCall(m, cname(m.Owner)+"*", e.thisExpr(), v.Args)
+			return e.virtCall(m, cname(m.Owner)+"*", e.thisExpr(), v.Args, v)
 		}
 		return name + "(" + a + ")"
 	}
 	if (m.Selector >= 0 || m.VIndex >= 0) && !m.Mods.Has(ast.ModPrivate) {
-		return e.virtCallTemp(v.Recv, m, v.Args)
+		return e.virtCallTemp(v.Recv, m, v.Args, v)
 	}
 	return name + "(" + a + ")"
 }
@@ -1349,11 +1349,11 @@ func (e *Emitter) callExpr(v *ast.Call) string {
 // lookup and passed as the first argument, so it is evaluated once into a
 // temporary that every use shares; otherwise a receiver such as make() would
 // run again for each use.
-func (e *Emitter) virtCallTemp(recv ast.Expr, m *ast.Method, args []ast.Expr) string {
+func (e *Emitter) virtCallTemp(recv ast.Expr, m *ast.Method, args []ast.Expr, call *ast.Call) string {
 	rt := cname(m.Owner) + "*"
 	n := e.tmpName()
 	return "({ " + rt + " " + n + " = (" + rt + ")" + e.expr(recv) + "; " +
-		e.virtCall(m, rt, n, args) + "; })"
+		e.virtCall(m, rt, n, args, call) + "; })"
 }
 
 // virtCall dispatches through the vtable or, for interface receivers, the itable.
@@ -1363,26 +1363,26 @@ func (e *Emitter) virtCallTemp(recv ast.Expr, m *ast.Method, args []ast.Expr) st
 // a variable or a temporary by the time it gets here (virtCallTemp binds
 // anything else), so the test evaluates nothing twice and costs one branch,
 // which the conditional operator keeps out of the call itself.
-func (e *Emitter) virtCall(m *ast.Method, recvT, recv string, args []ast.Expr) string {
+func (e *Emitter) virtCall(m *ast.Method, recvT, recv string, args []ast.Expr, call *ast.Call) string {
 	if recvT == "" {
 		recvT = "void*"
 	}
-	var call string
+	var body string
 	if m.Selector >= 0 {
 		fn := "((void*)ty_itab((tyobj*)" + recv + ", " + fmt.Sprint(m.Selector) + "))"
-		call = e.indirect(m, fn, "void*", recv, args)
+		body = e.indirect(m, fn, "void*", recv, args, call)
 	} else {
 		fn := "((" + recv + ")->obj.cls->vtable[" + fmt.Sprint(m.VIndex) + "])"
-		call = e.indirect(m, fn, recvT, recv, args)
+		body = e.indirect(m, fn, recvT, recv, args, call)
 	}
 	if ret := e.ctype(m.Result); ret != "void" {
-		return "((" + recv + ") ? (" + call + ") : (" + ret + ")((intptr_t)ty_npe()))"
+		return "((" + recv + ") ? (" + body + ") : (" + ret + ")((intptr_t)ty_npe()))"
 	}
-	return "((" + recv + ") ? (void)(" + call + ") : (void)ty_npe())"
+	return "((" + recv + ") ? (void)(" + body + ") : (void)ty_npe())"
 }
 
 // indirect builds a call through a runtime-resolved function pointer.
-func (e *Emitter) indirect(m *ast.Method, fn, recvT, recv string, args []ast.Expr) string {
+func (e *Emitter) indirect(m *ast.Method, fn, recvT, recv string, args []ast.Expr, call *ast.Call) string {
 	ret := e.ctype(m.Result)
 	var ps []string
 	if !m.IsStatic() {
@@ -1394,7 +1394,11 @@ func (e *Emitter) indirect(m *ast.Method, fn, recvT, recv string, args []ast.Exp
 	if len(ps) == 0 {
 		ps = append(ps, "void")
 	}
-	a := e.args(recv, args, m)
+	// The call is threaded through rather than guessed at: argsFor needs it to
+	// know whether a variable-arity argument list was written as the array
+	// itself or as its elements, and a heuristic cannot tell
+	// `printf("%s", x)` from `printf("%s", new Object[]{x})`.
+	a := e.argsFor(recv, args, m, call)
 	sig := "(( " + ret + "(*)(" + strings.Join(ps, ", ") + "))" + fn + ")"
 	if ret == "void" {
 		if a == "" {
@@ -1629,12 +1633,18 @@ func (e *Emitter) emitLambdaMethod(cl *ast.Class, m *ast.Method) {
 	// (JLS 15.27.2), so the class in scope is the one the body was written in,
 	// not the closure class: a bare field name and an enclosing-class reference
 	// have to resolve the way they do in that class.
-	prevLambda, prevClass := e.curLambda, e.curClass
+	prevLambda, prevClass, prevRet := e.curLambda, e.curClass, e.retType
 	e.curLambda = lam
+	// A return inside a block-bodied lambda returns from the lambda, so the
+	// copy it has to match is the functional method's result -- not whatever
+	// method the lambda happens to be written in. Without this the emitted
+	// `return` coerced to the enclosing method's type and a lambda answering
+	// Object returned a C_teyru_HttpResponse*, which does not compile.
+	e.retType = m.Result
 	if enc := e.enclosureOf(lam); enc != nil {
 		e.curClass = enc
 	}
-	defer func() { e.curLambda, e.curClass = prevLambda, prevClass }()
+	defer func() { e.curLambda, e.curClass, e.retType = prevLambda, prevClass, prevRet }()
 	for v, f := range cl.CapFields {
 		e.locals[v] = "this->cap_" + mangle(f.Name)
 	}

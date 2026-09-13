@@ -1,0 +1,308 @@
+package teyru
+
+// The annotations and the container behind the Spring-compatible framework.
+//
+// Spring resolves beans by reflection at startup. Teyru has no reflection: the
+// set of classes is fixed when the program is compiled, so the compiler knows
+// every annotated class, every field to inject and every dependency edge. It
+// generates one registration per bean into BeanRegistry, and this file is what
+// reads that list back. The result is what Spring does -- singleton beans
+// constructed once, injected by type, lifecycle callbacks in order -- with the
+// wiring resolved before the program runs instead of while it starts.
+//
+// What that buys: a missing bean, a circular dependency or a type that does not
+// match is a compile error rather than a startup stack trace. What it costs:
+// there is no way to add a bean at runtime, which is a thing Spring programs do
+// and Teyru programs cannot.
+
+// ---------------------------------------------------------------- annotations
+
+// @Component marks a class the container owns. @Service, @Repository,
+// @Controller and @RestController are the same thing with a different name,
+// which is how Spring reads them too.
+@interface Component {
+  String value() default ""
+}
+
+@interface Service {
+  String value() default ""
+}
+
+@interface Repository {
+  String value() default ""
+}
+
+@interface Controller {
+  String value() default ""
+}
+
+@interface RestController {
+  String value() default ""
+}
+
+// @Configuration marks a class whose @Bean methods define beans rather than a
+// bean itself.
+@interface Configuration {
+  String value() default ""
+}
+
+@interface Bean {
+  String value() default ""
+}
+
+// @Autowired asks for the bean of the field's or parameter's type. `required`
+// is accepted for compatibility; a missing bean is refused at compile time
+// whether or not it is set, because a container with an optional dependency it
+// cannot satisfy is a program that fails later instead of now.
+@interface Autowired {
+  boolean required() default true
+}
+
+// @Qualifier names which bean to inject when several have the type.
+@interface Qualifier {
+  String value()
+}
+
+// @Value takes a property: @Value("${server.port}") or, with a default,
+// @Value("${server.port:8080}").
+@interface Value {
+  String value()
+}
+
+@interface PostConstruct {}
+
+@interface PreDestroy {}
+
+// @Scope("prototype") gives a new instance per request for the bean; the
+// default is "singleton".
+@interface Scope {
+  String value()
+}
+
+// @Primary marks the bean to inject when several share a type and none was
+// named with @Qualifier.
+@interface Primary {}
+
+// ---------------------------------------------------------------- registry
+
+// A bean's factory builds it; the injector fills its @Autowired members and
+// calls @PostConstruct. The compiler generates both for every annotated class.
+interface BeanFactory {
+  Object create(ApplicationContext ctx)
+}
+
+interface BeanInjector {
+  void inject(Object bean, ApplicationContext ctx)
+}
+
+class BeanDefinition {
+  public String name
+  public Class type
+  public BeanFactory factory
+  public BeanInjector injector
+  public boolean singleton = true
+  public boolean primary = false
+  // types is every type name this bean satisfies -- its own class, its
+  // superclasses and their interfaces, written out by the compiler. A
+  // getBean(SomeType.class) matches against it, which is how a lookup by
+  // interface works in a language with no runtime subtyping of classes.
+  public String[] types
+  // instance is the bean once it exists. A singleton is built once; a
+  // prototype is built per lookup and never stored here.
+  public Object instance
+  // creating guards against a cycle: a bean asked for while it is being built
+  // is a dependency loop, and answering with a half-built object would be worse
+  // than refusing.
+  public boolean creating = false
+}
+
+// BeanRegistry is what the compiler's generated class fills in. Its static
+// initializer runs before main's body does (the entry sequence initializes
+// every class the program declares), so a context created anywhere in a program
+// already sees every bean.
+class BeanRegistry {
+  private static List<BeanDefinition> defs = new ArrayList<BeanDefinition>()
+  private static List<Route> routeDefs = new ArrayList<Route>()
+
+  public static void define(String name, Class type, BeanFactory factory, BeanInjector injector, boolean singleton, boolean primary, String[] types) {
+    BeanDefinition d = new BeanDefinition()
+    d.name = name
+    d.type = type
+    d.factory = factory
+    d.injector = injector
+    d.singleton = singleton
+    d.primary = primary
+    d.types = types
+    defs.add(d)
+  }
+
+  public static List<BeanDefinition> definitions() {
+    return defs
+  }
+
+  public static int count() {
+    return defs.size()
+  }
+
+  // route records a controller mapping. The handler the compiler generates
+  // already knows which bean answers, so the name is not needed here.
+  public static void route(String method, String path, Handler handler) {
+    Route r = new Route()
+    r.method = method
+    r.pattern = path
+    r.handler = handler
+    routeDefs.add(r)
+  }
+
+  public static List<Route> routes() {
+    return routeDefs
+  }
+
+  public static int routeCount() {
+    return routeDefs.size()
+  }
+}
+
+// ---------------------------------------------------------------- context
+
+class ApplicationContext {
+  private Map<String, BeanDefinition> byName = new HashMap<String, BeanDefinition>()
+  private Map<String, String> properties = new HashMap<String, String>()
+  private List<String> order = new ArrayList<String>()
+  private boolean refreshed = false
+
+  public ApplicationContext() {
+  }
+
+  public ApplicationContext setProperty(String key, String value) {
+    properties.put(key, value)
+    return this
+  }
+
+  public String getProperty(String key) {
+    String v = properties.get(key)
+    if (v == null) {
+      throw new IllegalStateException("no property " + key)
+    }
+    return v
+  }
+
+  public String getProperty(String key, String fallback) {
+    String v = properties.get(key)
+    return v == null ? fallback : v
+  }
+
+  // refresh builds every singleton, which is where a dependency that cannot be
+  // satisfied is reported -- at startup, in order, not at the first request.
+  public void refresh() {
+    if (refreshed) {
+      return
+    }
+    refreshed = true
+    List<BeanDefinition> defs = BeanRegistry.definitions()
+    for (BeanDefinition d : defs) {
+      BeanDefinition prev = byName.get(d.name)
+      if (prev != null) {
+        throw new IllegalStateException("two beans named " + d.name)
+      }
+      byName.put(d.name, d)
+      order.add(d.name)
+    }
+    for (String n : order) {
+      BeanDefinition d = byName.get(n)
+      if (d.singleton) {
+        resolve(n)
+      }
+    }
+  }
+
+  private Object resolve(String name) {
+    BeanDefinition d = byName.get(name)
+    if (d == null) {
+      throw new IllegalStateException("no bean named " + name)
+    }
+    if (d.instance != null) {
+      return d.instance
+    }
+    if (d.creating) {
+      throw new IllegalStateException("circular dependency involving " + name)
+    }
+    d.creating = true
+    Object o = d.factory.create(this)
+    d.injector.inject(o, this)
+    d.creating = false
+    if (d.singleton) {
+      d.instance = o
+    }
+    return o
+  }
+
+  public Object getBean(Class type) {
+    return getBean(type, "")
+  }
+
+  // getBean answers with the bean of a type, or the one a qualifier names. Two
+  // beans of one type with no qualifier and no @Primary is ambiguous, and
+  // Spring refuses it; so does this, at lookup time, since which beans share a
+  // type is a whole-program fact the compiler could also check.
+  public Object getBean(Class type, String qualifier) {
+    String want = type.getName()
+    BeanDefinition found = null
+    for (String n : order) {
+      BeanDefinition d = byName.get(n)
+      // `==` on strings is reference comparison, as in Java, so the names are
+      // compared with equals: getName() builds a fresh string on each call.
+      if (implementsType(d, want) == false) {
+        continue
+      }
+      if (qualifier.isEmpty() == false) {
+        if (d.name.equals(qualifier)) {
+          return resolve(n)
+        }
+        continue
+      }
+      if (d.primary) {
+        return resolve(n)
+      }
+      if (found != null) {
+        throw new IllegalStateException("two beans of type " + want + ": " + found.name + " and " + d.name)
+      }
+      found = d
+    }
+    if (found == null) {
+      throw new IllegalStateException("no bean of type " + want)
+    }
+    return resolve(found.name)
+  }
+
+  public Object getBean(String name) {
+    return resolve(name)
+  }
+
+  // implementsType reports whether a bean's type or one of its supertypes is
+  // the named type. The list is what the compiler wrote down when it registered
+  // the bean.
+  private boolean implementsType(BeanDefinition d, String want) {
+    if (d.types == null) {
+      return d.type.getName().equals(want)
+    }
+    for (String t : d.types) {
+      if (t.equals(want)) {
+        return true
+      }
+    }
+    return false
+  }
+
+  public boolean containsBean(String name) {
+    return byName.containsKey(name)
+  }
+
+  public List<String> getBeanNames() {
+    return order
+  }
+
+  public int beanCount() {
+    return order.size()
+  }
+}

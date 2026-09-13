@@ -1,0 +1,85 @@
+// Path arithmetic, which is done on the string and never on the filesystem.
+//
+// None of the paths below exist, and none of them are looked up: File is a value
+// that answers questions about the name, so the answers here are the same on a
+// machine with no such directories as on one that has them.
+
+class Main {
+  public static void main(String[] args) {
+    File f = new File("/tmp/teyru/x/y/z.txt")
+    System.out.println("path: " + f.getPath())
+    System.out.println("name: " + f.getName())
+    System.out.println("parent: " + f.getParent())
+    System.out.println("parent name: " + f.getParentFile().getName())
+    System.out.println("absolute: " + f.isAbsolute())
+    System.out.println("toString is path: " + f.toString().equals(f.getPath()))
+
+    // A directory spelled with a trailing separator: every one of these strips
+    // it first, so the answer does not depend on how the caller wrote it.
+    File trailing = new File("/tmp/teyru/x/")
+    System.out.println("trailing name: " + trailing.getName())
+    System.out.println("trailing parent: " + trailing.getParent())
+    System.out.println("root name: " + new File("/").getName())
+    System.out.println("root parent: " + (new File("/").getParent() == null))
+
+    // A relative path, which is the case getParent has to answer null for
+    // rather than "" -- "" is a path the filesystem would read as here.
+    File rel = new File("a/b.txt")
+    System.out.println("rel name: " + rel.getName())
+    System.out.println("rel parent: " + rel.getParent())
+    System.out.println("rel absolute: " + rel.isAbsolute())
+    System.out.println("bare name has no parent: " + (new File("b.txt").getParent() == null))
+
+    // The two-argument constructor joins, unless the child is already absolute.
+    System.out.println("joined: " + new File("/tmp/teyru", "c/d.txt").getPath())
+    System.out.println("joined onto slash: " + new File("/tmp/", "c.txt").getPath())
+    System.out.println("child wins: " + new File("/tmp/teyru", "/etc/hosts").getPath())
+    System.out.println("from file: " + new File(new File("/tmp"), "e.txt").getPath())
+    System.out.println("separator: " + File.separator)
+    System.out.println("join: " + File.join("/tmp/teyru", "y.txt"))
+    System.out.println("join trailing: " + File.join("/tmp/", "y.txt"))
+    System.out.println("is absolute: " + File.isAbsolutePath("/a") + " " + File.isAbsolutePath("a"))
+
+    // Equality is the path string, so two Files built different ways for the
+    // same name are the same key: a program may put one in a map and look it up
+    // with the other.
+    File g = new File("/tmp/teyru/x/y/z.txt")
+    System.out.println("equals: " + f.equals(g))
+    System.out.println("hash equal: " + (f.hashCode() == g.hashCode()))
+    System.out.println("compare: " + f.compareTo(g))
+    System.out.println("not equal to other type: " + f.equals(f.getPath()))
+    System.out.println("orders: " + (new File("a").compareTo(new File("b")) < 0))
+
+    // getAbsolutePath is a string join against the working directory; it does
+    // not resolve dots and does not follow symlinks, which is deliberately not
+    // Java's getCanonicalPath. So the test can only assert what it promises:
+    // the result is absolute, and it ends with what was asked for.
+    String abs = rel.getAbsolutePath()
+    System.out.println("absolute now: " + File.isAbsolutePath(abs))
+    System.out.println("ends with path: " + abs.endsWith("a/b.txt"))
+    System.out.println("already absolute unchanged: " + f.getAbsolutePath().equals(f.getPath()))
+    System.out.println("absolute file: " + f.getAbsoluteFile().isAbsolute())
+
+    // Path, and the factory that builds one. Paths.get with several parts is
+    // the one place a join happens without a File in hand.
+    Path p = Paths.get("/tmp/teyru/x/y/z.txt")
+    System.out.println("path name: " + p.getFileName().toString())
+    System.out.println("path parent: " + p.getParent().toString())
+    System.out.println("path absolute: " + p.isAbsolute())
+    System.out.println("path text: " + p.toString())
+    System.out.println("many parts: " + Paths.get("a", "b", "c").toString())
+    System.out.println("resolve: " + Paths.get("a").resolve("b").toString())
+    System.out.println("resolve path: " + Paths.get("a").resolve(Paths.get("b", "c")).toString())
+    System.out.println("toFile: " + p.toFile().getName())
+    System.out.println("round trip: " + p.toFile().toPath().toString().equals(p.toString()))
+    System.out.println("path equals: " + p.equals(Paths.get("/tmp/teyru/x/y/z.txt")))
+    System.out.println("path hash: " + (p.hashCode() == Paths.get("/tmp/teyru/x/y/z.txt").hashCode()))
+
+    // A relative path made absolute: the working directory is whatever the
+    // runner used, so only the shape is asserted.
+    Path rp = Paths.get("a/b")
+    String rabs = rp.toAbsolutePath().toString()
+    System.out.println("rel path absolute: " + (rabs.charAt(0) == 47 && rabs.endsWith("a/b")))
+    System.out.println("absolute path unchanged: " + p.toAbsolutePath().toString().equals(p.toString()))
+  }
+}

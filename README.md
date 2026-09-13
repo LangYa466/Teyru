@@ -302,19 +302,40 @@ class Main {
 ## 標準程式庫
 
 標準程式庫以 **Teyru 本身**撰寫（`lib/*.teyru`），每次編譯都與使用者程式
-一起被編譯與檢查：
+一起被編譯與檢查。套件名照 Java 的寫法，所以 `import java.util.List` 原樣可用：
 
-`Object`、`String`、`StringBuilder`、`Math`、`System`、`PrintStream`、
-`Iterable`／`Iterator`、`Comparable`、`AutoCloseable`、`Cloneable`、`Enum`、`Record`、
-八種原生包裝類別（`Byte`／`Short`／`Integer`／`Long`／`Float`／`Double`／`Character`／`Boolean`）與它們的父類別 `Number`、
-集合（`List`／`ArrayList`／`Map`／`HashMap`），以及 `Throwable` 家族（`Exception`、
-`RuntimeException`、`NullPointerException`、`ArrayIndexOutOfBoundsException`、
-`ArithmeticException`、`ClassCastException`、`IllegalArgumentException`、
-`IllegalStateException`、`IndexOutOfBoundsException`、`NoSuchElementException`、
-`NegativeArraySizeException`、`AssertionError`、`UnsupportedOperationException`）。
+| 套件 | 內容 |
+|---|---|
+| `java.lang` | `Object`、`Class`、`String`（`format`／`join`／`valueOf`…）、`StringBuilder`、`Math`、`System`、`PrintStream`、八個包裝類別與 `Number`、`Throwable` 家族、`Enum`、`Record` |
+| `java.util` | `List`／`ArrayList`／`LinkedList`、`Set`／`HashSet`／`LinkedHashSet`／`TreeSet`、`Map`／`HashMap`／`LinkedHashMap`／`TreeMap`、`Deque`／`ArrayDeque`、`Arrays`、`Collections`、`Objects`、`Optional`、`StringJoiner` |
+| `java.time` | `LocalDate`／`LocalTime`／`LocalDateTime`／`Instant`／`Duration`／`Period` |
+| `java.io` | `File`、`Path`／`Paths`、`Files` |
+| `java.util.regex` | `Pattern`／`Matcher` |
+| `java.net` | `ServerSocket`、`Socket` 與其輸入輸出串流 |
+| `com.google.gson` | Gson 的樹狀 API，以及由編譯器產生的物件綁定（[docs/json.md](docs/json.md)） |
+| 框架 | Spring 形狀的容器與 web 層（[docs/framework.md](docs/framework.md)） |
 
-`ArrayList` 實作 `Iterable`，所以 `for (String s : names)` 與 Java 寫法一致。
-沒有 `printf`、沒有檔案 I/O——這些仍是刻意的範圍限制。
+集合以 Teyru 撰寫，所以 `for` 迴圈直接支援：
+
+```teyru
+List<String> names = new ArrayList<String>()
+names.add("ada")
+names.add("grace")
+for (String n : names) {
+  System.out.println(n)
+}
+```
+
+模組與相依用 `teyru.mod` 宣告，取得與校驗照 Go 的做法（[docs/modules.md](docs/modules.md)）：
+
+```sh
+teyru mod init example.com/app
+teyru get example.com/greeting@v0.1.0
+teyru build ./...
+```
+
+沒有反射、沒有執行緒、沒有 `Stream`、沒有 `BigDecimal`、沒有時區資料庫——這些缺席都是刻意的，理由記在
+[docs/language.md](docs/language.md) §11 與 §13。
 
 需要自己的原生程式庫時，宣告 `native` 方法並用 C 實作：
 

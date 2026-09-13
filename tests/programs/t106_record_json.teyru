@@ -1,0 +1,44 @@
+// Records and the JSON binding.
+//
+// A record has no no-argument constructor and no mutable fields, so the way the
+// binding reads a class -- build it, then fill the fields -- does not apply.
+// A record is read through its canonical constructor instead, which is the only
+// way to make one, and the components are matched to the JSON members by name.
+//
+// This is the type most worth binding (a record is what a payload wants to be),
+// and the one Gson needed Unsafe for before it learned about records, so the
+// compiler goes out of its way to support it rather than refusing it.
+
+record Point(int x, int y) {
+}
+
+record Tagged(String tag, Point where, boolean active) {
+}
+
+class Main {
+  public static void main(String[] args) {
+    Gson gson = new Gson()
+
+    String json = "{\"x\":3,\"y\":4}"
+    Point p = gson.fromJson(json, Point.class)
+    System.out.println(p.x() + "," + p.y())
+    System.out.println(p.toString())
+    System.out.println(gson.toJson(p))
+
+    // a record nested in a record, and a member the document omits
+    String nested = "{\"tag\":\"a\",\"where\":{\"x\":1,\"y\":2},\"active\":true}"
+    Tagged t = gson.fromJson(nested, Tagged.class)
+    System.out.println(t.tag() + " " + t.where().x() + " " + t.active())
+    System.out.println(gson.toJson(t))
+
+    Tagged partial = gson.fromJson("{\"tag\":\"b\"}", Tagged.class)
+    System.out.println(partial.tag() + " " + partial.where() + " " + partial.active())
+
+    // the same record bound through the runtime table, for an Object reference
+    Object any = t
+    System.out.println(gson.toJson(any))
+
+    // and as a controller's response, which is where a record usually lands
+    System.out.println(JsonBinding.bound() > 0)
+  }
+}

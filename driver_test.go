@@ -88,6 +88,69 @@ func TestPrograms(t *testing.T) {
 	}
 }
 
+// TestPackages compiles every directory under tests/packages and compares the
+// program's output with the directory's `expected` file.
+//
+// These are the multi-file, multi-package cases: each directory is a whole
+// package tree, compiled by naming the directory (which the driver walks) and
+// run as one program. A single-file case belongs in tests/programs instead.
+func TestPackages(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		if _, err2 := exec.LookPath("gcc"); err2 != nil {
+			t.Skip("no C compiler available")
+		}
+	}
+	root := "tests/packages"
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		dir := filepath.Join(root, name)
+		// A directory with an `error` file is a rejection case: it must not
+		// compile, and the named diagnostic must appear. The cross-package
+		// rejections need a real package tree, which a single-file case in
+		// TestDiagnostics cannot write.
+		if code, err := os.ReadFile(filepath.Join(dir, "error")); err == nil {
+			t.Run(name, func(t *testing.T) {
+				res, err := driver.Compile([]string{dir}, driver.Options{
+					Out: filepath.Join(t.TempDir(), name), Opt: "-O0"})
+				if err == nil {
+					t.Fatal("expected a compile failure")
+				}
+				if res == nil || res.Diags == nil || !strings.Contains(res.Diags.String(), strings.TrimSpace(string(code))) {
+					t.Errorf("expected %s in:\n%v\n%v", strings.TrimSpace(string(code)), res.Diags, err)
+				}
+			})
+			continue
+		}
+		want, err := os.ReadFile(filepath.Join(dir, "expected"))
+		if err != nil {
+			t.Fatalf("%s: missing expectation file: %v", name, err)
+		}
+		t.Run(name, func(t *testing.T) {
+			out := filepath.Join(t.TempDir(), name)
+			res, err := driver.Compile([]string{dir}, driver.Options{Out: out, Opt: "-O1"})
+			if err != nil {
+				t.Fatalf("compile failed: %v\n%s", err, res.Diags)
+			}
+			cmd := exec.Command(res.Exe)
+			var outBuf, errBuf strings.Builder
+			cmd.Stdout, cmd.Stderr = &outBuf, &errBuf
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("run failed: %v\nstderr:\n%s", err, errBuf.String())
+			}
+			if got := outBuf.String(); got != string(want) {
+				t.Errorf("output mismatch\n--- want ---\n%s\n--- got ---\n%s", want, got)
+			}
+		})
+	}
+}
+
 // TestDiagnostics checks that ill-typed programs are rejected.
 func TestDiagnostics(t *testing.T) {
 	cases := []struct {
@@ -103,6 +166,9 @@ func TestDiagnostics(t *testing.T) {
 		{"doubleSwitch", "class Main {\n  public static void main(String[] args) {\n    double d = 0.5\n    switch (d) {\n      case 1.5 -> System.out.println(\"x\")\n      default -> System.out.println(\"y\")\n    }\n  }\n}\n", "TY-TYP-0035"},
 		{"notExhaustive", "class Main {\n  public static void main(String[] args) {\n    int n = 7\n    String s = switch (n) {\n      case 1 -> \"one\"\n      case 2 -> \"two\"\n    }\n    System.out.println(s)\n  }\n}\n", "TY-TYP-0096"},
 		{"longSelector", "class Main {\n  public static void main(String[] args) {\n    long v = 1\n    switch (v) {\n      case 1 -> System.out.println(\"one\")\n      default -> System.out.println(\"other\")\n    }\n  }\n}\n", "TY-TYP-0035"},
+		{"missingBean", "import teyru.Service\nimport teyru.Autowired\n\ninterface Repo { String ping() }\n\n@Service\nclass Svc {\n  @Autowired Repo repo\n}\nclass Main {\n  public static void main(String[] args) {\n  }\n}\n", "TY-TYP-0103"},
+		{"circularBeans", "import teyru.Service\nimport teyru.Autowired\n\n@Service\nclass A {\n  @Autowired B b\n}\n@Service\nclass B {\n  @Autowired A a\n}\nclass Main {\n  public static void main(String[] args) {\n  }\n}\n", "TY-TYP-0107"},
+		{"ambiguousBeans", "import teyru.Service\nimport teyru.Component\nimport teyru.Autowired\n\ninterface G { String g() }\n@Component class G1 implements G { public String g() { return \"1\" } }\n@Component class G2 implements G { public String g() { return \"2\" } }\n@Service class S { @Autowired G g }\nclass Main {\n  public static void main(String[] args) {\n  }\n}\n", "TY-TYP-0104"},
 		{"lambdaThisInStatic", "import java.util.function.Supplier\n\nclass Main {\n  int n() { return 3 }\n  public static void main(String[] args) {\n    Supplier<Integer> s = () -> n() + 1\n    System.out.println(s.get())\n  }\n}\n", "TY-TYP-0098"},
 	}
 	for _, tc := range cases {

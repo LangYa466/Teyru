@@ -1,0 +1,42 @@
+package todo
+
+import java.util.ArrayList
+import java.util.List
+
+// A service with state, which is the point of a singleton bean: the count is
+// the same count whichever request asks for it.
+@Service
+class TodoStore {
+  private List<Todo> items = new ArrayList<Todo>()
+  private int nextId = 1
+
+  synchronized Todo add(String text) {
+    Todo t = new Todo(nextId, text, false)
+    nextId++
+    items.add(t)
+    return t
+  }
+
+  List<Todo> all() { return items }
+
+  Todo find(int id) {
+    for (Todo t : items) {
+      if (t.id() == id) {
+        return t
+      }
+    }
+    return null
+  }
+
+  Todo complete(int id) {
+    Todo t = find(id)
+    if (t == null) {
+      return null
+    }
+    Todo done = new Todo(t.id(), t.text(), true)
+    items.set(items.indexOf(t), done)
+    return done
+  }
+
+  int count() { return items.size() }
+}

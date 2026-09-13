@@ -44,21 +44,39 @@ type Checker struct {
 	anonN   map[*ast.Class]int
 	// localN numbers local classes so that two of the same name get distinct
 	// symbol names.
-	localN     int
-	selector   int
-	todo       []func()
-	Props      map[ast.Expr]ast.Expr
-	Direct     map[ast.Expr]bool // varargs calls that pass the array itself
-	program    *Program
-	objType    *ast.ClassType
-	strType    *ast.ClassType
-	arrCls     *ast.Class
-	extensions map[*ast.Class][]*ast.Class
+	localN int
+	// byPkg holds the types of each named package by simple name. A simple
+	// name is only unique within its package (JLS 7.7): `c.global` keeps the
+	// full names plus the default package and the prelude.
+	byPkg map[string]map[string]*ast.Class
+	// ambiguous remembers the on-demand import collisions already reported, so
+	// that a name looked up many times is reported once
+	ambiguous map[string]bool
+	// frameworkDone guards the container pass against running twice
+	frameworkDone bool
+	// fwSpecs is the bean list the container pass found, for resolving an
+	// injection while the registry is being generated.
+	fwSpecs []*beanSpec
+	// fwRoutes is the mappings the controllers declare, registered by the same
+	// generated setup that registers the beans.
+	fwRoutes []routeSpec
+	// jsonAdapters holds the JSON binding generated for each class that a Gson
+	// call binds, keyed by class so it is generated once.
+	jsonAdapters map[*ast.Class]*jsonAdapterPair
+	selector     int
+	todo         []func()
+	Props        map[ast.Expr]ast.Expr
+	Direct       map[ast.Expr]bool // varargs calls that pass the array itself
+	program      *Program
+	objType      *ast.ClassType
+	strType      *ast.ClassType
+	arrCls       *ast.Class
+	extensions   map[*ast.Class][]*ast.Class
 }
 
 // Check analyses the prelude plus user files.
 func Check(files []*ast.File, diags *source.Diagnostics) *Program {
-	c := &Checker{diags: diags, files: files, global: map[string]*ast.Class{}, anonN: map[*ast.Class]int{}, Props: map[ast.Expr]ast.Expr{}, Direct: map[ast.Expr]bool{}}
+	c := &Checker{diags: diags, files: files, global: map[string]*ast.Class{}, byPkg: map[string]map[string]*ast.Class{}, ambiguous: map[string]bool{}, anonN: map[*ast.Class]int{}, Props: map[ast.Expr]ast.Expr{}, Direct: map[ast.Expr]bool{}}
 	defer func() { c.program.c = c }()
 	c.program = &Program{Files: files, StringLits: map[string]int{}}
 	for _, f := range files {
@@ -84,6 +102,9 @@ func Check(files []*ast.File, diags *source.Diagnostics) *Program {
 		c.resolveImports(env0, f)
 	}
 	c.applyLombokToProgram()
+	// the container pass runs after Lombok: a member Lombok generated is then
+	// already there to be injected into, and its annotations are readable
+	c.applyFramework()
 	for _, cl := range append([]*ast.Class(nil), c.classes...) {
 		c.layout(cl)
 	}
@@ -285,15 +306,32 @@ func (c *Checker) declareClass(f *ast.File, cd *ast.ClassDecl, outer *ast.Class)
 		}
 		outer.Nested[cd.Name] = cl
 	} else {
-		if prev := c.global[cd.Name]; prev != nil {
-			if prev.Builtin && !cl.Builtin {
-				// user type shadows prelude type of the same simple name
-			} else {
-				c.errf(cd.Pos, "TY-TYP-0001", "duplicate type %s (also declared at %s)", cd.Name, prev.Decl.Pos)
+		// A simple name belongs to its package, not to the program: two
+		// packages may each declare Widget (JLS 7.7), and only the qualified
+		// name is unique. The default package and the prelude keep their names
+		// global, which is what makes `List` and `String` usable unqualified.
+		if pkg := f.Package; pkg != "" && !cl.Builtin {
+			m := c.byPkg[pkg]
+			if m == nil {
+				m = map[string]*ast.Class{}
+				c.byPkg[pkg] = m
 			}
-		}
-		if prev := c.global[cd.Name]; prev == nil || prev.Builtin {
-			c.global[cd.Name] = cl
+			if prev := m[cd.Name]; prev != nil {
+				c.errf(cd.Pos, "TY-TYP-0001", "duplicate type %s (also declared at %s)", cd.Name, prev.Decl.Pos)
+			} else {
+				m[cd.Name] = cl
+			}
+		} else {
+			if prev := c.global[cd.Name]; prev != nil {
+				if prev.Builtin && !cl.Builtin {
+					// user type shadows prelude type of the same simple name
+				} else {
+					c.errf(cd.Pos, "TY-TYP-0001", "duplicate type %s (also declared at %s)", cd.Name, prev.Decl.Pos)
+				}
+			}
+			if prev := c.global[cd.Name]; prev == nil || prev.Builtin {
+				c.global[cd.Name] = cl
+			}
 		}
 		c.global[full] = cl
 	}
@@ -434,7 +472,101 @@ func (c *Checker) lookupClassName(env *typeEnv, name string) *ast.Class {
 			}
 		}
 	}
+	// A simple name is resolved the way Java resolves one (JLS 6.5.5): the
+	// file's own package first, then its single-type imports, then its
+	// on-demand imports, and only then the program-wide names -- the default
+	// package and the prelude, which are what make `List` usable unqualified.
+	if cl := c.fileClass(env, name); cl != nil {
+		return cl
+	}
 	return c.global[name]
+}
+
+// fileClass resolves a simple name through the compilation unit it is written
+// in: its package and its imports.
+func (c *Checker) fileClass(env *typeEnv, name string) *ast.Class {
+	f := envFile(env)
+	if f == nil {
+		return nil
+	}
+	// an explicit import wins over the file's own package, as in Java
+	for _, imp := range f.Imports {
+		if imp.Star || imp.Static {
+			continue
+		}
+		if i := strings.LastIndexByte(imp.Path, '.'); i >= 0 && imp.Path[i+1:] == name {
+			if cl := c.classByPath(imp.Path); cl != nil {
+				return cl
+			}
+		}
+	}
+	if f.Package != "" {
+		if cl := c.byPkg[f.Package][name]; cl != nil {
+			return cl
+		}
+	}
+	// Two on-demand imports that both provide the name make it ambiguous, and
+	// Java refuses the reference (JLS 6.5.5.1) rather than letting declaration
+	// order pick a type. Silently taking one compiles a program that means
+	// something else than it says.
+	var found *ast.Class
+	var from string
+	for _, imp := range f.Imports {
+		if !imp.Star || imp.Static {
+			continue
+		}
+		m := c.byPkg[imp.Path]
+		if m == nil {
+			continue
+		}
+		cl := m[name]
+		if cl == nil {
+			continue
+		}
+		if found != nil && found != cl {
+			key := f.Src.Path + ":" + name
+			if !c.ambiguous[key] {
+				c.ambiguous[key] = true
+				c.errf(f.Types[0].Pos, "TY-TYP-0099",
+					"reference to %s is ambiguous: it is declared in both %s and %s", name, from, imp.Path)
+			}
+			return cl
+		}
+		found, from = cl, imp.Path
+	}
+	return found
+}
+
+// classByPath resolves an import path such as a.Widget, java.util.List or the
+// prelude's own teyru.Class.
+func (c *Checker) classByPath(path string) *ast.Class {
+	if cl := c.global[path]; cl != nil {
+		return cl
+	}
+	if i := strings.LastIndexByte(path, '.'); i >= 0 {
+		pkg, simple := path[:i], path[i+1:]
+		if cl := c.byPkg[pkg][simple]; cl != nil {
+			return cl
+		}
+		// the prelude is package teyru, and Java's packages are spelled as
+		// java.* by the programs that import them
+		if !strings.HasPrefix(pkg, "teyru") {
+			if cl := c.byPkg["teyru"][simple]; cl != nil {
+				return cl
+			}
+		}
+	}
+	return nil
+}
+
+// envFile is the compilation unit an environment belongs to.
+func envFile(env *typeEnv) *ast.File {
+	for e := env; e != nil; e = e.parent {
+		if e.file != nil {
+			return e.file
+		}
+	}
+	return nil
 }
 
 func (c *Checker) nestedPath(cl *ast.Class, parts []string) *ast.Class {

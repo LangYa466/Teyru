@@ -47,7 +47,7 @@ func (c *Checker) checkBodies(cl *ast.Class) {
 			// its parameters, so its body binds those names directly
 			ctx := c.newCtx(cl, d.Sym)
 			ctx.checkBlock(d.Body, false)
-			if d.Sym.Result != ast.TVoid && !d.Sym.IsCtor && !endsWithReturn(d.Body) {
+			if d.Sym.Result != ast.TVoid && !d.Sym.IsCtor && !exitsAlways(d.Body) {
 				ctx.errf(d.Body.End, "TY-TYP-0020", "missing return statement")
 			}
 		case *ast.FieldDecl:
@@ -92,7 +92,7 @@ func (c *Checker) checkBodies(cl *ast.Class) {
 		m.Checked = true
 		ctx := c.newCtx(cl, m)
 		ctx.checkBlock(m.Body, false)
-		if m.Result != ast.TVoid && !m.IsCtor && !endsWithReturn(m.Body) {
+		if m.Result != ast.TVoid && !m.IsCtor && !exitsAlways(m.Body) {
 			ctx.errf(m.Body.End, "TY-TYP-0020", "missing return statement")
 		}
 	}
@@ -156,6 +156,62 @@ func endsWithReturn(b *ast.Block) bool {
 		return endsWithReturn(s.Body)
 	case *ast.Labeled:
 		return endsWithReturn(fromStmt(s.Body))
+	case *ast.While:
+		// `while (true)` with no break never completes normally (JLS 14.21), so
+		// a method that ends in one needs no return after it -- which is the
+		// shape a parser's main loop has.
+		return constTrue(s.Cond) && !hasBreak(s.Body)
+	case *ast.For:
+		// `for (;;)` is the same statement spelled differently: no condition
+		// means true.
+		return (s.Cond == nil || constTrue(s.Cond)) && !hasBreak(s.Body)
+	case *ast.DoWhile:
+		return constTrue(s.Cond) && !hasBreak(s.Body)
+	}
+	return false
+}
+
+// constTrue reports whether a condition is the constant true, which is what
+// makes a loop's body the whole of its reachable control flow.
+func constTrue(e ast.Expr) bool {
+	lit, ok := e.(*ast.Literal)
+	return ok && lit.Kind == ast.LitBool && lit.Bool
+}
+
+// hasBreak reports whether a statement can leave its loop through a break. A
+// break inside a nested loop or switch belongs to that statement, so the search
+// stops descending there; a labeled break may target a loop further out, and
+// counting it is the conservative answer.
+func hasBreak(s ast.Stmt) bool {
+	switch v := s.(type) {
+	case nil:
+		return false
+	case *ast.Break:
+		return true
+	case *ast.Block:
+		for _, st := range v.Stmts {
+			if hasBreak(st) {
+				return true
+			}
+		}
+	case *ast.If:
+		return hasBreak(v.Then) || hasBreak(v.Else)
+	case *ast.Labeled:
+		return hasBreak(v.Body)
+	case *ast.Sync:
+		return hasBreak(v.Body)
+	case *ast.Try:
+		if hasBreak(v.Body) {
+			return true
+		}
+		for _, cat := range v.Catches {
+			if hasBreak(cat.Body) {
+				return true
+			}
+		}
+		if v.Finally != nil {
+			return hasBreak(v.Finally)
+		}
 	}
 	return false
 }
@@ -194,6 +250,12 @@ func endsWithThrow(b *ast.Block) bool {
 		return endsWithThrow(s.Body)
 	case *ast.Labeled:
 		return endsWithThrow(fromStmt(s.Body))
+	case *ast.While:
+		return constTrue(s.Cond) && !hasBreak(s.Body)
+	case *ast.For:
+		return (s.Cond == nil || constTrue(s.Cond)) && !hasBreak(s.Body)
+	case *ast.DoWhile:
+		return constTrue(s.Cond) && !hasBreak(s.Body)
 	}
 	return false
 }
@@ -630,7 +692,13 @@ func (ctx *methodCtx) checkForEach(v *ast.ForEach) {
 	if v.Var.Type != nil && v.Var.Type.Name == "val" {
 		v.Var.Sym.Final = true
 	}
+	// The body is a loop body: `break` and `continue` belong to this statement
+	// and not to whatever encloses it, so the counter the checker reads when it
+	// sees one has to cover the enhanced form too. Without this every
+	// `continue` in a for-each was reported as being outside a loop.
+	ctx.loops++
 	ctx.checkStmt(v.Body)
+	ctx.loops--
 }
 
 func (ctx *methodCtx) checkReturn(v *ast.Return) {
@@ -1207,7 +1275,33 @@ func (c *Checker) lub(a, b ast.Type) ast.Type {
 		}
 		return cb
 	}
+	// Neither is a supertype of the other, so the answer is their nearest
+	// common supertype -- Base for two subclasses of Base, not Object. Walking
+	// one chain and asking whether the other is a subtype of each step finds
+	// the first shared ancestor, and the walk goes up the superclasses before
+	// the interfaces because a class beats an interface when both fit, which is
+	// what Java picks.
+	for k := ca.Class; k != nil; k = superOf(k) {
+		if k != ca.Class && c.isSubtype(cb, &ast.ClassType{Class: k}) {
+			return &ast.ClassType{Class: k}
+		}
+	}
+	for k := ca.Class; k != nil; k = superOf(k) {
+		for _, i := range k.Ifaces {
+			if i.Class != nil && c.isSubtype(cb, &ast.ClassType{Class: i.Class}) {
+				return &ast.ClassType{Class: i.Class}
+			}
+		}
+	}
 	return c.objType
+}
+
+// superOf is the superclass of a class, or nil at the root of the hierarchy.
+func superOf(cl *ast.Class) *ast.Class {
+	if cl.Super == nil {
+		return nil
+	}
+	return cl.Super.Class
 }
 
 func (ctx *methodCtx) lookupOuter(name string) *ast.Class {
@@ -1381,9 +1475,15 @@ func (ctx *methodCtx) convertWith(e ast.Expr, target, src ast.Type) ast.Expr {
 	if _, ok := src.(ast.NullType); ok && ast.IsRef(target) {
 		return e
 	}
-	if isPrimType(src) && ast.IsRef(target) {
-		// boxing
+	if sp, isPrim := src.(*ast.PrimType); isPrim && ast.IsRef(target) {
+		// boxing, and boxing followed by a widening reference conversion: both
+		// are a Conv node, which code generation lowers to the box call plus a
+		// cast to the target
 		if _, ok := c.unboxed(target); ok {
+			return &ast.Conv{ExprBase: ast.ExprBase{Pos: e.GetPos(), T: target}, X: e}
+		}
+		if box := c.b.Boxes[sp.Kind]; box != nil &&
+			c.isSubtype(&ast.ClassType{Class: box}, target) {
 			return &ast.Conv{ExprBase: ast.ExprBase{Pos: e.GetPos(), T: target}, X: e}
 		}
 	}
@@ -1435,11 +1535,16 @@ func (ctx *methodCtx) convertTo(e ast.Expr, target ast.Type) {
 		ctx.errf(e.GetPos(), "TY-TYP-0051", "incompatible types: %s cannot be converted to %s", src, target)
 		return
 	}
-	if isPrimType(src) && ast.IsRef(target) {
+	if sp, ok := src.(*ast.PrimType); ok && ast.IsRef(target) {
 		if _, ok := c.unboxed(target); ok {
 			return
 		}
-		if ct, ok := target.(*ast.ClassType); ok && ct.Class.Special == "Object" {
+		// boxing followed by a widening reference conversion (JLS 5.3): an int
+		// fits a Number parameter, because it boxes to Integer and Integer is a
+		// Number. The Object case is the same rule with Object at the top, and
+		// is covered by the subtype test.
+		if box := c.b.Boxes[sp.Kind]; box != nil &&
+			c.isSubtype(&ast.ClassType{Class: box}, target) {
 			return
 		}
 		ctx.errf(e.GetPos(), "TY-TYP-0051", "incompatible types: %s cannot be converted to %s", src, target)
@@ -1939,12 +2044,6 @@ func (ctx *methodCtx) checkCond2(v *ast.Cond, want ast.Type) {
 		v.SetType(xt)
 		return
 	}
-	ctx.convertTo(v.X, yt)
-	ctx.convertTo(v.Y, xt)
-	if isPrimType(xt) && isPrimType(yt) {
-		v.SetType(ctx.c.lub(xt, yt))
-		return
-	}
 	if isNullType(xt) {
 		v.SetType(yt)
 		return
@@ -1953,7 +2052,16 @@ func (ctx *methodCtx) checkCond2(v *ast.Cond, want ast.Type) {
 		v.SetType(xt)
 		return
 	}
-	v.SetType(ctx.c.lub(xt, yt))
+	// Both branches are converted to the result type, which is their common
+	// supertype -- not to each other. Converting each to the other's type makes
+	// one of the two directions a downcast, and a conditional whose branches are
+	// two subclasses of one class (`f ? null : element`, or `f ? a : new B()`)
+	// would be reported as an error for a branch that is perfectly assignable to
+	// the result.
+	t := ctx.c.lub(xt, yt)
+	ctx.convertTo(v.X, t)
+	ctx.convertTo(v.Y, t)
+	v.SetType(t)
 }
 
 func (ctx *methodCtx) checkNewArray(v *ast.NewArray) {
@@ -2534,8 +2642,11 @@ func (c *Checker) assignableTo(t, target ast.Type) bool {
 		if _, ok2 := c.unboxed(target); ok2 {
 			return true
 		}
-		if ct, ok2 := target.(*ast.ClassType); ok2 {
-			return ct.Class.Special == "Object"
+		// Boxing followed by a widening reference conversion (JLS 5.3): an int
+		// fits a Number parameter, because it boxes to Integer and Integer is a
+		// Number. The Object case is the same rule with Object at the top.
+		if box := c.b.Boxes[p.Kind]; box != nil {
+			return c.isSubtype(&ast.ClassType{Class: box}, target)
 		}
 		return false
 	}
@@ -2653,7 +2764,14 @@ func (ctx *methodCtx) convCost(src, target ast.Type) (int, bool) {
 		if _, ok2 := c.unboxed(target); ok2 {
 			return 2, true
 		}
-		if ct, ok2 := target.(*ast.ClassType); ok2 && ct.Class.Special == "Object" {
+		// Boxing followed by a widening reference conversion (JLS 5.3): an int
+		// argument fits a Number parameter, because it boxes to Integer and
+		// Integer is a Number. Without this step `new Box(1)` could not find
+		// `Box(Number)` -- and an overload set with both `Box(Character)` and
+		// `Box(Number)` could only ever match the box class itself, so calls
+		// fell to whichever overload happened to be declared first.
+		if box := c.b.Boxes[sp.Kind]; box != nil &&
+			c.isSubtype(&ast.ClassType{Class: box}, target) {
 			return 3, true
 		}
 		return 0, false
@@ -2751,6 +2869,12 @@ func (ctx *methodCtx) checkCall(v *ast.Call, want ast.Type) {
 	if v.Recv != nil {
 		ctx.checkExpr(v.Recv, nil)
 		rt = v.Recv.GetType()
+		// A Gson binding call carries its own type in a class literal, so the
+		// compiler can resolve it here and rewrite the call before it is
+		// resolved as an ordinary method call.
+		if ctx.tryJsonCall(v, rt, want) {
+			return
+		}
 	}
 	for _, a := range v.Args {
 		if a.GetType() == nil && !isLambdaLike(a) {
@@ -3519,7 +3643,7 @@ func (ctx *methodCtx) checkLambda(lam *ast.Lambda, want ast.Type) {
 		}
 	case *ast.Block:
 		lctx.checkBlock(b, false)
-		if m.Result != ast.TVoid && !endsWithReturn(b) {
+		if m.Result != ast.TVoid && !exitsAlways(b) {
 			lctx.errf(b.End, "TY-TYP-0020", "missing return statement")
 		}
 	}

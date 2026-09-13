@@ -1,0 +1,2144 @@
+package teyru
+
+/* The map views and the two maps that build on HashMap and Map: LinkedHashMap
+ * and TreeMap.
+ *
+ * A view is a live window on its map: MapKeySet, MapValues and HashMapEntrySet
+ * hold the map and its entry set, and every method goes through the map's own
+ * iteration order. That is what makes LinkedHashMap's views iterate in
+ * insertion order without a view per map type -- the views ask the map for an
+ * iterator, and the map decides the order.
+ */
+
+/* The keys of a map, as a Set. Removal goes through the map, so a key removed
+   through the view is gone from the map; adding is not possible, as in Java. */
+class MapKeySet<K, V> implements Set<K>, Collection<K> {
+  private Map<K, V> map
+  private Set<Map.Entry<K, V>> entries
+
+  public MapKeySet(Map<K, V> m, Set<Map.Entry<K, V>> e) {
+    map = m
+    entries = e
+  }
+
+  public int size() {
+    return map.size()
+  }
+
+  public boolean isEmpty() {
+    return map.isEmpty()
+  }
+
+  public boolean contains(Object o) {
+    return map.containsKey(o)
+  }
+
+  public Iterator<K> iterator() {
+    return new MapKeyIterator<K, V>(entries.iterator())
+  }
+
+  public Object[] toArray() {
+    Object[] out = new Object[map.size()]
+    int i = 0
+    for (K k : this) {
+      out[i] = k
+      i++
+    }
+    return out
+  }
+
+  public boolean containsAll(Collection<?> c) {
+    for (Object o : c) {
+      if (!contains(o)) {
+        return false
+      }
+    }
+    return true
+  }
+
+  /* A key whose value is null still exists, so remove() has to ask containsKey
+     as well: `map.remove(o) == null` would call it absent. Java's KeySet does
+     the same check. */
+  public boolean remove(Object o) {
+    if (!map.containsKey(o)) {
+      return false
+    }
+    map.remove(o)
+    return true
+  }
+
+  public boolean removeAll(Collection<?> c) {
+    boolean changed = false
+    for (K k : this) {
+      if (c.contains(k)) {
+        changed = true
+      }
+    }
+    if (!changed) {
+      return false
+    }
+    for (Object o : c) {
+      map.remove(o)
+    }
+    return true
+  }
+
+  public boolean retainAll(Collection<?> c) {
+    List<K> victims = new ArrayList<K>()
+    for (K k : this) {
+      if (!c.contains(k)) {
+        victims.add(k)
+      }
+    }
+    if (victims.isEmpty()) {
+      return false
+    }
+    for (K k : victims) {
+      map.remove(k)
+    }
+    return true
+  }
+
+  public void clear() {
+    map.clear()
+  }
+
+  public boolean add(K e) {
+    throw new UnsupportedOperationException("add")
+  }
+
+  public boolean addAll(Collection<? extends K> c) {
+    throw new UnsupportedOperationException("addAll")
+  }
+
+  public boolean equals(Object o) {
+    return CollectionSupport.setEquals(this, o)
+  }
+
+  public int hashCode() {
+    return CollectionSupport.setHash(this)
+  }
+
+  public String toString() {
+    return CollectionSupport.toString(this)
+  }
+}
+
+class MapKeyIterator<K, V> implements Iterator<K> {
+  private Iterator<Map.Entry<K, V>> entries
+
+  public MapKeyIterator(Iterator<Map.Entry<K, V>> it) {
+    entries = it
+  }
+
+  public boolean hasNext() {
+    return entries.hasNext()
+  }
+
+  public K next() {
+    return entries.next().getKey()
+  }
+}
+
+/* The values of a map, as a List -- Java returns Collection<V> here and this
+   library narrows it, see the note on Map.values().
+ *
+ * Note the equality: like Java's map values view, this is identity equality,
+ * not the List contract, because the view is a window on a map and two windows
+ * on two different maps are not "equal lists". */
+class MapValues<K, V> implements List<V>, Collection<V> {
+  private Map<K, V> map
+  private Set<Map.Entry<K, V>> entries
+
+  public MapValues(Map<K, V> m, Set<Map.Entry<K, V>> e) {
+    map = m
+    entries = e
+  }
+
+  public int size() {
+    return map.size()
+  }
+
+  public boolean isEmpty() {
+    return map.isEmpty()
+  }
+
+  public boolean contains(Object o) {
+    return map.containsValue(o)
+  }
+
+  public Object[] toArray() {
+    Object[] out = new Object[map.size()]
+    int i = 0
+    for (V v : this) {
+      out[i] = v
+      i++
+    }
+    return out
+  }
+
+  public V get(int index) {
+    if (index < 0 || index >= map.size()) {
+      throw new IndexOutOfBoundsException("index " + index + ", size " + map.size())
+    }
+    int i = 0
+    for (Map.Entry<K, V> e : entries) {
+      if (i == index) {
+        return e.getValue()
+      }
+      i++
+    }
+    throw new IndexOutOfBoundsException("index " + index)
+  }
+
+  public V set(int index, V element) {
+    checkIndex(index)
+    int i = 0
+    for (Map.Entry<K, V> e : entries) {
+      if (i == index) {
+        return e.setValue(element)
+      }
+      i++
+    }
+    return null
+  }
+
+  public int indexOf(Object o) {
+    int i = 0
+    for (V v : this) {
+      if (Objects.equals(o, v)) {
+        return i
+      }
+      i++
+    }
+    return -1
+  }
+
+  public int lastIndexOf(Object o) {
+    int found = -1
+    int i = 0
+    for (V v : this) {
+      if (Objects.equals(o, v)) {
+        found = i
+      }
+      i++
+    }
+    return found
+  }
+
+  public boolean containsAll(Collection<?> c) {
+    for (Object o : c) {
+      if (!contains(o)) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public Iterator<V> iterator() {
+    return new MapValueIterator<K, V>(entries.iterator())
+  }
+
+  public ListIterator<V> listIterator() {
+    return new MapValueListIterator<K, V>(entries.iterator(), 0)
+  }
+
+  public ListIterator<V> listIterator(int index) {
+    checkIndex(index)
+    return new MapValueListIterator<K, V>(entries.iterator(), index)
+  }
+
+  public List<V> subList(int from, int to) {
+    if (from < 0 || to > size() || from > to) {
+      throw new IndexOutOfBoundsException("from " + from + ", to " + to + ", size " + size())
+    }
+    return new ListSubList<V>(this, from, to)
+  }
+
+  /* Java's values view is a Collection, so it has no remove(int): the List
+     this library returns needs one, and the only meaning it can have is "drop
+     the entry whose value sits at this index". */
+  public V remove(int index) {
+    checkIndex(index)
+    int i = 0
+    for (Map.Entry<K, V> e : entries) {
+      if (i == index) {
+        V old = e.getValue()
+        map.remove(e.getKey())
+        return old
+      }
+      i++
+    }
+    return null
+  }
+
+  public boolean remove(Object o) {
+    for (Map.Entry<K, V> e : entries) {
+      if (Objects.equals(o, e.getValue())) {
+        map.remove(e.getKey())
+        return true
+      }
+    }
+    return false
+  }
+
+  public boolean retainAll(Collection<?> c) {
+    List<K> victims = new ArrayList<K>()
+    for (Map.Entry<K, V> e : entries) {
+      if (!c.contains(e.getValue())) {
+        victims.add(e.getKey())
+      }
+    }
+    if (victims.isEmpty()) {
+      return false
+    }
+    for (K k : victims) {
+      map.remove(k)
+    }
+    return true
+  }
+
+  public boolean removeAll(Collection<?> c) {
+    boolean changed = false
+    for (V v : this) {
+      if (c.contains(v)) {
+        changed = true
+      }
+    }
+    if (!changed) {
+      return false
+    }
+    for (Object o : c) {
+      remove(o)
+    }
+    return true
+  }
+
+  public void clear() {
+    map.clear()
+  }
+
+  public boolean add(V e) {
+    throw new UnsupportedOperationException("add")
+  }
+
+  public void add(int index, V element) {
+    throw new UnsupportedOperationException("add")
+  }
+
+  public boolean addAll(Collection<? extends V> c) {
+    throw new UnsupportedOperationException("addAll")
+  }
+
+  public boolean addAll(int index, Collection<? extends V> c) {
+    throw new UnsupportedOperationException("addAll")
+  }
+
+  // identity, as explained above: the list contract is deliberately not taken
+  public String toString() {
+    return CollectionSupport.toString(this)
+  }
+
+  private void checkIndex(int index) {
+    if (index < 0 || index >= map.size()) {
+      throw new IndexOutOfBoundsException("index " + index + ", size " + map.size())
+    }
+  }
+}
+
+class MapValueIterator<K, V> implements Iterator<V> {
+  private Iterator<Map.Entry<K, V>> entries
+
+  public MapValueIterator(Iterator<Map.Entry<K, V>> it) {
+    entries = it
+  }
+
+  public boolean hasNext() {
+    return entries.hasNext()
+  }
+
+  public V next() {
+    return entries.next().getValue()
+  }
+}
+
+/* A list iterator over a map's values. Setting an element writes through to
+   the entry, which is why the entry has to be kept: the cursor is an index,
+   but the write is a setValue. */
+class MapValueListIterator<K, V> implements ListIterator<V>, Iterator<V> {
+  private Iterator<Map.Entry<K, V>> entries
+  private int index
+  private Map.Entry<K, V> lastRet
+
+  public MapValueListIterator(Iterator<Map.Entry<K, V>> it, int start) {
+    entries = it
+    for (int i = 0 : i < start : i++) {
+      if (entries.hasNext()) {
+        entries.next()
+      }
+    }
+    index = start
+  }
+
+  public boolean hasNext() {
+    return entries.hasNext()
+  }
+
+  public V next() {
+    lastRet = entries.next()
+    index++
+    return lastRet.getValue()
+  }
+
+  public boolean hasPrevious() {
+    throw new UnsupportedOperationException("hasPrevious")
+  }
+
+  public V previous() {
+    throw new UnsupportedOperationException("previous")
+  }
+
+  public int nextIndex() {
+    return index
+  }
+
+  public int previousIndex() {
+    return index - 1
+  }
+
+  public void remove() {
+    throw new UnsupportedOperationException("remove")
+  }
+
+  public void set(V e) {
+    if (lastRet == null) {
+      throw new IllegalStateException("set() before next()")
+    }
+    lastRet.setValue(e)
+  }
+
+  public void add(V e) {
+    throw new UnsupportedOperationException("add")
+  }
+}
+
+/* A map's entry set. contains() asks whether the map maps that key to that
+   value, which is the Map.Entry equality the JDK's EntrySet uses. */
+class HashMapEntrySet<K, V> implements Set<Map.Entry<K, V>>, Collection<Map.Entry<K, V>> {
+  private HashMap<K, V> map
+
+  public HashMapEntrySet(HashMap<K, V> m) {
+    map = m
+  }
+
+  public int size() {
+    return map.size()
+  }
+
+  public boolean isEmpty() {
+    return map.isEmpty()
+  }
+
+  public boolean contains(Object o) {
+    if (!(o instanceof Map.Entry)) {
+      return false
+    }
+    Map.Entry<K, V> e = (Map.Entry<K, V>) o
+    HashEntry<K, V> found = map.findEntry(e.getKey())
+    return found != null && Objects.equals(found.value, e.getValue())
+  }
+
+  public Iterator<Map.Entry<K, V>> iterator() {
+    return map.entryIterator()
+  }
+
+  public Object[] toArray() {
+    Object[] out = new Object[map.size()]
+    int i = 0
+    for (Map.Entry<K, V> e : this) {
+      out[i] = e
+      i++
+    }
+    return out
+  }
+
+  public boolean containsAll(Collection<?> c) {
+    for (Object o : c) {
+      if (!contains(o)) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public boolean remove(Object o) {
+    if (!(o instanceof Map.Entry)) {
+      return false
+    }
+    Map.Entry<K, V> e = (Map.Entry<K, V>) o
+    HashEntry<K, V> found = map.findEntry(e.getKey())
+    if (found == null || !Objects.equals(found.value, e.getValue())) {
+      return false
+    }
+    map.removeEntry(found)
+    return true
+  }
+
+  public boolean removeAll(Collection<?> c) {
+    boolean changed = false
+    for (Object o : c) {
+      if (remove(o)) {
+        changed = true
+      }
+    }
+    return changed
+  }
+
+  public boolean retainAll(Collection<?> c) {
+    List<Map.Entry<K, V>> victims = new ArrayList<Map.Entry<K, V>>()
+    for (Map.Entry<K, V> e : this) {
+      if (!c.contains(e)) {
+        victims.add(e)
+      }
+    }
+    if (victims.isEmpty()) {
+      return false
+    }
+    for (Map.Entry<K, V> e : victims) {
+      map.remove(e.getKey())
+    }
+    return true
+  }
+
+  public void clear() {
+    map.clear()
+  }
+
+  public boolean add(Map.Entry<K, V> e) {
+    throw new UnsupportedOperationException("add")
+  }
+
+  public boolean addAll(Collection<? extends Map.Entry<K, V>> c) {
+    throw new UnsupportedOperationException("addAll")
+  }
+
+  public boolean equals(Object o) {
+    return CollectionSupport.setEquals(this, o)
+  }
+
+  public int hashCode() {
+    return CollectionSupport.setHash(this)
+  }
+
+  public String toString() {
+    return CollectionSupport.toString(this)
+  }
+}
+
+// ------------------------------------------------------------ LinkedHashMap
+
+/* A HashMap whose iteration order is insertion order -- or access order, when
+   the three-argument constructor asks for it. Nothing about the hashing
+   changes; what changes is which iterator entrySet() hands out, plus the two
+   hooks the base class calls: one to move an accessed node to the tail, one to
+   drop the eldest entry when a subclass says to.
+ *
+ * removeEldestEntry is the JDK's hook for a fixed-size cache, and it is here
+ * for the same reason: it is the only way to write one. */
+class LinkedHashMap<K, V> extends HashMap<K, V> implements Map<K, V> {
+  private final boolean accessOrder
+
+  public LinkedHashMap() {
+    accessOrder = false
+  }
+
+  public LinkedHashMap(int initialCapacity) {
+    super(initialCapacity)
+    accessOrder = false
+  }
+
+  public LinkedHashMap(int initialCapacity, float loadFactor) {
+    super(initialCapacity, loadFactor)
+    accessOrder = false
+  }
+
+  public LinkedHashMap(int initialCapacity, float loadFactor, boolean order) {
+    super(initialCapacity, loadFactor)
+    accessOrder = order
+  }
+
+  public LinkedHashMap(Map<? extends K, ? extends V> m) {
+    super(m)
+    accessOrder = false
+  }
+
+  // the one behavioural difference a caller can see: walk the links instead of
+  // the bins, which is what every view goes through
+  protected ListIterator<Map.Entry<K, V>> entryIterator() {
+    return new LinkedHashMapIterator<K, V>(this)
+  }
+
+  protected void afterNodeAccess(HashEntry<K, V> e) {
+    if (accessOrder && e != tail) {
+      unlinkNode(e)
+      linkNode(e)
+    }
+  }
+
+  protected void afterNodeInsertion(boolean evict) {
+    if (evict && removeEldestEntry(eldestEntry())) {
+      removeFirstEntry()
+    }
+  }
+
+  protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
+    return false
+  }
+}
+
+class LinkedHashMapIterator<K, V> implements ListIterator<Map.Entry<K, V>>, Iterator<Map.Entry<K, V>> {
+  private LinkedHashMap<K, V> map
+  private HashEntry<K, V> next
+  private HashEntry<K, V> lastRet
+
+  public LinkedHashMapIterator(LinkedHashMap<K, V> m) {
+    map = m
+    next = m.firstEntry()
+  }
+
+  public boolean hasNext() {
+    return next != null
+  }
+
+  public Map.Entry<K, V> next() {
+    if (next == null) {
+      throw new NoSuchElementException("no more elements")
+    }
+    HashEntry<K, V> e = next
+    // read the link out before returning: a remove() during the walk clears
+    // the removed node's links, and the walk must not need them again
+    next = e.after
+    lastRet = e
+    return e
+  }
+
+  public void remove() {
+    if (lastRet == null) {
+      throw new IllegalStateException("remove() before next()")
+    }
+    map.removeEntry(lastRet)
+    lastRet = null
+  }
+
+  public boolean hasPrevious() {
+    throw new UnsupportedOperationException("hasPrevious")
+  }
+
+  public Map.Entry<K, V> previous() {
+    throw new UnsupportedOperationException("previous")
+  }
+
+  public int nextIndex() {
+    throw new UnsupportedOperationException("nextIndex")
+  }
+
+  public int previousIndex() {
+    throw new UnsupportedOperationException("previousIndex")
+  }
+
+  public void set(Map.Entry<K, V> e) {
+    throw new UnsupportedOperationException("set")
+  }
+
+  public void add(Map.Entry<K, V> e) {
+    throw new UnsupportedOperationException("add")
+  }
+}
+
+// ------------------------------------------------------------------ TreeMap
+
+/* One node of the red-black tree, and a Map.Entry.
+ *
+ * A null node counts as black: that is how the JDK writes colorOf(), and it
+ * keeps every balancing case from having to ask whether the child exists. */
+class TreeMapEntry<K, V> implements Map.Entry<K, V> {
+  K key
+  V value
+  TreeMapEntry<K, V> left
+  TreeMapEntry<K, V> right
+  TreeMapEntry<K, V> parent
+  boolean red = true
+
+  TreeMapEntry(K key, V value, TreeMapEntry<K, V> parent) {
+    this.key = key
+    this.value = value
+    this.parent = parent
+  }
+
+  public K getKey() {
+    return key
+  }
+
+  public V getValue() {
+    return value
+  }
+
+  public V setValue(V v) {
+    V old = value
+    value = v
+    return old
+  }
+
+  public boolean equals(Object o) {
+    if (o == this) {
+      return true
+    }
+    if (!(o instanceof Map.Entry)) {
+      return false
+    }
+    Map.Entry<K, V> e = (Map.Entry<K, V>) o
+    return Objects.equals(key, e.getKey()) && Objects.equals(value, e.getValue())
+  }
+
+  public int hashCode() {
+    return Objects.hashCode(key) ^ Objects.hashCode(value)
+  }
+
+  public String toString() {
+    return String.valueOf((Object) key) + "=" + String.valueOf((Object) value)
+  }
+}
+
+/* A detached entry, returned by a view's pollFirstEntry/pollLastEntry: the
+   node it was built from goes back into the tree's free space, and Java hands
+   back an immutable copy for the same reason. */
+class SnapshotEntry<K, V> implements Map.Entry<K, V> {
+  private K key
+  private V value
+
+  public SnapshotEntry(K key, V value) {
+    this.key = key
+    this.value = value
+  }
+
+  public K getKey() {
+    return key
+  }
+
+  public V getValue() {
+    return value
+  }
+
+  public V setValue(V v) {
+    throw new UnsupportedOperationException("setValue")
+  }
+
+  public boolean equals(Object o) {
+    if (o == this) {
+      return true
+    }
+    if (!(o instanceof Map.Entry)) {
+      return false
+    }
+    Map.Entry<K, V> e = (Map.Entry<K, V>) o
+    return Objects.equals(key, e.getKey()) && Objects.equals(value, e.getValue())
+  }
+
+  public int hashCode() {
+    return Objects.hashCode(key) ^ Objects.hashCode(value)
+  }
+
+  public String toString() {
+    return String.valueOf((Object) key) + "=" + String.valueOf((Object) value)
+  }
+}
+
+/* A red-black tree map: keys in sorted order, either their natural order or a
+   Comparator's.
+ *
+ * The tree is the JDK's: the same rotations, the same insert and delete
+ * fix-ups, the same split between the comparator path and the Comparable path.
+ * That matters beyond performance -- a red-black tree's shape decides which
+ * nodes the rotations touch, and nothing here is observable through the Map
+ * interface except the order, which any balanced tree would get right. What a
+ * caller can see is the contract: sorted iteration, log-time lookup, and the
+ * NavigableMap operations the JDK has.
+ *
+ * The sub-map views (subMap, headMap, tailMap, descendingMap) are TreeMapView
+ * below; navigableKeySet and descendingKeySet are TreeKeySet. */
+class TreeMap<K, V> implements NavigableMap<K, V>, SortedMap<K, V>, Map<K, V> {
+  private final Comparator<K> comparator
+  private TreeMapEntry<K, V> root
+  private int count
+
+  public TreeMap() {
+    comparator = null
+  }
+
+  public TreeMap(Comparator<K> c) {
+    comparator = c
+  }
+
+  public TreeMap(Map<? extends K, ? extends V> m) {
+    comparator = null
+    putAll(m)
+  }
+
+  // ---------------------------------------------------------------- the tree
+
+  int compare(K a, K b) {
+    if (comparator != null) {
+      return comparator.compare(a, b)
+    }
+    // a null key has no natural ordering, so the cast below is where Java's
+    // NullPointerException comes from
+    Comparable<K> x = (Comparable<K>) a
+    return x.compareTo(b)
+  }
+
+  TreeMapEntry<K, V> getNode(K key) {
+    TreeMapEntry<K, V> p = root
+    while (p != null) {
+      int cmp = compare(key, p.key)
+      if (cmp < 0) {
+        p = p.left
+      } else if (cmp > 0) {
+        p = p.right
+      } else {
+        return p
+      }
+    }
+    return null
+  }
+
+  TreeMapEntry<K, V> firstNode() {
+    TreeMapEntry<K, V> p = root
+    if (p == null) {
+      return null
+    }
+    while (p.left != null) {
+      p = p.left
+    }
+    return p
+  }
+
+  TreeMapEntry<K, V> lastNode() {
+    TreeMapEntry<K, V> p = root
+    if (p == null) {
+      return null
+    }
+    while (p.right != null) {
+      p = p.right
+    }
+    return p
+  }
+
+  TreeMapEntry<K, V> successorNode(TreeMapEntry<K, V> t) {
+    if (t == null) {
+      return null
+    }
+    if (t.right != null) {
+      TreeMapEntry<K, V> p = t.right
+      while (p.left != null) {
+        p = p.left
+      }
+      return p
+    }
+    TreeMapEntry<K, V> p = t.parent
+    TreeMapEntry<K, V> ch = t
+    while (p != null && ch == p.right) {
+      ch = p
+      p = p.parent
+    }
+    return p
+  }
+
+  TreeMapEntry<K, V> predecessorNode(TreeMapEntry<K, V> t) {
+    if (t == null) {
+      return null
+    }
+    if (t.left != null) {
+      TreeMapEntry<K, V> p = t.left
+      while (p.right != null) {
+        p = p.right
+      }
+      return p
+    }
+    TreeMapEntry<K, V> p = t.parent
+    TreeMapEntry<K, V> ch = t
+    while (p != null && ch == p.left) {
+      ch = p
+      p = p.parent
+    }
+    return p
+  }
+
+  TreeMapEntry<K, V> ceilingNode(K key) {
+    TreeMapEntry<K, V> p = root
+    while (p != null) {
+      int cmp = compare(key, p.key)
+      if (cmp < 0) {
+        if (p.left != null) {
+          p = p.left
+        } else {
+          return p
+        }
+      } else if (cmp > 0) {
+        if (p.right != null) {
+          p = p.right
+        } else {
+          TreeMapEntry<K, V> parent = p.parent
+          TreeMapEntry<K, V> ch = p
+          while (parent != null && ch == parent.right) {
+            ch = parent
+            parent = parent.parent
+          }
+          return parent
+        }
+      } else {
+        return p
+      }
+    }
+    return null
+  }
+
+  TreeMapEntry<K, V> floorNode(K key) {
+    TreeMapEntry<K, V> p = root
+    while (p != null) {
+      int cmp = compare(key, p.key)
+      if (cmp > 0) {
+        if (p.right != null) {
+          p = p.right
+        } else {
+          return p
+        }
+      } else if (cmp < 0) {
+        if (p.left != null) {
+          p = p.left
+        } else {
+          TreeMapEntry<K, V> parent = p.parent
+          TreeMapEntry<K, V> ch = p
+          while (parent != null && ch == parent.left) {
+            ch = parent
+            parent = parent.parent
+          }
+          return parent
+        }
+      } else {
+        return p
+      }
+    }
+    return null
+  }
+
+  TreeMapEntry<K, V> higherNode(K key) {
+    TreeMapEntry<K, V> p = root
+    while (p != null) {
+      int cmp = compare(key, p.key)
+      if (cmp < 0) {
+        if (p.left != null) {
+          p = p.left
+        } else {
+          return p
+        }
+      } else {
+        if (p.right != null) {
+          p = p.right
+        } else {
+          TreeMapEntry<K, V> parent = p.parent
+          TreeMapEntry<K, V> ch = p
+          while (parent != null && ch == parent.right) {
+            ch = parent
+            parent = parent.parent
+          }
+          return parent
+        }
+      }
+    }
+    return null
+  }
+
+  TreeMapEntry<K, V> lowerNode(K key) {
+    TreeMapEntry<K, V> p = root
+    while (p != null) {
+      int cmp = compare(key, p.key)
+      if (cmp > 0) {
+        if (p.right != null) {
+          p = p.right
+        } else {
+          return p
+        }
+      } else {
+        if (p.left != null) {
+          p = p.left
+        } else {
+          TreeMapEntry<K, V> parent = p.parent
+          TreeMapEntry<K, V> ch = p
+          while (parent != null && ch == parent.left) {
+            ch = parent
+            parent = parent.parent
+          }
+          return parent
+        }
+      }
+    }
+    return null
+  }
+
+  // ------------------------------------------------------------- balancing
+
+  private static <K, V> boolean redOf(TreeMapEntry<K, V> p) {
+    return p != null && p.red
+  }
+
+  private static <K, V> void setRed(TreeMapEntry<K, V> p, boolean v) {
+    if (p != null) {
+      p.red = v
+    }
+  }
+
+  private static <K, V> TreeMapEntry<K, V> parentOf(TreeMapEntry<K, V> p) {
+    return p == null ? null : p.parent
+  }
+
+  private static <K, V> TreeMapEntry<K, V> leftOf(TreeMapEntry<K, V> p) {
+    return p == null ? null : p.left
+  }
+
+  private static <K, V> TreeMapEntry<K, V> rightOf(TreeMapEntry<K, V> p) {
+    return p == null ? null : p.right
+  }
+
+  private void rotateLeft(TreeMapEntry<K, V> p) {
+    if (p == null) {
+      return
+    }
+    TreeMapEntry<K, V> r = p.right
+    p.right = r.left
+    if (r.left != null) {
+      r.left.parent = p
+    }
+    r.parent = p.parent
+    if (p.parent == null) {
+      root = r
+    } else if (p.parent.left == p) {
+      p.parent.left = r
+    } else {
+      p.parent.right = r
+    }
+    r.left = p
+    p.parent = r
+  }
+
+  private void rotateRight(TreeMapEntry<K, V> p) {
+    if (p == null) {
+      return
+    }
+    TreeMapEntry<K, V> l = p.left
+    p.left = l.right
+    if (l.right != null) {
+      l.right.parent = p
+    }
+    l.parent = p.parent
+    if (p.parent == null) {
+      root = l
+    } else if (p.parent.right == p) {
+      p.parent.right = l
+    } else {
+      p.parent.left = l
+    }
+    l.right = p
+    p.parent = l
+  }
+
+  private void fixAfterInsertion(TreeMapEntry<K, V> x) {
+    x.red = true
+    while (x != null && x != root && x.parent.red) {
+      if (parentOf(x) == leftOf(parentOf(parentOf(x)))) {
+        TreeMapEntry<K, V> y = rightOf(parentOf(parentOf(x)))
+        if (redOf(y)) {
+          setRed(parentOf(x), false)
+          setRed(y, false)
+          setRed(parentOf(parentOf(x)), true)
+          x = parentOf(parentOf(x))
+        } else {
+          if (x == rightOf(parentOf(x))) {
+            x = parentOf(x)
+            rotateLeft(x)
+          }
+          setRed(parentOf(x), false)
+          setRed(parentOf(parentOf(x)), true)
+          rotateRight(parentOf(parentOf(x)))
+        }
+      } else {
+        TreeMapEntry<K, V> y = leftOf(parentOf(parentOf(x)))
+        if (redOf(y)) {
+          setRed(parentOf(x), false)
+          setRed(y, false)
+          setRed(parentOf(parentOf(x)), true)
+          x = parentOf(parentOf(x))
+        } else {
+          if (x == leftOf(parentOf(x))) {
+            x = parentOf(x)
+            rotateRight(x)
+          }
+          setRed(parentOf(x), false)
+          setRed(parentOf(parentOf(x)), true)
+          rotateLeft(parentOf(parentOf(x)))
+        }
+      }
+    }
+    root.red = false
+  }
+
+  private void fixAfterDeletion(TreeMapEntry<K, V> x) {
+    while (x != root && !redOf(x)) {
+      if (x == leftOf(parentOf(x))) {
+        TreeMapEntry<K, V> sib = rightOf(parentOf(x))
+        if (redOf(sib)) {
+          setRed(sib, false)
+          setRed(parentOf(x), true)
+          rotateLeft(parentOf(x))
+          sib = rightOf(parentOf(x))
+        }
+        if (!redOf(leftOf(sib)) && !redOf(rightOf(sib))) {
+          setRed(sib, true)
+          x = parentOf(x)
+        } else {
+          if (!redOf(rightOf(sib))) {
+            setRed(leftOf(sib), false)
+            setRed(sib, true)
+            rotateRight(sib)
+            sib = rightOf(parentOf(x))
+          }
+          setRed(sib, redOf(parentOf(x)))
+          setRed(parentOf(x), false)
+          setRed(rightOf(sib), false)
+          rotateLeft(parentOf(x))
+          x = root
+        }
+      } else {
+        TreeMapEntry<K, V> sib = leftOf(parentOf(x))
+        if (redOf(sib)) {
+          setRed(sib, false)
+          setRed(parentOf(x), true)
+          rotateRight(parentOf(x))
+          sib = leftOf(parentOf(x))
+        }
+        if (!redOf(rightOf(sib)) && !redOf(leftOf(sib))) {
+          setRed(sib, true)
+          x = parentOf(x)
+        } else {
+          if (!redOf(leftOf(sib))) {
+            setRed(rightOf(sib), false)
+            setRed(sib, true)
+            rotateLeft(sib)
+            sib = leftOf(parentOf(x))
+          }
+          setRed(sib, redOf(parentOf(x)))
+          setRed(parentOf(x), false)
+          setRed(leftOf(sib), false)
+          rotateRight(parentOf(x))
+          x = root
+        }
+      }
+    }
+    setRed(x, false)
+  }
+
+  /* Removing a node with two children copies its successor's key and value
+     into it and removes the successor instead, which is why the entry handed
+     back by remove() keeps the right key even though the node that leaves the
+     tree is a different one. */
+  void deleteNode(TreeMapEntry<K, V> p) {
+    count--
+    if (p.left != null && p.right != null) {
+      TreeMapEntry<K, V> s = successorNode(p)
+      p.key = s.key
+      p.value = s.value
+      p = s
+    }
+    TreeMapEntry<K, V> replacement = p.left != null ? p.left : p.right
+    if (replacement != null) {
+      replacement.parent = p.parent
+      if (p.parent == null) {
+        root = replacement
+      } else if (p == p.parent.left) {
+        p.parent.left = replacement
+      } else {
+        p.parent.right = replacement
+      }
+      p.left = null
+      p.right = null
+      p.parent = null
+      if (!p.red) {
+        fixAfterDeletion(replacement)
+      }
+    } else if (p.parent == null) {
+      root = null
+    } else {
+      if (!p.red) {
+        fixAfterDeletion(p)
+      }
+      if (p.parent != null) {
+        if (p == p.parent.left) {
+          p.parent.left = null
+        } else if (p == p.parent.right) {
+          p.parent.right = null
+        }
+        p.parent = null
+      }
+    }
+  }
+
+  // ------------------------------------------------------------ the Map API
+
+  public int size() {
+    return count
+  }
+
+  public boolean isEmpty() {
+    return count == 0
+  }
+
+  public boolean containsKey(Object key) {
+    return getNode((K) key) != null
+  }
+
+  public boolean containsValue(Object value) {
+    // Java walks the tree here, and TreeMap has no iteration order other than
+    // the sorted one, so the walk is the same as iterating the entries
+    for (Map.Entry<K, V> e : entrySet()) {
+      if (Objects.equals(value, e.getValue())) {
+        return true
+      }
+    }
+    return false
+  }
+
+  public V get(Object key) {
+    TreeMapEntry<K, V> p = getNode((K) key)
+    return p == null ? null : p.value
+  }
+
+  public V put(K key, V value) {
+    TreeMapEntry<K, V> t = root
+    if (t == null) {
+      root = new TreeMapEntry<K, V>(key, value, null)
+      root.red = false
+      count = 1
+      return null
+    }
+    int cmp = 0
+    TreeMapEntry<K, V> parent = null
+    while (t != null) {
+      parent = t
+      cmp = compare(key, t.key)
+      if (cmp < 0) {
+        t = t.left
+      } else if (cmp > 0) {
+        t = t.right
+      } else {
+        return t.setValue(value)
+      }
+    }
+    TreeMapEntry<K, V> e = new TreeMapEntry<K, V>(key, value, parent)
+    if (cmp < 0) {
+      parent.left = e
+    } else {
+      parent.right = e
+    }
+    fixAfterInsertion(e)
+    count++
+    return null
+  }
+
+  public V remove(Object key) {
+    TreeMapEntry<K, V> p = getNode((K) key)
+    if (p == null) {
+      return null
+    }
+    V old = p.value
+    deleteNode(p)
+    return old
+  }
+
+  public void putAll(Map<? extends K, ? extends V> m) {
+    for (Object k : m.keySet()) {
+      put((K) k, (V) m.get(k))
+    }
+  }
+
+  public void clear() {
+    root = null
+    count = 0
+  }
+
+  public Comparator<K> comparator() {
+    return comparator
+  }
+
+  public K firstKey() {
+    TreeMapEntry<K, V> p = firstNode()
+    if (p == null) {
+      throw new NoSuchElementException("map is empty")
+    }
+    return p.key
+  }
+
+  public K lastKey() {
+    TreeMapEntry<K, V> p = lastNode()
+    if (p == null) {
+      throw new NoSuchElementException("map is empty")
+    }
+    return p.key
+  }
+
+  public Map.Entry<K, V> firstEntry() {
+    return firstNode()
+  }
+
+  public Map.Entry<K, V> lastEntry() {
+    return lastNode()
+  }
+
+  public Map.Entry<K, V> lowerEntry(K key) {
+    return lowerNode(key)
+  }
+
+  public K lowerKey(K key) {
+    TreeMapEntry<K, V> p = lowerNode(key)
+    return p == null ? null : p.key
+  }
+
+  public Map.Entry<K, V> floorEntry(K key) {
+    return floorNode(key)
+  }
+
+  public K floorKey(K key) {
+    TreeMapEntry<K, V> p = floorNode(key)
+    return p == null ? null : p.key
+  }
+
+  public Map.Entry<K, V> ceilingEntry(K key) {
+    return ceilingNode(key)
+  }
+
+  public K ceilingKey(K key) {
+    TreeMapEntry<K, V> p = ceilingNode(key)
+    return p == null ? null : p.key
+  }
+
+  public Map.Entry<K, V> higherEntry(K key) {
+    return higherNode(key)
+  }
+
+  public K higherKey(K key) {
+    TreeMapEntry<K, V> p = higherNode(key)
+    return p == null ? null : p.key
+  }
+
+  public Map.Entry<K, V> pollFirstEntry() {
+    TreeMapEntry<K, V> p = firstNode()
+    if (p == null) {
+      return null
+    }
+    deleteNode(p)
+    return p
+  }
+
+  public Map.Entry<K, V> pollLastEntry() {
+    TreeMapEntry<K, V> p = lastNode()
+    if (p == null) {
+      return null
+    }
+    deleteNode(p)
+    return p
+  }
+
+  // ------------------------------------------------------------------ views
+
+  public Set<K> keySet() {
+    return new TreeKeySet<K, V>(this)
+  }
+
+  public NavigableSet<K> navigableKeySet() {
+    return new TreeKeySet<K, V>(this)
+  }
+
+  public NavigableSet<K> descendingKeySet() {
+    return new TreeKeySet<K, V>(descendingMap())
+  }
+
+  public List<V> values() {
+    return new MapValues<K, V>(this, entrySet())
+  }
+
+  public Set<Map.Entry<K, V>> entrySet() {
+    return new TreeEntrySet<K, V>(this, null)
+  }
+
+  public NavigableMap<K, V> descendingMap() {
+    return new TreeMapView<K, V>(this, false, null, false, false, null, false, true)
+  }
+
+  public NavigableMap<K, V> subMap(K fromKey, boolean fromInclusive, K toKey, boolean toInclusive) {
+    return new TreeMapView<K, V>(this, true, fromKey, fromInclusive, true, toKey, toInclusive, false)
+  }
+
+  public NavigableMap<K, V> headMap(K toKey, boolean inclusive) {
+    return new TreeMapView<K, V>(this, false, null, false, true, toKey, inclusive, false)
+  }
+
+  public NavigableMap<K, V> tailMap(K fromKey, boolean inclusive) {
+    return new TreeMapView<K, V>(this, true, fromKey, inclusive, false, null, false, false)
+  }
+
+  public SortedMap<K, V> subMap(K fromKey, K toKey) {
+    return subMap(fromKey, true, toKey, false)
+  }
+
+  public SortedMap<K, V> headMap(K toKey) {
+    return headMap(toKey, false)
+  }
+
+  public SortedMap<K, V> tailMap(K fromKey) {
+    return tailMap(fromKey, true)
+  }
+
+  public boolean equals(Object o) {
+    return CollectionSupport.mapEquals(this, o)
+  }
+
+  public int hashCode() {
+    return CollectionSupport.mapHash(this)
+  }
+
+  public String toString() {
+    return CollectionSupport.mapToString(this)
+  }
+}
+
+/* A range of a TreeMap, live: subMap, headMap, tailMap and descendingMap all
+   return one of these, and Java's NavigableSubMap is the same idea.
+ *
+ * A key outside the range is invisible to reads (get answers null) and refused
+ * by writes (put throws IllegalArgumentException), which is the JDK's rule for
+ * a sub-map. A second subMap() intersects its range with this one instead of
+ * replacing it, so subMap(1,9).subMap(3,5) is [3,5) and not [1,9). */
+class TreeMapView<K, V> implements NavigableMap<K, V>, SortedMap<K, V>, Map<K, V> {
+  private TreeMap<K, V> map
+  private boolean fromValid
+  private K fromKey
+  private boolean fromInclusive
+  private boolean toValid
+  private K toKey
+  private boolean toInclusive
+  private boolean descending
+
+  public TreeMapView(TreeMap<K, V> m, boolean fv, K fk, boolean fi, boolean tv, K tk, boolean ti, boolean desc) {
+    map = m
+    fromValid = fv
+    fromKey = fk
+    fromInclusive = fi
+    toValid = tv
+    toKey = tk
+    toInclusive = ti
+    descending = desc
+  }
+
+  boolean descends() {
+    return descending
+  }
+
+  boolean tooLow(K key) {
+    if (!fromValid) {
+      return false
+    }
+    int c = map.compare(key, fromKey)
+    return c < 0 || (c == 0 && !fromInclusive)
+  }
+
+  boolean tooHigh(K key) {
+    if (!toValid) {
+      return false
+    }
+    int c = map.compare(key, toKey)
+    return c > 0 || (c == 0 && !toInclusive)
+  }
+
+  boolean inRange(K key) {
+    return !tooLow(key) && !tooHigh(key)
+  }
+
+  TreeMapEntry<K, V> lowestNode() {
+    if (!fromValid) {
+      return map.firstNode()
+    }
+    return fromInclusive ? map.ceilingNode(fromKey) : map.higherNode(fromKey)
+  }
+
+  TreeMapEntry<K, V> highestNode() {
+    if (!toValid) {
+      return map.lastNode()
+    }
+    return toInclusive ? map.floorNode(toKey) : map.lowerNode(toKey)
+  }
+
+  private void checkInRange(K key) {
+    if (!inRange(key)) {
+      throw new IllegalArgumentException("key out of range")
+    }
+  }
+
+  public int size() {
+    int n = 0
+    TreeMapEntry<K, V> e = lowestNode()
+    while (e != null && inRange(e.key)) {
+      n++
+      e = map.successorNode(e)
+    }
+    return n
+  }
+
+  public boolean isEmpty() {
+    TreeMapEntry<K, V> e = lowestNode()
+    return e == null || !inRange(e.key)
+  }
+
+  public boolean containsKey(Object key) {
+    K k = (K) key
+    return inRange(k) && map.containsKey(k)
+  }
+
+  public boolean containsValue(Object value) {
+    for (Map.Entry<K, V> e : entrySet()) {
+      if (Objects.equals(value, e.getValue())) {
+        return true
+      }
+    }
+    return false
+  }
+
+  public V get(Object key) {
+    K k = (K) key
+    return inRange(k) ? map.get(k) : null
+  }
+
+  public V put(K key, V value) {
+    checkInRange(key)
+    return map.put(key, value)
+  }
+
+  public V remove(Object key) {
+    K k = (K) key
+    return inRange(k) ? map.remove(k) : null
+  }
+
+  public void putAll(Map<? extends K, ? extends V> m) {
+    for (Object k : m.keySet()) {
+      put((K) k, (V) m.get(k))
+    }
+  }
+
+  /* Removing while walking would be safe for a linked map but not for a tree:
+     deleting a node with two children moves its successor's key into it, and
+     that successor may be the entry the walk is holding. Collect first, remove
+     after -- the same reason removeIf does it that way in Collection. */
+  public void clear() {
+    List<K> keys = new ArrayList<K>()
+    for (Map.Entry<K, V> e : entrySet()) {
+      keys.add(e.getKey())
+    }
+    for (K k : keys) {
+      map.remove(k)
+    }
+  }
+
+  public Comparator<K> comparator() {
+    return map.comparator()
+  }
+
+  public K firstKey() {
+    TreeMapEntry<K, V> p = lowestNode()
+    if (p == null || !inRange(p.key)) {
+      throw new NoSuchElementException("map is empty")
+    }
+    return p.key
+  }
+
+  public K lastKey() {
+    TreeMapEntry<K, V> p = highestNode()
+    if (p == null || !inRange(p.key)) {
+      throw new NoSuchElementException("map is empty")
+    }
+    return p.key
+  }
+
+  public Map.Entry<K, V> firstEntry() {
+    TreeMapEntry<K, V> p = lowestNode()
+    return (p == null || !inRange(p.key)) ? null : p
+  }
+
+  public Map.Entry<K, V> lastEntry() {
+    TreeMapEntry<K, V> p = highestNode()
+    return (p == null || !inRange(p.key)) ? null : p
+  }
+
+  // the views clamp to the range: asking a sub-map for the ceiling of a key
+  // below it gives the sub-map's first key, not the map's
+  public Map.Entry<K, V> lowerEntry(K key) {
+    TreeMapEntry<K, V> p = tooHigh(key) ? highestNode() : map.lowerNode(key)
+    if (p == null || !inRange(p.key)) {
+      return null
+    }
+    return p
+  }
+
+  public K lowerKey(K key) {
+    Map.Entry<K, V> e = lowerEntry(key)
+    return e == null ? null : e.getKey()
+  }
+
+  public Map.Entry<K, V> floorEntry(K key) {
+    TreeMapEntry<K, V> p = tooHigh(key) ? highestNode() : map.floorNode(key)
+    if (p == null || !inRange(p.key)) {
+      return null
+    }
+    return p
+  }
+
+  public K floorKey(K key) {
+    Map.Entry<K, V> e = floorEntry(key)
+    return e == null ? null : e.getKey()
+  }
+
+  public Map.Entry<K, V> ceilingEntry(K key) {
+    TreeMapEntry<K, V> p = tooLow(key) ? lowestNode() : map.ceilingNode(key)
+    if (p == null || !inRange(p.key)) {
+      return null
+    }
+    return p
+  }
+
+  public K ceilingKey(K key) {
+    Map.Entry<K, V> e = ceilingEntry(key)
+    return e == null ? null : e.getKey()
+  }
+
+  public Map.Entry<K, V> higherEntry(K key) {
+    TreeMapEntry<K, V> p = tooLow(key) ? lowestNode() : map.higherNode(key)
+    if (p == null || !inRange(p.key)) {
+      return null
+    }
+    return p
+  }
+
+  public K higherKey(K key) {
+    Map.Entry<K, V> e = higherEntry(key)
+    return e == null ? null : e.getKey()
+  }
+
+  public Map.Entry<K, V> pollFirstEntry() {
+    TreeMapEntry<K, V> p = lowestNode()
+    if (p == null || !inRange(p.key)) {
+      return null
+    }
+    // a detached copy: the node itself goes back into the tree, and removing
+    // it may move another node's key into its place
+    SnapshotEntry<K, V> out = new SnapshotEntry<K, V>(p.key, p.value)
+    map.deleteNode(p)
+    return out
+  }
+
+  public Map.Entry<K, V> pollLastEntry() {
+    TreeMapEntry<K, V> p = highestNode()
+    if (p == null || !inRange(p.key)) {
+      return null
+    }
+    SnapshotEntry<K, V> out = new SnapshotEntry<K, V>(p.key, p.value)
+    map.deleteNode(p)
+    return out
+  }
+
+  public NavigableMap<K, V> descendingMap() {
+    return new TreeMapView<K, V>(map, fromValid, fromKey, fromInclusive, toValid, toKey, toInclusive, !descending)
+  }
+
+  public NavigableSet<K> navigableKeySet() {
+    return new TreeKeySet<K, V>(this)
+  }
+
+  public NavigableSet<K> descendingKeySet() {
+    return new TreeKeySet<K, V>(descendingMap())
+  }
+
+  public Set<K> keySet() {
+    return new TreeKeySet<K, V>(this)
+  }
+
+  public List<V> values() {
+    return new MapValues<K, V>(this, entrySet())
+  }
+
+  public Set<Map.Entry<K, V>> entrySet() {
+    return new TreeEntrySet<K, V>(map, this)
+  }
+
+  /* A range endpoint may sit exactly on an exclusive bound: Java's inRange
+     for a sub-map asks the closed interval, so subMap(5, true, 9, true) of
+     [1,5) is legal and empty rather than an error. */
+  private void checkEndpoint(K key) {
+    if (fromValid && map.compare(key, fromKey) < 0) {
+      throw new IllegalArgumentException("key out of range")
+    }
+    if (toValid && map.compare(key, toKey) > 0) {
+      throw new IllegalArgumentException("key out of range")
+    }
+  }
+
+  // the higher of the two lower bounds; a key equal to the existing bound
+  // keeps whichever of the two bounds excludes more
+  private K maxLow(K other) {
+    if (!fromValid) {
+      return other
+    }
+    return map.compare(other, fromKey) > 0 ? other : fromKey
+  }
+
+  private boolean lowInclusive(K chosen, K other, boolean otherInclusive) {
+    if (map.compare(chosen, other) == 0 && fromValid && map.compare(chosen, fromKey) == 0) {
+      return otherInclusive && fromInclusive
+    }
+    if (fromValid && map.compare(chosen, fromKey) == 0) {
+      return fromInclusive
+    }
+    return otherInclusive
+  }
+
+  private K minHigh(K other) {
+    if (!toValid) {
+      return other
+    }
+    return map.compare(other, toKey) > 0 ? toKey : other
+  }
+
+  private boolean highInclusive(K chosen, K other, boolean otherInclusive) {
+    if (map.compare(chosen, other) == 0 && toValid && map.compare(chosen, toKey) == 0) {
+      return otherInclusive && toInclusive
+    }
+    if (toValid && map.compare(chosen, toKey) == 0) {
+      return toInclusive
+    }
+    return otherInclusive
+  }
+
+  public NavigableMap<K, V> subMap(K fk, boolean fi, K tk, boolean ti) {
+    checkEndpoint(fk)
+    checkEndpoint(tk)
+    if (map.compare(fk, tk) > 0) {
+      throw new IllegalArgumentException("fromKey > toKey")
+    }
+    K nfk = maxLow(fk)
+    K ntk = minHigh(tk)
+    return new TreeMapView<K, V>(map, true, nfk, lowInclusive(nfk, fk, fi), true, ntk, highInclusive(ntk, tk, ti), descending)
+  }
+
+  public NavigableMap<K, V> headMap(K tk, boolean inclusive) {
+    checkEndpoint(tk)
+    K ntk = minHigh(tk)
+    return new TreeMapView<K, V>(map, fromValid, fromKey, fromInclusive, true, ntk, highInclusive(ntk, tk, inclusive), descending)
+  }
+
+  public NavigableMap<K, V> tailMap(K fk, boolean inclusive) {
+    checkEndpoint(fk)
+    K nfk = maxLow(fk)
+    return new TreeMapView<K, V>(map, true, nfk, lowInclusive(nfk, fk, inclusive), toValid, toKey, toInclusive, descending)
+  }
+
+  public SortedMap<K, V> subMap(K fromKey, K toKey) {
+    return subMap(fromKey, true, toKey, false)
+  }
+
+  public SortedMap<K, V> headMap(K toKey) {
+    return headMap(toKey, false)
+  }
+
+  public SortedMap<K, V> tailMap(K fromKey) {
+    return tailMap(fromKey, true)
+  }
+
+  public boolean equals(Object o) {
+    return CollectionSupport.mapEquals(this, o)
+  }
+
+  public int hashCode() {
+    return CollectionSupport.mapHash(this)
+  }
+
+  public String toString() {
+    return CollectionSupport.mapToString(this)
+  }
+}
+
+/* Walks a TreeMap, or a range of one, in sorted order or in reverse. The range
+   is checked at every step: a successor can leave it. */
+class TreeEntryIterator<K, V> implements Iterator<Map.Entry<K, V>> {
+  private TreeMap<K, V> map
+  private TreeMapView<K, V> view
+  private boolean descending
+  private TreeMapEntry<K, V> next
+
+  public TreeEntryIterator(TreeMap<K, V> m, TreeMapView<K, V> v, boolean desc) {
+    map = m
+    view = v
+    descending = desc
+    next = start()
+  }
+
+  private TreeMapEntry<K, V> start() {
+    if (view == null) {
+      return descending ? map.lastNode() : map.firstNode()
+    }
+    return descending ? view.highestNode() : view.lowestNode()
+  }
+
+  public boolean hasNext() {
+    return next != null
+  }
+
+  public Map.Entry<K, V> next() {
+    if (next == null) {
+      throw new NoSuchElementException("no more elements")
+    }
+    TreeMapEntry<K, V> e = next
+    TreeMapEntry<K, V> n = descending ? map.predecessorNode(e) : map.successorNode(e)
+    if (n != null && view != null && !view.inRange(n.key)) {
+      n = null
+    }
+    next = n
+    return e
+  }
+}
+
+/* A TreeMap's entry set, or the entry set of one of its ranges. The range is
+   the TreeMapView passed in, and a null view means the whole map. */
+class TreeEntrySet<K, V> implements Set<Map.Entry<K, V>>, Collection<Map.Entry<K, V>> {
+  private TreeMap<K, V> map
+  private TreeMapView<K, V> view
+
+  public TreeEntrySet(TreeMap<K, V> m, TreeMapView<K, V> v) {
+    map = m
+    view = v
+  }
+
+  public int size() {
+    return view == null ? map.size() : view.size()
+  }
+
+  public boolean isEmpty() {
+    return view == null ? map.isEmpty() : view.isEmpty()
+  }
+
+  public boolean contains(Object o) {
+    if (!(o instanceof Map.Entry)) {
+      return false
+    }
+    Map.Entry<K, V> e = (Map.Entry<K, V>) o
+    K key = e.getKey()
+    if (view == null ? !map.containsKey(key) : !view.containsKey(key)) {
+      return false
+    }
+    V v = view == null ? map.get(key) : view.get(key)
+    return Objects.equals(v, e.getValue())
+  }
+
+  public Iterator<Map.Entry<K, V>> iterator() {
+    if (view == null) {
+      return new TreeEntryIterator<K, V>(map, null, false)
+    }
+    return new TreeEntryIterator<K, V>(map, view, view.descends())
+  }
+
+  public Object[] toArray() {
+    Object[] out = new Object[size()]
+    int i = 0
+    for (Map.Entry<K, V> e : this) {
+      out[i] = e
+      i++
+    }
+    return out
+  }
+
+  public boolean containsAll(Collection<?> c) {
+    for (Object o : c) {
+      if (!contains(o)) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public boolean remove(Object o) {
+    if (!(o instanceof Map.Entry)) {
+      return false
+    }
+    Map.Entry<K, V> e = (Map.Entry<K, V>) o
+    if (!contains(o)) {
+      return false
+    }
+    if (view == null) {
+      map.remove(e.getKey())
+    } else {
+      view.remove(e.getKey())
+    }
+    return true
+  }
+
+  public boolean removeAll(Collection<?> c) {
+    boolean changed = false
+    for (Object o : c) {
+      if (remove(o)) {
+        changed = true
+      }
+    }
+    return changed
+  }
+
+  public boolean retainAll(Collection<?> c) {
+    List<K> victims = new ArrayList<K>()
+    for (Map.Entry<K, V> e : this) {
+      if (!c.contains(e)) {
+        victims.add(e.getKey())
+      }
+    }
+    if (victims.isEmpty()) {
+      return false
+    }
+    for (K k : victims) {
+      if (view == null) {
+        map.remove(k)
+      } else {
+        view.remove(k)
+      }
+    }
+    return true
+  }
+
+  public void clear() {
+    if (view == null) {
+      map.clear()
+    } else {
+      view.clear()
+    }
+  }
+
+  public boolean add(Map.Entry<K, V> e) {
+    throw new UnsupportedOperationException("add")
+  }
+
+  public boolean addAll(Collection<? extends Map.Entry<K, V>> c) {
+    throw new UnsupportedOperationException("addAll")
+  }
+
+  public boolean equals(Object o) {
+    return CollectionSupport.setEquals(this, o)
+  }
+
+  public int hashCode() {
+    return CollectionSupport.setHash(this)
+  }
+
+  public String toString() {
+    return CollectionSupport.toString(this)
+  }
+}
+
+/* A TreeMap's keys, seen as a NavigableSet -- and the same class answers
+   keySet(), navigableKeySet() and descendingKeySet(), because all three are
+   "the keys of this navigable map, in its order".
+ *
+ * add() throws: adding to a map's key set would need a value to go with the
+ * key. TreeSet is the set that can add, and it holds its own map. */
+class TreeKeySet<K, V> implements NavigableSet<K>, SortedSet<K>, Set<K>, Collection<K> {
+  private static final Object PRESENT = new Object()
+
+  private NavigableMap<K, V> map
+
+  public TreeKeySet(NavigableMap<K, V> m) {
+    map = m
+  }
+
+  // TreeSet's insertion path: the value a set stores for its elements is this
+  // class's single shared marker object
+  boolean insert(K key) {
+    if (map.containsKey(key)) {
+      return false
+    }
+    map.put(key, (V) PRESENT)
+    return true
+  }
+
+  public int size() {
+    return map.size()
+  }
+
+  public boolean isEmpty() {
+    return map.isEmpty()
+  }
+
+  public boolean contains(Object o) {
+    return map.containsKey(o)
+  }
+
+  public Comparator<K> comparator() {
+    return map.comparator()
+  }
+
+  public K first() {
+    return map.firstKey()
+  }
+
+  public K last() {
+    return map.lastKey()
+  }
+
+  public K lower(K e) {
+    return map.lowerKey(e)
+  }
+
+  public K floor(K e) {
+    return map.floorKey(e)
+  }
+
+  public K ceiling(K e) {
+    return map.ceilingKey(e)
+  }
+
+  public K higher(K e) {
+    return map.higherKey(e)
+  }
+
+  public K pollFirst() {
+    Map.Entry<K, V> e = map.pollFirstEntry()
+    return e == null ? null : e.getKey()
+  }
+
+  public K pollLast() {
+    Map.Entry<K, V> e = map.pollLastEntry()
+    return e == null ? null : e.getKey()
+  }
+
+  public Iterator<K> iterator() {
+    return new MapKeyIterator<K, V>(map.entrySet().iterator())
+  }
+
+  public Iterator<K> descendingIterator() {
+    return new MapKeyIterator<K, V>(map.descendingMap().entrySet().iterator())
+  }
+
+  public NavigableSet<K> descendingSet() {
+    return new TreeKeySet<K, V>(map.descendingMap())
+  }
+
+  public SortedSet<K> subSet(K fromElement, K toElement) {
+    return subSet(fromElement, true, toElement, false)
+  }
+
+  public NavigableSet<K> subSet(K fromElement, boolean fromInclusive, K toElement, boolean toInclusive) {
+    return new TreeKeySet<K, V>(map.subMap(fromElement, fromInclusive, toElement, toInclusive))
+  }
+
+  public SortedSet<K> headSet(K toElement) {
+    return headSet(toElement, false)
+  }
+
+  public NavigableSet<K> headSet(K toElement, boolean inclusive) {
+    return new TreeKeySet<K, V>(map.headMap(toElement, inclusive))
+  }
+
+  public SortedSet<K> tailSet(K fromElement) {
+    return tailSet(fromElement, true)
+  }
+
+  public NavigableSet<K> tailSet(K fromElement, boolean inclusive) {
+    return new TreeKeySet<K, V>(map.tailMap(fromElement, inclusive))
+  }
+
+  public Object[] toArray() {
+    Object[] out = new Object[size()]
+    int i = 0
+    for (K k : this) {
+      out[i] = k
+      i++
+    }
+    return out
+  }
+
+  public boolean containsAll(Collection<?> c) {
+    for (Object o : c) {
+      if (!contains(o)) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public boolean remove(Object o) {
+    if (!map.containsKey(o)) {
+      return false
+    }
+    map.remove(o)
+    return true
+  }
+
+  public boolean removeAll(Collection<?> c) {
+    boolean changed = false
+    for (Object o : c) {
+      if (remove(o)) {
+        changed = true
+      }
+    }
+    return changed
+  }
+
+  public boolean retainAll(Collection<?> c) {
+    List<K> victims = new ArrayList<K>()
+    for (K k : this) {
+      if (!c.contains(k)) {
+        victims.add(k)
+      }
+    }
+    if (victims.isEmpty()) {
+      return false
+    }
+    for (K k : victims) {
+      map.remove(k)
+    }
+    return true
+  }
+
+  public void clear() {
+    map.clear()
+  }
+
+  public boolean add(K e) {
+    throw new UnsupportedOperationException("add")
+  }
+
+  public boolean addAll(Collection<? extends K> c) {
+    throw new UnsupportedOperationException("addAll")
+  }
+
+  public boolean equals(Object o) {
+    return CollectionSupport.setEquals(this, o)
+  }
+
+  public int hashCode() {
+    return CollectionSupport.setHash(this)
+  }
+
+  public String toString() {
+    return CollectionSupport.toString(this)
+  }
+}

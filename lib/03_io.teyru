@@ -1,31 +1,96 @@
 package teyru
 
 class Math {
+  public static final double E = 2.718281828459045
   public static final double PI = 3.141592653589793
+
   public static native int abs(int v)
   public static native long abs(long v)
+  public static native float abs(float v)
   public static native double abs(double v)
   public static native int max(int a, int b)
   public static native int min(int a, int b)
   public static native long max(long a, long b)
   public static native long min(long a, long b)
+  public static native float max(float a, float b)
+  public static native float min(float a, float b)
   public static native double max(double a, double b)
   public static native double min(double a, double b)
   public static native double sqrt(double v)
+  public static native double cbrt(double v)
   public static native double pow(double a, double b)
+  public static native double exp(double v)
+  public static native double log(double v)
+  public static native double log10(double v)
+  public static native double sin(double v)
+  public static native double cos(double v)
+  public static native double tan(double v)
+  public static native double asin(double v)
+  public static native double acos(double v)
+  public static native double atan(double v)
+  public static native double atan2(double y, double x)
+  public static native double hypot(double x, double y)
+  public static native double sinh(double v)
+  public static native double cosh(double v)
+  public static native double tanh(double v)
+  public static native double IEEEremainder(double a, double b)
+  /* copySign and nextAfter take a second argument whose value matters but
+     which is not the number being converted -- copySign's sign bit and
+     nextAfter's direction -- so they are the two Math methods that read a
+     double's bits rather than its magnitude. */
+  public static native double copySign(double magnitude, double sign)
+  public static native float copySign(float magnitude, float sign)
+  public static native double nextAfter(double start, double direction)
+  public static native float nextAfter(float start, double direction)
+  public static native double fma(double a, double b, double c)
+  public static native double toRadians(double deg)
+  public static native double toDegrees(double rad)
   public static native double floor(double v)
   public static native double ceil(double v)
+  public static native double rint(double v)
+  public static native double signum(double v)
+  public static native float signum(float v)
+  /* round(double) is a long and round(float) an int, exactly as in Java: the
+     widening is the whole point of the pair, since a float's magnitude is
+     already outside int range long before a double's is. */
   public static native long round(double v)
+  public static native int round(float v)
+  public static native int floorDiv(int a, int b)
+  public static native long floorDiv(long a, long b)
+  public static native int floorMod(int a, int b)
+  public static native long floorMod(long a, long b)
   public static native double random()
 }
 
 class System {
   public static final PrintStream out = new PrintStream(1)
   public static final PrintStream err = new PrintStream(2)
+  public static final InputStream in = new InputStream()
   public static native long currentTimeMillis()
   public static native long nanoTime()
   public static native void exit(int status)
   public static native void arraycopy(Object src, int srcPos, Object dest, int destPos, int length)
+  /* The hash Object.hashCode has for a class that does not override it; it is
+     static here because System needs a hash for an object without dispatching
+     to the object's own overriding hashCode. */
+  public static native int identityHashCode(Object o)
+  public static native String getenv(String name)
+  /* An unknown key is null, as in Java: getProperty("user.dir") answers the
+     directory the process started in, and every java.* key is unknown because
+     there is no JVM behind this one. */
+  public static native String getProperty(String key)
+  public static native void gc()
+  public static String lineSeparator() {
+    return getProperty("line.separator")
+  }
+}
+
+class InputStream extends Object {
+  /* Java's System.in is an InputStream and its one mandatory method is read().
+     readln() is Teyru's own: a line reader is what a program actually wants
+     from the console, and the runtime already has one for java.io.IO. */
+  public native int read()
+  public native String readln()
 }
 
 class PrintStream extends Object {
@@ -43,6 +108,17 @@ class PrintStream extends Object {
 
   public PrintStream(int fd) {
     this.target = fd
+  }
+
+  /* printf is PrintStream's own name for String.format: the formatting is the
+     same, and only the destination differs, which print(String) already
+     decides. Implementing it here rather than in C keeps the stream-aware
+     twins (internal/codegen/native.go) to the print helpers they already
+     cover, so System.out.printf and System.err.printf reach the right
+     descriptor for free. */
+  public PrintStream printf(String fmt, Object... args) {
+    print(String.format(fmt, args))
+    return this
   }
 
   public native void print(String s)

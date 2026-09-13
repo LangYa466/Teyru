@@ -3,7 +3,9 @@
 package driver
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/LangYa466/Teyru/internal/ast"
 	"github.com/LangYa466/Teyru/internal/codegen"
+	"github.com/LangYa466/Teyru/internal/mod"
 	"github.com/LangYa466/Teyru/internal/parser"
 	tyrt "github.com/LangYa466/Teyru/internal/runtime"
 	"github.com/LangYa466/Teyru/internal/sema"
@@ -66,6 +69,14 @@ func Compile(paths []string, opts Options) (*Result, error) {
 	if len(paths) == 0 {
 		paths = []string{"."}
 	}
+	diags := &source.Diagnostics{}
+	// The module a build belongs to is decided before a single file is read:
+	// it says what each package's identity is and which directories belong to
+	// another module, and both of those shape the walk below.
+	graph := openModule(paths, diags)
+	if diags.HasErrors() {
+		return &Result{Diags: diags}, fmt.Errorf("module errors")
+	}
 	files := []string{}
 	for _, p := range paths {
 		st, err := os.Stat(p)
@@ -73,14 +84,36 @@ func Compile(paths []string, opts Options) (*Result, error) {
 			return nil, err
 		}
 		if st.IsDir() {
-			entries, err := os.ReadDir(p)
+			// A directory stands for the package tree rooted at it: every
+			// .teyru file underneath belongs to the build, which is what makes
+			// `teyru build ./...` and a layout of one directory per package
+			// work without listing files by hand. WalkDir is lexical, so the
+			// file order does not depend on the filesystem.
+			err := filepath.WalkDir(p, func(path string, d fs.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				name := d.Name()
+				if d.IsDir() {
+					// hidden directories hold tool state, not sources
+					if path != p && strings.HasPrefix(name, ".") {
+						return fs.SkipDir
+					}
+					// A module inside a module is a different module: its
+					// packages are built when its own root is the subject of
+					// the build, not as part of this one.
+					if graph != nil && path != p && mod.IsModuleDir(path) {
+						return fs.SkipDir
+					}
+					return nil
+				}
+				if strings.HasSuffix(name, ".teyru") {
+					files = append(files, path)
+				}
+				return nil
+			})
 			if err != nil {
 				return nil, err
-			}
-			for _, e := range entries {
-				if !e.IsDir() && strings.HasSuffix(e.Name(), ".teyru") {
-					files = append(files, filepath.Join(p, e.Name()))
-				}
 			}
 			continue
 		}
@@ -90,10 +123,19 @@ func Compile(paths []string, opts Options) (*Result, error) {
 		return nil, fmt.Errorf("no .teyru source files found")
 	}
 
-	diags := &source.Diagnostics{}
 	astFiles := parsePrelude(diags)
+	program := make([]*ast.File, 0, len(files))
 	for _, f := range files {
-		astFiles = append(astFiles, parseFile(f, diags))
+		program = append(program, parseFile(f, diags))
+	}
+	// The program's own files are parsed before the packages it imports,
+	// because an import of a package of this very module is satisfied by files
+	// that are already here, and reading them twice would declare every class
+	// in them twice.
+	if graph != nil {
+		astFiles = append(astFiles, resolveImports(graph, program, diags)...)
+	} else {
+		astFiles = append(astFiles, program...)
 	}
 	if diags.HasErrors() {
 		return &Result{Diags: diags}, fmt.Errorf("parse errors")
@@ -245,7 +287,189 @@ func parseFile(path string, diags *source.Diagnostics) *ast.File {
 }
 
 func parseSource(path, text string, diags *source.Diagnostics) *ast.File {
+	// The parser reads a module path (`example.com/dep/pkg`) as readily as a
+	// dotted one, so the source goes in as it is written on disk and every
+	// position in a diagnostic is the file's own.
 	return parser.Parse(source.NewFile(path, text), diags)
+}
+
+// ------------------------------------------------------------- module mode
+//
+// A build is a module build when there is a teyru.mod above its sources. It
+// then resolves an import path the way Go does -- the module path plus a
+// directory inside it -- and pulls the packages it names out of the module
+// cache. A build with no teyru.mod above it compiles exactly the files it was
+// given, which is what a single file on a command line has always done.
+
+// openModule finds the module a build belongs to. A build outside a module is
+// not an error: the compiler has always been usable on one file with no
+// project around it. A module file that is there and cannot be read is an
+// error, because the build would otherwise silently ignore every import that
+// names a package the cache holds.
+func openModule(paths []string, diags *source.Diagnostics) *mod.Graph {
+	dir := ""
+	for _, p := range paths {
+		st, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if st.IsDir() {
+			dir = p
+		} else {
+			dir = filepath.Dir(p)
+		}
+		break
+	}
+	if dir == "" {
+		dir = "."
+	}
+	g, err := mod.LoadGraph(dir)
+	if err == nil {
+		return g
+	}
+	var noMod *mod.NoModuleError
+	if errors.As(err, &noMod) {
+		return nil
+	}
+	diags.Errorf(source.Pos{}, "TY-IO-0101", "%v", err)
+	return nil
+}
+
+// moduleResolver gives every file of a build the identity its import path
+// says it has, and loads the packages the program imports from the cache.
+type moduleResolver struct {
+	graph *mod.Graph
+	diags *source.Diagnostics
+	// seen holds the files already part of the build, by absolute path. An
+	// import that is satisfied by a file the walk already collected must not
+	// add it a second time: the same class declared twice is a duplicate
+	// definition, and the emitter would write its C twice.
+	seen map[string]bool
+	// dirs remembers which package each directory declares, so that one
+	// directory holding two packages is reported instead of being silently
+	// merged into one.
+	dirs map[string]*dirPkg
+	deps []*ast.File
+}
+
+type dirPkg struct {
+	name string
+	file string
+}
+
+// resolveImports returns the program's files followed by the files of every
+// package they import, all of them positioned in the module they belong to.
+func resolveImports(graph *mod.Graph, program []*ast.File, diags *source.Diagnostics) []*ast.File {
+	r := &moduleResolver{graph: graph, diags: diags, seen: map[string]bool{}, dirs: map[string]*dirPkg{}}
+	for _, f := range program {
+		abs := absPath(f.Src.Path)
+		r.seen[abs] = true
+		r.place(f, abs, "")
+	}
+	// The queue grows while it is walked: a package pulled in for one import
+	// has imports of its own, which may pull in more packages.
+	queue := append([]*ast.File(nil), program...)
+	for i := 0; i < len(queue); i++ {
+		for _, imp := range queue[i].Imports {
+			pkg := r.resolveImport(imp)
+			if pkg == nil {
+				continue
+			}
+			queue = append(queue, r.loadPackage(pkg)...)
+		}
+	}
+	out := append([]*ast.File(nil), program...)
+	return append(out, r.deps...)
+}
+
+// resolveImport turns an import of a module package into the import path the
+// checker resolves names through. Anything that is not a module import -- the
+// prelude's `java.*` spellings, a package of the program compiled without a
+// module -- is left exactly as written.
+func (r *moduleResolver) resolveImport(imp *ast.Import) *mod.Pkg {
+	pkg, isModule, err := r.graph.Resolve(imp.Path)
+	if err != nil {
+		code := "TY-IO-0102"
+		var mismatch *mod.SumMismatchError
+		if errors.As(err, &mismatch) {
+			code = "TY-IO-0103"
+		}
+		r.diags.Errorf(imp.Pos, code, "%v", err)
+		return nil
+	}
+	if !isModule {
+		return nil
+	}
+	// The path is rewritten to the module path with slashes: the package's own
+	// files are named that way below, and the checker splits an import path at
+	// its last dot to find the type in it.
+	imp.Path = pkg.Canonical()
+	if len(pkg.Tail) == 0 && !imp.Static {
+		// `import example.com/dep/pkg` names the package, not one type in it:
+		// that is an on-demand import of every name the package declares.
+		imp.Star = true
+	}
+	return pkg
+}
+
+// loadPackage parses the sources of one package, unless they are already part
+// of the build, and gives them the package's import path as their identity.
+func (r *moduleResolver) loadPackage(pkg *mod.Pkg) []*ast.File {
+	files, err := mod.PackageFiles(pkg.Dir)
+	if err != nil {
+		r.diags.Errorf(source.Pos{}, "TY-IO-0102", "cannot read package %s: %v", pkg.ImportPath, err)
+		return nil
+	}
+	var out []*ast.File
+	for _, path := range files {
+		abs := absPath(path)
+		if r.seen[abs] {
+			continue
+		}
+		r.seen[abs] = true
+		f := parseFile(path, r.diags)
+		r.place(f, abs, pkg.ImportPath)
+		out = append(out, f)
+		r.deps = append(r.deps, f)
+	}
+	return out
+}
+
+// place gives a file the package identity its directory has: the import path
+// of that directory, for a file inside the main module, or the import path of
+// the package it was loaded from. A declared package name is a name, not an
+// identity, and two modules may both declare `package util` -- the identity is
+// what keeps them apart.
+func (r *moduleResolver) place(f *ast.File, abs, importPath string) {
+	if importPath == "" {
+		p, ok := r.graph.MainPackagePath(filepath.Dir(abs))
+		if !ok {
+			// A file from outside the module: it keeps the package it declares,
+			// because there is no import path that could name it.
+			return
+		}
+		importPath = p
+	}
+	if name := f.Package; name != "" {
+		dir := filepath.Dir(abs)
+		if prev := r.dirs[dir]; prev == nil {
+			r.dirs[dir] = &dirPkg{name: name, file: abs}
+		} else if prev.name != name {
+			r.diags.Errorf(source.Pos{}, "TY-IO-0104",
+				"%s declares package %s, but %s in the same directory declares %s", abs, name, prev.file, prev.name)
+		}
+	}
+	f.Package = importPath
+}
+
+// absPath is the key a file is held under: one file is one compilation unit,
+// however it was reached.
+func absPath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return abs
 }
 
 // writeNativeHeader writes the C prototypes a program has to implement, so
@@ -292,9 +516,11 @@ func writeRuntime(dir string) string {
 	must(os.WriteFile(filepath.Join(dir, "tyrt.h"), []byte(tyrt.Header), 0o644))
 	c1 := filepath.Join(dir, "tyrt.c")
 	c2 := filepath.Join(dir, "tyrt2.c")
+	c3 := filepath.Join(dir, "tyrt_net.c")
 	must(os.WriteFile(c1, []byte(tyrt.Core), 0o644))
 	must(os.WriteFile(c2, []byte(tyrt.Extra), 0o644))
-	return c1 + " " + c2
+	must(os.WriteFile(c3, []byte(tyrt.Net), 0o644))
+	return c1 + " " + c2 + " " + c3
 }
 
 func must(err error) {

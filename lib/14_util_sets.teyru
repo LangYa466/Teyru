@@ -1,0 +1,341 @@
+package teyru
+
+/* The sets. Each one is a map with a single shared marker object for its
+ * values, which is how the JDK writes them too: HashSet over HashMap,
+ * LinkedHashSet over LinkedHashMap, TreeSet over TreeMap. The marker is one
+ * object for the whole library, so the values cost nothing but a pointer, and
+ * an element can never be mistaken for a value.
+ */
+
+// ------------------------------------------------------------------ HashSet
+
+class HashSet<T> implements Set<T>, Collection<T> {
+  // no modifier: LinkedHashSet re-points this at its own map
+  Map<T, Object> map
+
+  public HashSet() {
+    map = new HashMap<T, Object>()
+  }
+
+  public HashSet(int initialCapacity) {
+    map = new HashMap<T, Object>(initialCapacity)
+  }
+
+  public HashSet(int initialCapacity, float loadFactor) {
+    map = new HashMap<T, Object>(initialCapacity, loadFactor)
+  }
+
+  public HashSet(Collection<? extends T> c) {
+    map = new HashMap<T, Object>()
+    addAll(c)
+  }
+
+  public int size() {
+    return map.size()
+  }
+
+  public boolean isEmpty() {
+    return map.isEmpty()
+  }
+
+  public boolean contains(Object o) {
+    return map.containsKey(o)
+  }
+
+  public boolean add(T e) {
+    return map.put(e, SetSupport.PRESENT) == null
+  }
+
+  /* The value is always the marker, so remove() returning null would only say
+     that the key was absent -- ask whether it was there first. */
+  public boolean remove(Object o) {
+    if (!map.containsKey(o)) {
+      return false
+    }
+    map.remove(o)
+    return true
+  }
+
+  public Iterator<T> iterator() {
+    return map.keySet().iterator()
+  }
+
+  public Object[] toArray() {
+    Object[] out = new Object[map.size()]
+    int i = 0
+    for (T e : this) {
+      out[i] = e
+      i++
+    }
+    return out
+  }
+
+  public boolean containsAll(Collection<?> c) {
+    for (Object o : c) {
+      if (!contains(o)) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public boolean addAll(Collection<? extends T> c) {
+    boolean changed = false
+    for (T e : c) {
+      if (add(e)) {
+        changed = true
+      }
+    }
+    return changed
+  }
+
+  public boolean removeAll(Collection<?> c) {
+    boolean changed = false
+    for (Object o : c) {
+      if (remove(o)) {
+        changed = true
+      }
+    }
+    return changed
+  }
+
+  public boolean retainAll(Collection<?> c) {
+    List<T> victims = new ArrayList<T>()
+    for (T e : this) {
+      if (!c.contains(e)) {
+        victims.add(e)
+      }
+    }
+    if (victims.isEmpty()) {
+      return false
+    }
+    for (T e : victims) {
+      map.remove(e)
+    }
+    return true
+  }
+
+  public void clear() {
+    map.clear()
+  }
+
+  public boolean equals(Object o) {
+    return CollectionSupport.setEquals(this, o)
+  }
+
+  public int hashCode() {
+    return CollectionSupport.setHash(this)
+  }
+
+  public String toString() {
+    return CollectionSupport.toString(this)
+  }
+}
+
+/* The one marker every set stores as its value. A class of its own rather than
+   a field per set: the JDK does the same, and one object shared by every set
+   in the library is one object's worth of memory in total. */
+class SetSupport {
+  private SetSupport() {
+  }
+
+  public static final Object PRESENT = new Object()
+}
+
+// ------------------------------------------------------------ LinkedHashSet
+
+/* A HashSet that iterates in insertion order: the same class over a linked
+   map. Everything else -- including which elements the set holds -- is
+   identical, and an element that is added twice keeps its original position,
+   because putting a key that is already there does not move it.
+ *
+ * `implements Set, Collection` is not redundant here. This compiler's
+ * `instanceof` consults only the interfaces a class declares itself -- not the
+ * ones it inherits from a superclass, and not a superinterface's own parents
+ * (docs/language.md §13) -- so a LinkedHashSet that declared nothing would fail
+ * `x instanceof Set`, and every equals() that tests its argument that way would
+ * answer false. The full set is spelled out on each class below for the same
+ * reason. */
+class LinkedHashSet<T> extends HashSet<T> implements Set<T>, Collection<T> {
+  public LinkedHashSet() {
+    map = new LinkedHashMap<T, Object>()
+  }
+
+  public LinkedHashSet(int initialCapacity) {
+    map = new LinkedHashMap<T, Object>(initialCapacity)
+  }
+
+  public LinkedHashSet(int initialCapacity, float loadFactor) {
+    map = new LinkedHashMap<T, Object>(initialCapacity, loadFactor)
+  }
+
+  public LinkedHashSet(Collection<? extends T> c) {
+    map = new LinkedHashMap<T, Object>()
+    addAll(c)
+  }
+}
+
+// ------------------------------------------------------------------ TreeSet
+
+/* A sorted set, which is a TreeMap with the shared marker as every value.
+ *
+ * The NavigableSet work is TreeKeySet's -- the same class a TreeMap's keySet()
+ * returns -- and this class is the set-shaped front for it. The one thing that
+ * differs is add(): a key set cannot insert, because it has no value to store,
+ * and a set can, because its value is always the marker. */
+class TreeSet<T> implements NavigableSet<T>, SortedSet<T>, Set<T>, Collection<T> {
+  private TreeMap<T, Object> map
+  private TreeKeySet<T, Object> keys
+
+  public TreeSet() {
+    map = new TreeMap<T, Object>()
+    keys = new TreeKeySet<T, Object>(map)
+  }
+
+  public TreeSet(Comparator<T> c) {
+    map = new TreeMap<T, Object>(c)
+    keys = new TreeKeySet<T, Object>(map)
+  }
+
+  public TreeSet(Collection<? extends T> c) {
+    map = new TreeMap<T, Object>()
+    keys = new TreeKeySet<T, Object>(map)
+    addAll(c)
+  }
+
+  public int size() {
+    return keys.size()
+  }
+
+  public boolean isEmpty() {
+    return keys.isEmpty()
+  }
+
+  public boolean contains(Object o) {
+    return keys.contains(o)
+  }
+
+  public Comparator<T> comparator() {
+    return keys.comparator()
+  }
+
+  public T first() {
+    return keys.first()
+  }
+
+  public T last() {
+    return keys.last()
+  }
+
+  public T lower(T e) {
+    return keys.lower(e)
+  }
+
+  public T floor(T e) {
+    return keys.floor(e)
+  }
+
+  public T ceiling(T e) {
+    return keys.ceiling(e)
+  }
+
+  public T higher(T e) {
+    return keys.higher(e)
+  }
+
+  public T pollFirst() {
+    return keys.pollFirst()
+  }
+
+  public T pollLast() {
+    return keys.pollLast()
+  }
+
+  public Iterator<T> iterator() {
+    return keys.iterator()
+  }
+
+  public Iterator<T> descendingIterator() {
+    return keys.descendingIterator()
+  }
+
+  public NavigableSet<T> descendingSet() {
+    return keys.descendingSet()
+  }
+
+  public SortedSet<T> subSet(T fromElement, T toElement) {
+    return keys.subSet(fromElement, toElement)
+  }
+
+  public NavigableSet<T> subSet(T fromElement, boolean fromInclusive, T toElement, boolean toInclusive) {
+    return keys.subSet(fromElement, fromInclusive, toElement, toInclusive)
+  }
+
+  public SortedSet<T> headSet(T toElement) {
+    return keys.headSet(toElement)
+  }
+
+  public NavigableSet<T> headSet(T toElement, boolean inclusive) {
+    return keys.headSet(toElement, inclusive)
+  }
+
+  public SortedSet<T> tailSet(T fromElement) {
+    return keys.tailSet(fromElement)
+  }
+
+  public NavigableSet<T> tailSet(T fromElement, boolean inclusive) {
+    return keys.tailSet(fromElement, inclusive)
+  }
+
+  public Object[] toArray() {
+    return keys.toArray()
+  }
+
+  public boolean containsAll(Collection<?> c) {
+    return keys.containsAll(c)
+  }
+
+  public boolean remove(Object o) {
+    return keys.remove(o)
+  }
+
+  public boolean removeAll(Collection<?> c) {
+    return keys.removeAll(c)
+  }
+
+  public boolean retainAll(Collection<?> c) {
+    return keys.retainAll(c)
+  }
+
+  public void clear() {
+    keys.clear()
+  }
+
+  // the two methods a set has and a key set does not: insertion and bulk
+  // insertion, both of which store the marker as the value
+  public boolean add(T e) {
+    return keys.insert(e)
+  }
+
+  public boolean addAll(Collection<? extends T> c) {
+    boolean changed = false
+    for (T e : c) {
+      if (keys.insert(e)) {
+        changed = true
+      }
+    }
+    return changed
+  }
+
+  public boolean equals(Object o) {
+    return CollectionSupport.setEquals(this, o)
+  }
+
+  public int hashCode() {
+    return CollectionSupport.setHash(this)
+  }
+
+  public String toString() {
+    return CollectionSupport.toString(this)
+  }
+}

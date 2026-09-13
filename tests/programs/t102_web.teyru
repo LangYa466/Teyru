@@ -1,0 +1,85 @@
+// The web layer: annotations become routes, parameters come from the request,
+// and what a handler returns becomes the body.
+//
+// Spring finds a controller's mappings by scanning the classes it loaded and
+// binds a request to a method by reflection. The compiler has the same
+// information and does both at build time, so a mapping that does not fit its
+// handler is reported here rather than at the first request.
+//
+// Requests are driven through HttpServer.handle, which is the same entry the
+// socket loop calls, so this exercises everything except the socket.
+
+import teyru.RestController
+import teyru.RequestMapping
+import teyru.GetMapping
+import teyru.PostMapping
+import teyru.PathVariable
+import teyru.RequestParam
+import teyru.RequestHeader
+import teyru.RequestBody
+import teyru.Service
+import teyru.Autowired
+
+class Pet {
+  String name
+  int age
+  Pet() {
+    name = "?"
+    age = -1
+  }
+  Pet(String n, int a) {
+    name = n
+    age = a
+  }
+}
+
+@Service
+class PetStore {
+  Pet find(int id) { return new Pet("pet" + id, id * 10) }
+  String label(int id) { return "store #" + id }
+}
+
+@RestController
+@RequestMapping("/pets")
+class PetController {
+  @Autowired PetStore store
+
+  @GetMapping("/{id}")
+  Pet one(@PathVariable("id") int id) { return store.find(id) }
+
+  @GetMapping("/{id}/label")
+  String label(@PathVariable("id") int id) { return store.label(id) }
+
+  @GetMapping("")
+  String list(@RequestParam(value = "q", defaultValue = "all") String q,
+              @RequestParam(value = "limit", defaultValue = "10") int limit) {
+    return "q=" + q + " limit=" + limit
+  }
+
+  @PostMapping("")
+  Pet create(@RequestBody String body, @RequestHeader(value = "X-Trace", defaultValue = "none") String trace) {
+    return new Pet(body + "[" + trace + "]", 1)
+  }
+}
+
+class Main {
+  public static void main(String[] args) {
+    ApplicationContext ctx = Application.boot(args)
+    Router router = Application.routerFrom(ctx)
+    HttpServer server = new HttpServer(8080, router, ctx)
+    System.out.println("routes=" + router.size())
+
+    say(server, "GET /pets/7 HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "GET /pets/7/label HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "GET /pets?q=cat&limit=3 HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "GET /pets HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "POST /pets HTTP/1.1\r\nHost: x\r\nX-Trace: t9\r\nContent-Length: 3\r\n\r\nxyz")
+    say(server, "GET /nope HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "POST /pets/7 HTTP/1.1\r\nHost: x\r\n\r\n")
+  }
+
+  static void say(HttpServer server, String raw) {
+    HttpResponse res = server.handle(HttpParser.parse(raw))
+    System.out.println(res.status + " [" + res.contentType + "] " + res.body)
+  }
+}

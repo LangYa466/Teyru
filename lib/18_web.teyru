@@ -1,0 +1,760 @@
+package teyru
+
+// The web layer: request parsing, routing and response writing.
+//
+// The parsing and the response are pure functions over strings, which is what
+// makes them testable without a socket: `HttpParser.parse(raw)` turns a request
+// as it arrives on the wire into an HttpRequest, and HttpRequest.respond()
+// turns a status, headers and a body back into the bytes to write. The server
+// itself is then a loop around those two, and the routing in between.
+//
+// The parser is deliberately strict about what a request must have and lenient
+// about what it may omit, which is what the HTTP grammar asks for: a request
+// line and a Host header are required, everything else is optional, and a
+// malformed request gets a 400 rather than an exception the caller has to know
+// about.
+
+// ---------------------------------------------------------------- annotations
+
+// @RequestMapping is the base path of a controller; on a method it names the
+// path and the methods it answers.
+@interface RequestMapping {
+  String value() default ""
+  String method() default ""
+}
+
+@interface GetMapping {
+  String value() default ""
+}
+
+@interface PostMapping {
+  String value() default ""
+}
+
+@interface PutMapping {
+  String value() default ""
+}
+
+@interface DeleteMapping {
+  String value() default ""
+}
+
+@interface PatchMapping {
+  String value() default ""
+}
+
+// @RequestParam binds a query parameter (or a form field) to a parameter.
+@interface RequestParam {
+  String value() default ""
+  String defaultValue() default ""
+  boolean required() default true
+}
+
+// @PathVariable binds a {name} segment of the path to a parameter.
+@interface PathVariable {
+  String value() default ""
+}
+
+// @RequestBody hands the request body to the parameter as a string, or, when
+// the parameter is an object, as the JSON it was parsed into.
+@interface RequestBody {
+  boolean required() default true
+}
+
+@interface RequestHeader {
+  String value() default ""
+  String defaultValue() default ""
+}
+
+// @ResponseBody marks a method's result as the response body rather than a view
+// name. It is implied by @RestController, as in Spring.
+@interface ResponseBody {}
+
+// ---------------------------------------------------------------- messages
+
+class HttpRequest {
+  public String method = ""
+  public String path = ""
+  public String query = ""
+  public String version = "HTTP/1.1"
+  public String body = ""
+  private List<String> headerNames = new ArrayList<String>()
+  private List<String> headerValues = new ArrayList<String>()
+
+  public void addHeader(String name, String value) {
+    headerNames.add(name)
+    headerValues.add(value)
+  }
+
+  // header answers with the first header of that name, or "" when there is
+  // none. Header names are case-insensitive, which is why the lookup lowercases
+  // both sides rather than comparing as written.
+  public String header(String name) {
+    String want = name.toLowerCase()
+    for (int i = 0 : i < headerNames.size() : i++) {
+      if (headerNames.get(i).toLowerCase().equals(want)) {
+        return headerValues.get(i)
+      }
+    }
+    return ""
+  }
+
+  public boolean hasHeader(String name) {
+    return header(name).isEmpty() == false
+  }
+
+  // param returns one query parameter, or the fallback when it is absent.
+  public String param(String name, String fallback) {
+    String v = paramOrNull(name)
+    return v == null ? fallback : v
+  }
+
+  public String paramOrNull(String name) {
+    if (query.isEmpty()) {
+      return null
+    }
+    for (String pair : query.split("&")) {
+      if (pair.isEmpty()) {
+        continue
+      }
+      int eq = pair.indexOf("=")
+      if (eq < 0) {
+        if (pair.equals(name)) {
+          return ""
+        }
+        continue
+      }
+      if (pair.substring(0, eq).equals(name)) {
+        return WebUtil.urldecode(pair.substring(eq + 1))
+      }
+    }
+    return null
+  }
+
+  public String toString() {
+    return method + " " + path + (query.isEmpty() ? "" : "?" + query) + " " + version
+  }
+}
+
+class HttpResponse {
+  public int status = 200
+  public String contentType = "text/plain; charset=utf-8"
+  public String body = ""
+  private List<String> headerNames = new ArrayList<String>()
+  private List<String> headerValues = new ArrayList<String>()
+
+  public HttpResponse header(String name, String value) {
+    headerNames.add(name)
+    headerValues.add(value)
+    return this
+  }
+
+  public String statusText() {
+    if (status == 200) { return "OK" }
+    if (status == 201) { return "Created" }
+    if (status == 204) { return "No Content" }
+    if (status == 400) { return "Bad Request" }
+    if (status == 404) { return "Not Found" }
+    if (status == 405) { return "Method Not Allowed" }
+    if (status == 500) { return "Internal Server Error" }
+    return "Unknown"
+  }
+
+  // respond renders the bytes to write: the status line, the headers the
+  // response must carry, then the body. Content-Length is always written,
+  // because a client that is not told how much to read waits for the close and
+  // a keep-alive connection never closes.
+  public String respond() {
+    StringBuilder b = new StringBuilder()
+    b.append("HTTP/1.1 ").append(status).append(" ").append(statusText()).append("\r\n")
+    b.append("Content-Type: ").append(contentType).append("\r\n")
+    b.append("Content-Length: ").append(body.length()).append("\r\n")
+    for (int i = 0 : i < headerNames.size() : i++) {
+      b.append(headerNames.get(i)).append(": ").append(headerValues.get(i)).append("\r\n")
+    }
+    b.append("Connection: close\r\n")
+    b.append("\r\n")
+    b.append(body)
+    return b.toString()
+  }
+}
+
+// ---------------------------------------------------------------- parsing
+
+class HttpParser {
+  // parse reads one request. It throws IllegalArgumentException with a message
+  // the caller can put in a 400 when the request cannot be understood.
+  public static HttpRequest parse(String raw) {
+    if (raw.isEmpty()) {
+      throw new IllegalArgumentException("empty request")
+    }
+    int headEnd = raw.indexOf("\r\n\r\n")
+    String head = headEnd >= 0 ? raw.substring(0, headEnd) : raw
+    String body = headEnd >= 0 ? raw.substring(headEnd + 4) : ""
+    List<String> lines = splitLines(head)
+    if (lines.size() == 0) {
+      throw new IllegalArgumentException("no request line")
+    }
+    HttpRequest req = new HttpRequest()
+    parseRequestLine(req, lines.get(0))
+    for (int i = 1 : i < lines.size() : i++) {
+      String line = lines.get(i)
+      int colon = line.indexOf(":")
+      if (colon <= 0) {
+        throw new IllegalArgumentException("malformed header: " + line)
+      }
+      req.addHeader(line.substring(0, colon).trim(), line.substring(colon + 1).trim())
+    }
+    // HTTP/1.1 requires Host; a request without one is refused rather than
+    // routed to whatever the default would be.
+    if (req.version.equals("HTTP/1.1") && req.hasHeader("Host") == false) {
+      throw new IllegalArgumentException("HTTP/1.1 request without Host")
+    }
+    req.body = body
+    return req
+  }
+
+  private static void parseRequestLine(HttpRequest req, String line) {
+    int sp1 = line.indexOf(" ")
+    if (sp1 <= 0) {
+      throw new IllegalArgumentException("malformed request line: " + line)
+    }
+    int sp2 = WebUtil.indexOfFrom(line, " ", sp1 + 1)
+    if (sp2 < 0) {
+      throw new IllegalArgumentException("malformed request line: " + line)
+    }
+    req.method = line.substring(0, sp1)
+    String target = line.substring(sp1 + 1, sp2)
+    req.version = line.substring(sp2 + 1)
+    int q = target.indexOf("?")
+    if (q >= 0) {
+      req.path = target.substring(0, q)
+      req.query = target.substring(q + 1)
+    } else {
+      req.path = target
+    }
+  }
+
+  // splitLines splits on CRLF and tolerates a bare LF, which some clients send.
+  private static List<String> splitLines(String head) {
+    List<String> out = new ArrayList<String>()
+    StringBuilder cur = new StringBuilder()
+    for (int i = 0 : i < head.length() : i++) {
+      char ch = head.charAt(i)
+      if (ch == '\n') {
+        String s = cur.toString()
+        if (s.endsWith("\r")) {
+          s = s.substring(0, s.length() - 1)
+        }
+        out.add(s)
+        cur = new StringBuilder()
+      } else {
+        cur.append(ch)
+      }
+    }
+    if (cur.length() > 0) {
+      out.add(cur.toString())
+    }
+    return out
+  }
+}
+
+// WebUtil holds the string helpers the web layer needs that the standard
+// library does not have. Teyru has no free functions -- every method belongs to
+// a class -- so they live here rather than at file scope.
+class WebUtil {
+  // urldecode turns %XX and + back into the characters they stand for. `+` is
+  // a space in a query string, which is the one place it differs from a path.
+  public static String urldecode(String s) {
+  StringBuilder b = new StringBuilder()
+  int i = 0
+  while (i < s.length()) {
+    char ch = s.charAt(i)
+    if (ch == '+') {
+      b.append(' ')
+      i++
+      continue
+    }
+    if (ch == '%' && i + 2 < s.length()) {
+      int hi = hexDigit(s.charAt(i + 1))
+      int lo = hexDigit(s.charAt(i + 2))
+      if (hi >= 0 && lo >= 0) {
+        b.append((char) (hi * 16 + lo))
+        i += 3
+        continue
+      }
+    }
+    b.append(ch)
+    i++
+  }
+  return b.toString()
+}
+
+  public static int hexDigit(char ch) {
+    if (ch >= '0' && ch <= '9') { return (int) ch - (int) '0' }
+    if (ch >= 'a' && ch <= 'f') { return (int) ch - (int) 'a' + 10 }
+    if (ch >= 'A' && ch <= 'F') { return (int) ch - (int) 'A' + 10 }
+    return -1
+  }
+
+  // splitRawLines splits a head on CRLF (or LF), which is what the header
+  // reader needs before the request has been parsed into one.
+  public static List<String> splitRawLines(String head) {
+    List<String> out = new ArrayList<String>()
+    int start = 0
+    while (start <= head.length()) {
+      int nl = indexOfFrom(head, "\n", start)
+      if (nl < 0) {
+        if (start < head.length()) {
+          out.add(head.substring(start))
+        }
+        break
+      }
+      String line = head.substring(start, nl)
+      if (line.endsWith("\r")) {
+        line = line.substring(0, line.length() - 1)
+      }
+      out.add(line)
+      start = nl + 1
+    }
+    return out
+  }
+
+  // indexOfFrom is String.indexOf(String, int), which the library does not have
+  // yet: searching a suffix and adding the offset back gives the same answer
+  // and does not depend on it arriving.
+  public static int indexOfFrom(String s, String needle, int from) {
+    if (from >= s.length()) {
+      return -1
+    }
+    int i = s.substring(from).indexOf(needle)
+    return i < 0 ? -1 : i + from
+  }
+
+  // splitPath splits a path on "/" and drops the empty pieces, so "/pets/" and
+  // "/pets" are the same path and the leading slash is not a segment.
+  public static List<String> splitPath(String path) {
+    List<String> out = new ArrayList<String>()
+    for (String s : path.split("/")) {
+      if (s.isEmpty() == false) {
+        out.add(s)
+      }
+    }
+    return out
+  }
+}
+
+// ---------------------------------------------------------------- routing
+
+// Handler answers one request. The compiler generates one per mapping method:
+// it looks the controller bean up in the context, which is what makes a
+// controller a singleton shared by every request, and fills the method's
+// parameters from the request before calling it.
+interface Handler {
+  Object handle(ApplicationContext ctx, HttpRequest req, Map<String, String> vars)
+}
+
+class Route {
+  public String method
+  public String pattern
+  public String beanName
+  public Handler handler
+  // segments is the pattern split on "/", with "{}" markers for the variable
+  // ones; matching walks it rather than re-parsing the pattern per request.
+  public List<String> segments
+  public List<String> variables
+}
+
+// Router matches a request against the registered routes. The most specific
+// match wins, as in Spring: a literal segment beats a variable one, so /pets/mine
+// is not swallowed by /pets/{id} whatever order they were registered in.
+class Router {
+  private List<Route> routes = new ArrayList<Route>()
+
+  public void add(String method, String pattern, String beanName, Handler handler) {
+    Route r = new Route()
+    r.method = method
+    r.pattern = pattern
+    r.beanName = beanName
+    r.handler = handler
+    addRoute(r)
+  }
+
+  // addRoute indexes a route the compiler prepared, which is how the
+  // registrations in BeanRegistry reach the router.
+  public void addRoute(Route r) {
+    r.segments = WebUtil.splitPath(r.pattern)
+    r.variables = new ArrayList<String>()
+    for (String seg : r.segments) {
+      if (seg.startsWith("{") && seg.endsWith("}")) {
+        r.variables.add(seg.substring(1, seg.length() - 1))
+      }
+    }
+    routes.add(r)
+  }
+
+  public int size() {
+    return routes.size()
+  }
+
+  public List<Route> all() {
+    return routes
+  }
+
+  // match answers with the route for a method and path, or null. It also fills
+  // vars with the path variables it bound.
+  public Route match(String method, String path, Map<String, String> vars) {
+    List<String> want = WebUtil.splitPath(path)
+    Route best = null
+    int bestScore = -1
+    for (Route r : routes) {
+      if (r.method.equals(method) == false && r.method.equals("*") == false) {
+        continue
+      }
+      int score = matchScore(r.segments, want, vars)
+      if (score > bestScore) {
+        bestScore = score
+        best = r
+      }
+    }
+    if (best == null) {
+      return null
+    }
+    // bind again for the winner: the scan above tried every route against the
+    // same map
+    Map<String, String> bound = new HashMap<String, String>()
+    matchScore(best.segments, want, bound)
+    for (String v : best.variables) {
+      String val = bound.get(v)
+      vars.put(v, val == null ? "" : val)
+    }
+    return best
+  }
+
+  // matchScore answers with how well a pattern fits, or -1 for no fit. A
+  // literal segment scores higher than a variable, which is what makes the
+  // most specific route win.
+  private int matchScore(List<String> pattern, List<String> want, Map<String, String> vars) {
+    if (pattern.size() != want.size()) {
+      return -1
+    }
+    int score = 0
+    for (int i = 0 : i < pattern.size() : i++) {
+      String p = pattern.get(i)
+      if (p.startsWith("{") && p.endsWith("}")) {
+        vars.put(p.substring(1, p.length() - 1), WebUtil.urldecode(want.get(i)))
+        score += 1
+        continue
+      }
+      if (p.equals(want.get(i)) == false) {
+        return -1
+      }
+      score += 10
+    }
+    return score
+  }
+}
+
+// ---------------------------------------------------------------- server
+
+// HttpServer serves the routes on a port. Requests are handled one at a time:
+// the language has no threads, so a second connection waits for the first to
+// finish. That is honest about what it is -- a server for a program that
+// answers requests, not one that serves a crowd -- and the shape is the one a
+// thread-per-connection version needs.
+class HttpServer {
+  private int port
+  private int boundPort = -1
+  private ServerSocket listener = null
+  private Router router
+  private ApplicationContext ctx
+  private boolean verbose = false
+  private int served = 0
+  // readTimeoutMs bounds how long one connection may take to send its request.
+  // Ten seconds is generous for a request that is already written and short
+  // enough that a stalled client does not hold the server for the afternoon.
+  private int readTimeoutMs = 10000
+
+  public HttpServer(int port, Router router, ApplicationContext ctx) {
+    this.port = port
+    this.router = router
+    this.ctx = ctx
+  }
+
+  public HttpServer setVerbose(boolean v) {
+    this.verbose = v
+    return this
+  }
+
+  // getPort answers with the port the server is listening on. Before bind() it
+  // is the port that was asked for; after it, the one the kernel gave, which is
+  // what makes `new HttpServer(0, ...)` useful -- port 0 asks for any free
+  // port, and only the bind knows which.
+  public int getPort() { return boundPort >= 0 ? boundPort : port }
+
+  // bind starts listening. serve and serveIdle call it themselves; a caller
+  // that wants the port before serving -- a test that connects to itself --
+  // calls it first.
+  public void bind() {
+    if (listener == null) {
+      listener = new ServerSocket(port)
+      boundPort = listener.getLocalPort()
+    }
+  }
+
+  public void close() {
+    if (listener != null) {
+      listener.close()
+      listener = null
+    }
+  }
+
+  public int getServed() { return served }
+
+  public Router getRouter() { return router }
+
+  public void setRouter(Router r) { this.router = r }
+
+  public ApplicationContext context() { return ctx }
+
+  public void log(String line) {
+    if (verbose) {
+      System.out.println(line)
+    }
+  }
+
+  // serve accepts connections and answers them, one at a time, until the
+  // program ends.
+  //
+  // One at a time is not a limitation of this code but of the language: there
+  // are no threads (docs/language.md §13), so a second client waits for the
+  // first to finish. The shape is the one a thread-per-connection version needs
+  // -- accept, read one request, answer it, close -- so adding threads later
+  // changes where the loop runs, not what it does.
+  public void serve() {
+    bind()
+    try {
+      while (true) {
+        Socket s = listener.accept()
+        serveOne(s)
+      }
+    } finally {
+      close()
+    }
+  }
+
+  // serveIdle is serve with a deadline: it answers connections until none
+  // arrives within idleMillis, then returns how many it answered.
+  //
+  // A program with no threads cannot be interrupted, so an accept that nobody
+  // connects to would hang the process with no way back. Bounding the wait is
+  // what makes a serving loop testable -- and it is the same mechanism Java's
+  // ServerSocket.setSoTimeout gives a server that wants to check its own state
+  // between connections.
+  public int serveIdle(int idleMillis) {
+    bind()
+    listener.setSoTimeout(idleMillis)
+    int answered = 0
+    // The listener stays open across calls: a caller that serves in bursts --
+    // accept what is waiting, do something else, come back -- must not have its
+    // port closed between them, or the next client's connection is refused
+    // before the loop gets a chance to bind again.
+    while (true) {
+      Socket s
+      try {
+        s = listener.accept()
+      } catch (SocketTimeoutException e) {
+        break
+      }
+      serveOne(s)
+      answered++
+    }
+    return answered
+  }
+
+  // serveOne reads one request off a connection, answers it, and closes. A
+  // client that connects and says nothing, or goes away mid-request, is not an
+  // error the server reports: it is a connection that ends.
+  private void serveOne(Socket s) {
+    try {
+      // A client that opens a connection and never finishes a request would
+      // otherwise hold the only thread there is, forever.
+      s.setSoTimeout(readTimeoutMs)
+      String raw = readRequest(s.getInputStream())
+      if (raw == null) {
+        return
+      }
+      HttpResponse res
+      try {
+        res = handle(HttpParser.parse(raw))
+      } catch (IllegalArgumentException e) {
+        // a request the parser refuses is the client's mistake, and the status
+        // that says so is 400
+        res = new HttpResponse()
+        res.status = 400
+        res.body = e.getMessage()
+      }
+      SocketOutputStream out = s.getOutputStream()
+      out.write(res.respond())
+      out.flush()
+    } catch (IOException e) {
+      // a connection that failed is not a reason to stop serving
+    } finally {
+      s.close()
+    }
+  }
+
+  // readRequest reads the head and the body off a stream and renders the
+  // request the parser expects: the lines, a blank line, then the bytes.
+  //
+  // The body is read by length rather than by line, because a body is bytes and
+  // may contain anything -- a line reader would stop at the first CRLF inside
+  // it and hand a truncated document to the handler.
+  private String readRequest(SocketInputStream in) {
+    StringBuilder head = new StringBuilder()
+    while (true) {
+      String line = in.readLine()
+      if (line == null) {
+        // the connection ended before the blank line: nothing to answer, unless
+        // a request line already arrived and the head was simply unterminated
+        return head.length() == 0 ? null : head.toString()
+      }
+      if (line.isEmpty()) {
+        break
+      }
+      head.append(line).append("\r\n")
+    }
+    String headText = head.toString()
+    int len = contentLength(headText)
+    if (len <= 0) {
+      return headText
+    }
+    byte[] buf = new byte[len]
+    int got = 0
+    while (got < len) {
+      int n = in.read(buf, got, len - got)
+      if (n <= 0) {
+        break
+      }
+      got += n
+    }
+    if (got == 0) {
+      return headText
+    }
+    // The head already ends with CRLF -- every line was appended with one --
+    // so a single CRLF more is the blank line that ends it. Adding two, as the
+    // shape "head CRLF CRLF body" suggests, puts one CRLF of the head's into
+    // the body and every POST arrives with a leading blank line.
+    return headText + "\r\n" + Net.stringFrom(buf, 0, got)
+  }
+
+  // contentLength reads Content-Length out of a request head, or -1 when the
+  // header is absent or unreadable. A head is not parsed here: the parser does
+  // that, and this only needs one number out of it before deciding how much to
+  // read.
+  private int contentLength(String head) {
+    for (String line : WebUtil.splitRawLines(head)) {
+      int colon = line.indexOf(":")
+      if (colon <= 0) {
+        continue
+      }
+      if (line.substring(0, colon).trim().toLowerCase().equals("content-length")) {
+        try {
+          return Integer.parseInt(line.substring(colon + 1).trim())
+        } catch (IllegalArgumentException e) {
+          return -1
+        }
+      }
+    }
+    return -1
+  }
+
+  // handle answers one request. It is separate from the socket loop so that it
+  // can be exercised without one, and so a failure inside a handler becomes a
+  // 500 rather than an exception that escapes the connection.
+  public HttpResponse handle(HttpRequest req) {
+    HttpResponse res = new HttpResponse()
+    Map<String, String> vars = new HashMap<String, String>()
+    Route r = router.match(req.method, req.path, vars)
+    if (r == null) {
+      // a path that exists under another method is a 405, not a 404: the
+      // client asked the wrong thing, not for something that is not there
+      Map<String, String> ignored = new HashMap<String, String>()
+      for (Route other : router.all()) {
+        if (other.method.equals(req.method) == false) {
+          if (router.match(other.method, req.path, ignored) != null) {
+            res.status = 405
+            res.body = "method not allowed: " + req.method
+            return res
+          }
+        }
+      }
+      res.status = 404
+      res.body = "not found: " + req.path
+      return res
+    }
+    try {
+      Object out = r.handler.handle(ctx, req, vars)
+      if (out instanceof HttpResponse) {
+        return (HttpResponse) out
+      }
+      if (out != null) {
+        res.body = out.toString()
+      }
+      served++
+      return res
+    } catch (Throwable e) {
+      res.status = 500
+      res.body = "internal error: " + e.getMessage()
+      return res
+    }
+  }
+}
+
+// ---------------------------------------------------------------- bootstrap
+
+// @SpringBootApplication is @Configuration + @ComponentScan + @EnableAutoConfiguration
+// in one, which in Spring is what makes a class the program's root.
+@interface SpringBootApplication {
+  String value() default ""
+}
+
+// Application is the program's entry point: it builds the context, collects the
+// routes the compiler registered, and serves them.
+//
+// The port comes from the server.port property, or from the argument, or is
+// 8080 -- the same order Spring uses for a property and the same default.
+class Application {
+  // boot creates the container and builds every singleton.
+  public static ApplicationContext boot(String[] args) {
+    ApplicationContext ctx = new ApplicationContext()
+    for (String a : args) {
+      int eq = a.indexOf("=")
+      if (a.startsWith("--") && eq > 2) {
+        ctx.setProperty(a.substring(2, eq), a.substring(eq + 1))
+      }
+    }
+    ctx.refresh()
+    return ctx
+  }
+
+  // routerFrom builds the router from the mappings the generated registry holds.
+  public static Router routerFrom(ApplicationContext ctx) {
+    Router r = new Router()
+    for (Route rt : BeanRegistry.routes()) {
+      r.addRoute(rt)
+    }
+    return r
+  }
+
+  // portOf answers with the port to listen on: the request's argument, then the
+  // server.port property, then 8080.
+  public static int portOf(ApplicationContext ctx, String[] args) {
+    for (String a : args) {
+      if (a.startsWith("--port=")) {
+        return Integer.parseInt(a.substring(7))
+      }
+    }
+    return Integer.parseInt(ctx.getProperty("server.port", "8080"))
+  }
+}

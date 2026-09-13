@@ -322,13 +322,25 @@ int16_t ty_num_short(void *o);
 int32_t ty_abs_int(int32_t v);
 int64_t ty_abs_long(int64_t v);
 double ty_abs_double(double v);
+float ty_abs_float(float v);
 int32_t ty_max_int(int32_t a, int32_t b);
 int32_t ty_min_int(int32_t a, int32_t b);
 int64_t ty_max_long(int64_t a, int64_t b);
 int64_t ty_min_long(int64_t a, int64_t b);
 double ty_max_double(double a, double b);
 double ty_min_double(double a, double b);
+float ty_max_float(float a, float b);
+float ty_min_float(float a, float b);
 int64_t ty_round(double v);
+int32_t ty_round_float(float v);
+int32_t ty_floor_div_int(int32_t a, int32_t b);
+int64_t ty_floor_div_long(int64_t a, int64_t b);
+int32_t ty_floor_mod_int(int32_t a, int32_t b);
+int64_t ty_floor_mod_long(int64_t a, int64_t b);
+double ty_signum_double(double v);
+float ty_signum_float(float v);
+double ty_to_radians(double deg);
+double ty_to_degrees(double rad);
 double ty_random(void);
 int32_t ty_isnan(double v);
 int32_t ty_is_digit(uint16_t c);
@@ -358,6 +370,7 @@ typedef struct { tyobj obj; int32_t ordinal; tystr *name; } tyEnumBase;
 typedef struct { tyobj obj; int64_t len, cap; char *buf; } tySB;
 
 void *ty_sb_new(void);
+void *ty_sb_init(void *sb, int64_t cap);
 void *ty_sb_append_str(void *sb, tystr *s);
 void *ty_sb_append_int(void *sb, int64_t v);
 void *ty_sb_append_long(void *sb, int64_t v);
@@ -380,5 +393,187 @@ tyarr *ty_str_split(tystr *s, tystr *sep);
 int64_t ty_div_long(int64_t a, int64_t b);
 int32_t ty_rem_int(int32_t a, int32_t b);
 int64_t ty_rem_long(int64_t a, int64_t b);
+
+/* ---------------------------------------------------------------- java.lang
+ *
+ * The rest of java.lang. Every helper here exists because Java's answer to a
+ * question differs from C's answer to the same question: rounding at the ends
+ * of a range, the order of the two zeros, the radix of a number, what counts as
+ * a letter, what String.format prints. The prelude declares the method and this
+ * header declares the helper it runs, so a class in lib/ and its C are two
+ * halves of one function.
+ */
+
+/* Math: Java's semantics where C's differ. abs and max/min for the integer
+   types are the ones tyrt2.c already had, moved here because negating the most
+   negative value is undefined in C and Java defines it. */
+int32_t ty_math_abs_int(int32_t v);
+int64_t ty_math_abs_long(int64_t v);
+float ty_abs_float(float v);
+double ty_math_max_double(double a, double b);
+double ty_math_min_double(double a, double b);
+float ty_math_max_float(float a, float b);
+float ty_math_min_float(float a, float b);
+int64_t ty_math_round_long(double v);
+int32_t ty_math_round_int(float v);
+int32_t ty_math_floor_div_int(int32_t a, int32_t b);
+int64_t ty_math_floor_div_long(int64_t a, int64_t b);
+int32_t ty_math_floor_mod_int(int32_t a, int32_t b);
+int64_t ty_math_floor_mod_long(int64_t a, int64_t b);
+double ty_signum_double(double v);
+float ty_signum_float(float v);
+double ty_math_to_radians(double deg);
+double ty_math_to_degrees(double rad);
+
+/* System */
+tystr *ty_getenv(tystr *name);
+tystr *ty_get_property(tystr *key);
+int32_t ty_in_read(void *self);
+tystr *ty_in_readln(void *self);
+
+/* Character */
+int32_t ty_is_whitespace(uint16_t c);
+int32_t ty_is_letter_or_digit(uint16_t c);
+int32_t ty_is_upper_case(uint16_t c);
+int32_t ty_is_lower_case(uint16_t c);
+int32_t ty_is_alphabetic(uint16_t c);
+int32_t ty_char_upper(uint16_t c);
+int32_t ty_char_lower(uint16_t c);
+int32_t ty_char_numeric(uint16_t c);
+int32_t ty_char_digit(uint16_t c, int32_t radix);
+int32_t ty_char_compare(uint16_t a, uint16_t b);
+
+/* The wrappers: parsing, radix formatting and the bit twiddling Integer and
+   Long expose. A parse either succeeds or throws, which is why each type has a
+   parsable test beside the conversion it guards. */
+int32_t ty_str_parsable_int(tystr *s, int32_t radix);
+int64_t ty_str_parsable_long(tystr *s, int32_t radix);
+int32_t ty_str_parsable_double(tystr *s);
+int32_t ty_str_parsable_float(tystr *s);
+int32_t ty_str_toint_radix(tystr *s, int32_t radix);
+int64_t ty_str_tolong_radix(tystr *s, int32_t radix);
+tystr *ty_radix_string_int(int32_t v, int32_t radix);
+tystr *ty_radix_string_long(int64_t v, int32_t radix);
+tystr *ty_unsigned_string_int(int32_t v, int32_t radix);
+tystr *ty_unsigned_string_long(int64_t v, int32_t radix);
+tystr *ty_byte_tostr_val(int32_t v);
+tystr *ty_short_tostr_val(int32_t v);
+tystr *ty_float_tostr_val(float v);
+float ty_str_tofloat_val(tystr *s);
+double ty_str_todouble_val(tystr *s);
+int32_t ty_int_bit_count(int32_t v);
+int32_t ty_long_bit_count(int64_t v);
+int32_t ty_int_nlz(int32_t v);
+int32_t ty_int_ntz(int32_t v);
+int32_t ty_long_nlz(int64_t v);
+int32_t ty_long_ntz(int64_t v);
+int32_t ty_int_highest_one(int32_t v);
+int32_t ty_int_lowest_one(int32_t v);
+int64_t ty_long_highest_one(int64_t v);
+int64_t ty_long_lowest_one(int64_t v);
+int32_t ty_int_reverse(int32_t v);
+int32_t ty_int_reverse_bytes(int32_t v);
+int64_t ty_long_reverse(int64_t v);
+int64_t ty_long_reverse_bytes(int64_t v);
+int32_t ty_int_rotate_left(int32_t v, int32_t d);
+int32_t ty_int_rotate_right(int32_t v, int32_t d);
+int64_t ty_long_rotate_left(int64_t v, int32_t d);
+int64_t ty_long_rotate_right(int64_t v, int32_t d);
+int32_t ty_int_signum(int32_t v);
+int64_t ty_long_signum(int64_t v);
+int32_t ty_int_sum(int32_t a, int32_t b);
+int64_t ty_long_sum(int64_t a, int64_t b);
+double ty_double_sum(double a, double b);
+float ty_float_sum(float a, float b);
+int32_t ty_int_cmp_unsigned(int32_t a, int32_t b);
+int64_t ty_long_cmp_unsigned(int64_t a, int64_t b);
+int64_t ty_double_bits(double v);
+double ty_bits_double(int64_t bits);
+int32_t ty_float_bits(float v);
+float ty_bits_float(int32_t bits);
+int32_t ty_double_is_infinite(double v);
+int32_t ty_float_is_infinite(float v);
+int32_t ty_double_is_finite(double v);
+int32_t ty_float_is_finite(float v);
+int32_t ty_float_isnan(float v);
+int64_t ty_double_raw_bits(double v);
+int32_t ty_float_raw_bits(float v);
+int32_t ty_bool_compare(int32_t a, int32_t b);
+int32_t ty_box_equals(void *a, void *b);
+double ty_math_cbrt(double x);
+int32_t ty_byte_hash_val(int32_t v);
+int32_t ty_short_hash_val(int32_t v);
+int32_t ty_char_hash_val(uint16_t c);
+int32_t ty_int_hash_val(int32_t v);
+int32_t ty_long_hash_val(int64_t v);
+int32_t ty_bool_hash_val(int32_t v);
+int32_t ty_bool_hash_box(void *o);
+int32_t ty_double_hash_val(double v);
+tystr *ty_char_tostr_val(uint16_t c);
+/* System.identityHashCode: the Object hash without dispatching to an override,
+   and 0 for a null, which is what Java answers. */
+int32_t ty_identity_hash(void *o);
+
+/* String */
+int32_t ty_str_cmp_ic(tystr *a, tystr *b);
+int32_t ty_str_eq_ic(tystr *a, tystr *b);
+int32_t ty_str_starts_from(tystr *s, tystr *p, int32_t from);
+int32_t ty_str_indexof_from(tystr *s, tystr *sub, int32_t from);
+int32_t ty_str_indexof_ch(tystr *s, int32_t c);
+int32_t ty_str_indexof_ch_from(tystr *s, int32_t c, int32_t from);
+int32_t ty_str_lastindexof(tystr *s, tystr *sub);
+int32_t ty_str_lastindexof_from(tystr *s, tystr *sub, int32_t from);
+int32_t ty_str_lastindexof_ch(tystr *s, int32_t c);
+int32_t ty_str_lastindexof_ch_from(tystr *s, int32_t c, int32_t from);
+tystr *ty_str_replace_str(tystr *s, tystr *a, tystr *b);
+tystr *ty_str_repeat(tystr *s, int32_t n);
+tystr *ty_str_strip(tystr *s);
+tystr *ty_str_strip_leading(tystr *s);
+tystr *ty_str_strip_trailing(tystr *s);
+int32_t ty_str_isblank(tystr *s);
+tyarr *ty_str_tochararray(tystr *s);
+tyarr *ty_str_getbytes(tystr *s);
+tystr *ty_str_of_chars(tyarr *chars);
+tystr *ty_str_of_chars_part(tyarr *chars, int32_t off, int32_t count);
+tystr *ty_str_interned(tystr *s);
+/* The regex-shaped methods: Teyru has no regular expression engine, so these
+   answer for a pattern that is a literal -- no metacharacter can change what it
+   matches -- and fail loudly for one that is not. */
+void ty_str_check_literal(tystr *re, const char *what);
+tystr *ty_str_replaceall(tystr *s, tystr *re, tystr *rep);
+tystr *ty_str_replacefirst(tystr *s, tystr *re, tystr *rep);
+int32_t ty_str_matches(tystr *s, tystr *re);
+tyarr *ty_str_split_limit(tystr *s, tystr *re, int32_t limit);
+/* String.format */
+tystr *ty_str_format(tystr *fmt, tyarr *args);
+
+/* StringBuilder and StringBuffer */
+void *ty_sb_insert_str(void *sb, int32_t at, tystr *s);
+void *ty_sb_insert_obj(void *sb, int32_t at, void *o);
+void *ty_sb_insert_int(void *sb, int32_t at, int64_t v);
+void *ty_sb_insert_char(void *sb, int32_t at, uint16_t c);
+void *ty_sb_insert_double(void *sb, int32_t at, double v);
+void *ty_sb_insert_bool(void *sb, int32_t at, int32_t v);
+void *ty_sb_insert_chars(void *sb, int32_t at, tyarr *chars);
+void *ty_sb_delete(void *sb, int32_t from, int32_t to);
+void *ty_sb_delete_charat(void *sb, int32_t at);
+void *ty_sb_replace(void *sb, int32_t from, int32_t to, tystr *s);
+void *ty_sb_reverse(void *sb);
+void *ty_sb_set_charat(void *sb, int32_t at, uint16_t c);
+int32_t ty_sb_charat(void *sb, int32_t at);
+int32_t ty_sb_capacity(void *sb);
+int32_t ty_sb_indexof(void *sb, tystr *s);
+int32_t ty_sb_indexof_from(void *sb, tystr *s, int32_t from);
+int32_t ty_sb_lastindexof(void *sb, tystr *s);
+void *ty_sb_set_length(void *sb, int32_t n);
+void *ty_sb_ensure(void *sb, int32_t cap);
+tystr *ty_sb_substring(void *sb, int32_t from);
+tystr *ty_sb_substring_to(void *sb, int32_t from, int32_t to);
+void *ty_sb_append_float(void *sb, float v);
+void *ty_sb_append_chars(void *sb, tyarr *chars);
+void *ty_sb_insert_long(void *sb, int32_t at, int64_t v);
+void *ty_sb_insert_float(void *sb, int32_t at, float v);
+int32_t ty_sb_isempty(void *sb);
+tystr *ty_str_format_arg(tyarr *args, int32_t i);
 
 #endif /* TYRT_H */

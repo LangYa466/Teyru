@@ -297,29 +297,56 @@ JEP 378 テキストブロック、JEP 361 switch 式、JEP 286 `var`。
 
 ## 標準ライブラリ
 
-標準ライブラリは **Teyru 自身**で書かれています（`lib/*.teyru`）。
-コンパイルのたびにユーザープログラムと一緒に型検査されます。
+標準ライブラリは **Teyru 自身**で書かれ（`lib/*.teyru`）、どのプログラムでも一緒に
+コンパイルされ型検査される。パッケージ名は Java の綴りのままなので、
+`import java.util.List` がそのまま通る:
 
-`Object`、`String`、`StringBuilder`、`Math`、`System`、`PrintStream`、
-`Iterable`／`Iterator`、`Comparable`、`AutoCloseable`、`Cloneable`、`Enum`、`Record`、
-八つのプリミティブラッパー（`Byte`／`Short`／`Integer`／`Long`／`Float`／`Double`／
-`Character`／`Boolean`）、コレクション（`List`／`ArrayList`／`Map`／`HashMap`）、そして
-`Throwable` ファミリ（`Exception`、`RuntimeException`、`NullPointerException`、
-`ArrayIndexOutOfBoundsException`、`ArithmeticException`、`ClassCastException`、
-`IllegalArgumentException`、`IllegalStateException`、`IndexOutOfBoundsException`、
-`NoSuchElementException`、`NegativeArraySizeException`、`AssertionError`、
-`UnsupportedOperationException`）。
+| パッケージ | 内容 |
+|---|---|
+| `java.lang` | `Object`、`Class`、`String`（`format`／`join`／`valueOf` など）、`StringBuilder`、`Math`、`System`、`PrintStream`、八つのラッパーと `Number`、`Throwable` 一族、`Enum`、`Record` |
+| `java.util` | `List`／`ArrayList`／`LinkedList`、`Set`／`HashSet`／`LinkedHashSet`／`TreeSet`、`Map`／`HashMap`／`LinkedHashMap`／`TreeMap`、`Deque`／`ArrayDeque`、`Arrays`、`Collections`、`Objects`、`Optional`、`StringJoiner` |
+| `java.time` | `LocalDate`／`LocalTime`／`LocalDateTime`／`Instant`／`Duration`／`Period` |
+| `java.io` | `File`、`Path`／`Paths`、`Files` |
+| `java.util.regex` | `Pattern`／`Matcher` |
+| `java.net` | `ServerSocket`、`Socket` とそのストリーム |
+| `com.google.gson` | Gson のツリー API と、コンパイラが生成するオブジェクト束縛（[docs/json.md](docs/json.md)） |
+| フレームワーク | Spring の形をしたコンテナと web 層（[docs/framework.md](docs/framework.md)） |
 
-`ArrayList` は `Iterable` を実装しているので、`for (String s : names)` は Java と
-同じ書き方になります。`printf` とファイル I/O は意図的な範囲外のままです。
+コレクションは Teyru で書かれているので `for` がそのまま使える:
 
-自前のネイティブライブラリは `native` メソッドを宣言して C で実装します。詳細は
-[`docs/native.md`](docs/native.md)：
+```teyru
+List<String> names = new ArrayList<String>()
+names.add("ada")
+for (String n : names) {
+  System.out.println(n)
+}
+```
+
+依存は `teyru.mod` に宣言し、取得と検証は Go と同じやり方で行う
+（[docs/modules.md](docs/modules.md)）:
 
 ```sh
-teyru build --native-header native.h program.teyru   # 実装すべき宣言を出力
+teyru mod init example.com/app
+teyru get example.com/greeting@v0.1.0
+teyru build ./...
+```
+
+リフレクション、スレッド、`Stream`、`BigDecimal`、タイムゾーンデータベースは無い。どれも意図的な不在で、理由は
+[docs/language.md](docs/language.md) §11 と §13 に書いてある。
+
+自分のネイティブライブラリは `native` メソッドを宣言して C で実装する:
+
+```teyru
+class Native {
+  public static native int add(int a, int b)
+}
+```
+```sh
+teyru build --native-header native.h program.teyru   # 実装する宣言を生成
 teyru build --native impl.c program.teyru            # 一緒にコンパイル
 ```
+
+詳しくは [`docs/native.md`](docs/native.md)。
 
 ---
 

@@ -1,0 +1,84 @@
+// The file layer, end to end, in a directory of its own.
+//
+// Every path below is built under a mkdtemp directory rather than a fixed name,
+// so two runs of the suite at once cannot collide -- and the directory is
+// printed nowhere. A test whose expected output contained a temp path would
+// only pass on the machine that produced it, and the suite compares stdout.
+
+class Main {
+  public static void main(String[] args) {
+    Path dir = Files.createTempDirectory("teyru-t99")
+    System.out.println("dir exists: " + Files.isDirectory(dir))
+
+    Path f = dir.resolve("hello.txt")
+    System.out.println("before: " + Files.exists(f))
+
+    Files.writeString(f, "one\ntwo\nthree\n")
+    System.out.println("after: " + Files.exists(f))
+    System.out.println("regular: " + Files.isRegularFile(f.toString()))
+    System.out.println("size: " + Files.size(f))
+    System.out.println("text: " + Files.readString(f).equals("one\ntwo\nthree\n"))
+
+    // Appended through the same path, which is also the check that the first
+    // write closed the file: a descriptor left open would still be holding
+    // bytes a reader cannot see yet.
+    Files.writeString(f, "four\n", true)
+    System.out.println("appended size: " + Files.size(f))
+    String[] lines = Files.readAllLines(f)
+    System.out.println("lines: " + lines.length)
+    System.out.println("first: " + lines[0])
+    System.out.println("last: " + lines[3])
+
+    // The byte side, with values that are not text: a write that went through
+    // a string conversion anywhere would come back changed.
+    byte[] bytes = new byte[256]
+    for (int i = 0 : i < 256 : i++) {
+      bytes[i] = (byte) i
+    }
+    Path bin = dir.resolve("bin.dat")
+    Files.write(bin, bytes, 0, 256)
+    byte[] back = Files.readAllBytes(bin)
+    boolean same = back.length == 256
+    for (int i = 0 : i < 256 : i++) {
+      if (back[i] != (byte) i) {
+        same = false
+      }
+    }
+    System.out.println("binary: " + same)
+    System.out.println("binary size: " + Files.size(bin))
+
+    // Directories that are not there yet, and a listing that is sorted.
+    Path deep = dir.resolve("a").resolve("b").resolve("c")
+    System.out.println("deep before: " + Files.exists(deep))
+    Files.createDirectories(deep)
+    System.out.println("deep after: " + Files.isDirectory(deep))
+    // Already a directory is not an error, which is what makes the call safe to
+    // make twice.
+    Files.createDirectories(deep)
+    System.out.println("idempotent: " + Files.isDirectory(deep))
+
+    Path top = dir.resolve("top.txt")
+    Files.writeString(top, "t")
+    File d = new File(dir.toString())
+    String[] names = d.list()
+    System.out.println("entries: " + names.length)
+    System.out.println("sorted: " + (names[0].equals("a") && names[1].equals("bin.dat")
+      && names[2].equals("hello.txt") && names[3].equals("top.txt")))
+    System.out.println("listFiles: " + (d.listFiles().length == 4))
+    System.out.println("child path: " + d.listFiles()[3].getName())
+
+    // Deleting, and the difference between the two calls: one answers a
+    // question and the other raises when there was nothing to delete.
+    System.out.println("delete: " + new File(top.toString()).delete())
+    System.out.println("gone: " + Files.exists(top))
+    System.out.println("deleteIfExists again: " + Files.deleteIfExists(top))
+
+    Files.delete(bin)
+    Files.delete(f)
+    Files.delete(deep)
+    Files.delete(dir.resolve("a").resolve("b"))
+    Files.delete(dir.resolve("a"))
+    Files.delete(dir)
+    System.out.println("cleaned: " + !Files.exists(dir))
+  }
+}

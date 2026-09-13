@@ -21,6 +21,12 @@ type nativeFn struct {
 	// runtime builds a Class object from a tyclass this header-less C file
 	// cannot name.
 	classHint string
+	// proto is the C prototype of fn, repeated as an `extern` at every call
+	// site. A table that carries its own declaration needs nothing added to
+	// tyrt.h, which is what lets a feature (networking, say) ship its native
+	// methods in a file of its own. An entry with no proto relies on the
+	// prototype tyrt.h already declares.
+	proto string
 }
 
 // streamTwin is the stream-aware twin of a PrintStream print helper: the same
@@ -83,6 +89,25 @@ func (e *Emitter) psTwin(m *ast.Method, nf nativeFn) *streamTwin {
 // specialNew maps classes whose allocation is owned by the runtime.
 var specialNew = map[string]string{
 	"StringBuilder": "ty_sb_new",
+	"StringBuffer":  "ty_sb_new",
+}
+
+// extraNative holds the tables other files contribute, so a feature can add
+// its own native methods without editing the core table: every entry here is
+// merged into nativeTable at startup. A duplicate key is a programming error
+// rather than a silent override, since two features claiming one Teyru method
+// would otherwise pick a winner by file order.
+var extraNative []map[string]nativeFn
+
+func init() {
+	for _, t := range extraNative {
+		for k, v := range t {
+			if _, dup := nativeTable[k]; dup {
+				panic("native method declared twice: " + k)
+			}
+			nativeTable[k] = v
+		}
+	}
 }
 
 var nativeTable = map[string]nativeFn{
@@ -92,7 +117,6 @@ var nativeTable = map[string]nativeFn{
 	"Object.equals(Object)": {fn: "ty_obj_eq", recv: "void*"},
 	"Object.getClass()":     {fn: "ty_class_of", recv: "void*", classHint: "teyru.Class"},
 	"Class.getName()":       {fn: "ty_class_name", recv: "void*"},
-	"Class.toString()":      {fn: "ty_class_name", recv: "void*"},
 
 	// ---- String
 	"String.length()":           {fn: "ty_str_len", recv: "tystr*"},
@@ -152,79 +176,78 @@ var nativeTable = map[string]nativeFn{
 	"Integer.longValue()":        {fn: "ty_num_long", recv: "void*"},
 	"Integer.intValue()":         {fn: "ty_num_int", recv: "void*"},
 	"Integer.valueOf(I)":         {fn: "ty_box_int"},
-	"Integer.parseInt(String)":   {fn: "ty_str_toint", recv: "tystr*"},
 	"Integer.toString()":         {fn: "ty_int_tostr", recv: "void*"},
-	"Integer.toString(I)":        {fn: "ty_str_of_int"},
 	"Integer.hashCode()":         {fn: "ty_unbox_int", recv: "void*"},
-	"Integer.equals(Object)":     {fn: "ty_int_equals", recv: "void*"},
+	"Integer.equals(Object)":     {fn: "ty_box_equals", recv: "void*"},
 	"Integer.compareTo(Integer)": {fn: "ty_int_compare", recv: "void*"},
 	"Integer.compare(I,I)":       {fn: "ty_prim_cmp_int"},
 	"Integer.max(I,I)":           {fn: "ty_max_int"},
 	"Integer.min(I,I)":           {fn: "ty_min_int"},
 
-	"Long.shortValue()":      {fn: "ty_num_short", recv: "void*"},
-	"Long.byteValue()":       {fn: "ty_num_byte", recv: "void*"},
-	"Long.floatValue()":      {fn: "ty_num_float", recv: "void*"},
-	"Long.doubleValue()":     {fn: "ty_num_double", recv: "void*"},
-	"Long.longValue()":       {fn: "ty_num_long", recv: "void*"},
-	"Long.intValue()":        {fn: "ty_num_int", recv: "void*"},
-	"Long.valueOf(J)":        {fn: "ty_box_long"},
-	"Long.parseLong(String)": {fn: "ty_str_tolong", recv: "tystr*"},
-	"Long.toString()":        {fn: "ty_long_tostr", recv: "void*"},
-	"Long.toString(J)":       {fn: "ty_str_of_long"},
-	"Long.hashCode()":        {fn: "ty_long_hash", recv: "void*"},
-	"Long.equals(Object)":    {fn: "ty_long_equals", recv: "void*"},
-	"Long.compareTo(Long)":   {fn: "ty_long_compare_obj", recv: "void*"},
-	"Long.compare(J,J)":      {fn: "ty_prim_cmp_long"},
-	"Long.max(J,J)":          {fn: "ty_max_long"},
-	"Long.min(J,J)":          {fn: "ty_min_long"},
+	"Long.shortValue()":    {fn: "ty_num_short", recv: "void*"},
+	"Long.byteValue()":     {fn: "ty_num_byte", recv: "void*"},
+	"Long.floatValue()":    {fn: "ty_num_float", recv: "void*"},
+	"Long.doubleValue()":   {fn: "ty_num_double", recv: "void*"},
+	"Long.longValue()":     {fn: "ty_num_long", recv: "void*"},
+	"Long.intValue()":      {fn: "ty_num_int", recv: "void*"},
+	"Long.valueOf(J)":      {fn: "ty_box_long"},
+	"Long.toString()":      {fn: "ty_long_tostr", recv: "void*"},
+	"Long.hashCode()":      {fn: "ty_long_hash", recv: "void*"},
+	"Long.equals(Object)":  {fn: "ty_box_equals", recv: "void*"},
+	"Long.compareTo(Long)": {fn: "ty_long_compare_obj", recv: "void*"},
+	"Long.compare(J,J)":    {fn: "ty_prim_cmp_long"},
+	"Long.max(J,J)":        {fn: "ty_max_long"},
+	"Long.min(J,J)":        {fn: "ty_min_long"},
 
-	"Double.shortValue()":        {fn: "ty_num_short", recv: "void*"},
-	"Double.byteValue()":         {fn: "ty_num_byte", recv: "void*"},
-	"Double.floatValue()":        {fn: "ty_num_float", recv: "void*"},
-	"Double.longValue()":         {fn: "ty_num_long", recv: "void*"},
-	"Double.intValue()":          {fn: "ty_num_int", recv: "void*"},
-	"Double.doubleValue()":       {fn: "ty_num_double", recv: "void*"},
-	"Double.valueOf(D)":          {fn: "ty_box_double"},
-	"Double.valueOf(F)":          {fn: "ty_box_double"},
-	"Double.parseDouble(String)": {fn: "ty_str_todouble", recv: "tystr*"},
-	"Double.toString()":          {fn: "ty_double_tostr", recv: "void*"},
-	"Double.toString(D)":         {fn: "ty_str_of_double"},
-	"Double.hashCode()":          {fn: "ty_double_hash", recv: "void*"},
-	"Double.equals(Object)":      {fn: "ty_double_equals", recv: "void*"},
-	"Double.compareTo(Double)":   {fn: "ty_double_compare_obj", recv: "void*"},
-	"Double.compare(D,D)":        {fn: "ty_double_compare"},
-	"Double.isNaN(D)":            {fn: "ty_isnan"},
+	"Double.shortValue()":      {fn: "ty_num_short", recv: "void*"},
+	"Double.byteValue()":       {fn: "ty_num_byte", recv: "void*"},
+	"Double.floatValue()":      {fn: "ty_num_float", recv: "void*"},
+	"Double.longValue()":       {fn: "ty_num_long", recv: "void*"},
+	"Double.intValue()":        {fn: "ty_num_int", recv: "void*"},
+	"Double.doubleValue()":     {fn: "ty_num_double", recv: "void*"},
+	"Double.valueOf(D)":        {fn: "ty_box_double"},
+	"Double.valueOf(F)":        {fn: "ty_box_double"},
+	"Double.toString()":        {fn: "ty_double_tostr", recv: "void*"},
+	"Double.toString(D)":       {fn: "ty_str_of_double"},
+	"Double.hashCode()":        {fn: "ty_double_hash", recv: "void*"},
+	"Double.equals(Object)":    {fn: "ty_box_equals", recv: "void*"},
+	"Double.compareTo(Double)": {fn: "ty_double_compare_obj", recv: "void*"},
+	"Double.compare(D,D)":      {fn: "ty_double_compare"},
+	"Double.isNaN(D)":          {fn: "ty_isnan"},
+	"Double.max(D,D)":          {fn: "ty_math_max_double"},
+	"Double.min(D,D)":          {fn: "ty_math_min_double"},
 
-	"Float.shortValue()":       {fn: "ty_num_short", recv: "void*"},
-	"Float.byteValue()":        {fn: "ty_num_byte", recv: "void*"},
-	"Float.doubleValue()":      {fn: "ty_num_double", recv: "void*"},
-	"Float.longValue()":        {fn: "ty_num_long", recv: "void*"},
-	"Float.intValue()":         {fn: "ty_num_int", recv: "void*"},
-	"Float.floatValue()":       {fn: "ty_num_float", recv: "void*"},
-	"Float.valueOf(F)":         {fn: "ty_box_float"},
-	"Float.toString()":         {fn: "ty_float_tostr", recv: "void*"},
-	"Float.parseFloat(String)": {fn: "ty_str_tofloat", recv: "tystr*"},
-	"Float.hashCode()":         {fn: "ty_float_hash", recv: "void*"},
-	"Float.equals(Object)":     {fn: "ty_float_equals", recv: "void*"},
-	"Float.compareTo(Float)":   {fn: "ty_float_compare_obj", recv: "void*"},
-	"Float.compare(F,F)":       {fn: "ty_float_compare"},
+	"Float.shortValue()":     {fn: "ty_num_short", recv: "void*"},
+	"Float.byteValue()":      {fn: "ty_num_byte", recv: "void*"},
+	"Float.doubleValue()":    {fn: "ty_num_double", recv: "void*"},
+	"Float.longValue()":      {fn: "ty_num_long", recv: "void*"},
+	"Float.intValue()":       {fn: "ty_num_int", recv: "void*"},
+	"Float.floatValue()":     {fn: "ty_num_float", recv: "void*"},
+	"Float.valueOf(F)":       {fn: "ty_box_float"},
+	"Float.toString()":       {fn: "ty_float_tostr", recv: "void*"},
+	"Float.hashCode()":       {fn: "ty_float_hash", recv: "void*"},
+	"Float.equals(Object)":   {fn: "ty_box_equals", recv: "void*"},
+	"Float.compareTo(Float)": {fn: "ty_float_compare_obj", recv: "void*"},
+	"Float.compare(F,F)":     {fn: "ty_float_compare"},
+	"Float.toString(F)":      {fn: "ty_str_of_float"},
+	"Float.max(F,F)":         {fn: "ty_math_max_float"},
+	"Float.min(F,F)":         {fn: "ty_math_min_float"},
 
-	"Boolean.booleanValue()":       {fn: "ty_unbox_bool", recv: "void*"},
-	"Boolean.valueOf(Z)":           {fn: "ty_box_bool"},
-	"Boolean.toString()":           {fn: "ty_bool_tostr", recv: "void*"},
-	"Boolean.parseBoolean(String)": {fn: "ty_str_tobool", recv: "tystr*"},
-	"Boolean.hashCode()":           {fn: "ty_unbox_bool", recv: "void*"},
-	"Boolean.equals(Object)":       {fn: "ty_bool_equals", recv: "void*"},
+	"Boolean.booleanValue()": {fn: "ty_unbox_bool", recv: "void*"},
+	"Boolean.valueOf(Z)":     {fn: "ty_box_bool"},
+	"Boolean.toString()":     {fn: "ty_bool_tostr", recv: "void*"},
+	"Boolean.toString(Z)":    {fn: "ty_str_of_bool"},
+	"Boolean.hashCode()":     {fn: "ty_bool_hash_box", recv: "void*"},
+	"Boolean.equals(Object)": {fn: "ty_box_equals", recv: "void*"},
 
 	"Character.charValue()":          {fn: "ty_unbox_char", recv: "void*"},
 	"Character.valueOf(C)":           {fn: "ty_box_char"},
 	"Character.isDigit(C)":           {fn: "ty_is_digit"},
 	"Character.isLetter(C)":          {fn: "ty_is_letter"},
-	"Character.isWhitespace(C)":      {fn: "ty_is_space"},
+	"Character.isWhitespace(C)":      {fn: "ty_is_whitespace"},
 	"Character.toString()":           {fn: "ty_char_tostr", recv: "void*"},
 	"Character.hashCode()":           {fn: "ty_char_hash", recv: "void*"},
-	"Character.equals(Object)":       {fn: "ty_char_equals", recv: "void*"},
+	"Character.equals(Object)":       {fn: "ty_box_equals", recv: "void*"},
 	"Character.compareTo(Character)": {fn: "ty_char_compare_obj", recv: "void*"},
 
 	// ---- Math
@@ -235,13 +258,13 @@ var nativeTable = map[string]nativeFn{
 	"Math.min(I,I)": {fn: "ty_min_int"},
 	"Math.max(J,J)": {fn: "ty_max_long"},
 	"Math.min(J,J)": {fn: "ty_min_long"},
-	"Math.max(D,D)": {fn: "ty_max_double"},
-	"Math.min(D,D)": {fn: "ty_min_double"},
+	"Math.max(D,D)": {fn: "ty_math_max_double"},
+	"Math.min(D,D)": {fn: "ty_math_min_double"},
 	"Math.sqrt(D)":  {fn: "sqrt"},
 	"Math.pow(D,D)": {fn: "pow"},
 	"Math.floor(D)": {fn: "floor"},
 	"Math.ceil(D)":  {fn: "ceil"},
-	"Math.round(D)": {fn: "ty_round"},
+	"Math.round(D)": {fn: "ty_math_round_long"},
 	"Math.random()": {fn: "ty_random"},
 
 	// ---- System
@@ -290,7 +313,6 @@ var nativeTable = map[string]nativeFn{
 	"IO.readln()":        {fn: "ty_readln"},
 
 	// ---- StringBuilder
-	"StringBuilder.append(String)": {fn: "ty_sb_append_str", recv: "void*"},
 	"StringBuilder.append(Object)": {fn: "ty_sb_append_obj", recv: "void*"},
 	"StringBuilder.append(I)":      {fn: "ty_sb_append_int", recv: "void*"},
 	"StringBuilder.append(J)":      {fn: "ty_sb_append_long", recv: "void*"},
@@ -299,6 +321,11 @@ var nativeTable = map[string]nativeFn{
 	"StringBuilder.append(Z)":      {fn: "ty_sb_append_bool", recv: "void*"},
 	"StringBuilder.toString()":     {fn: "ty_sb_tostring", recv: "void*"},
 	"StringBuilder.length()":       {fn: "ty_sb_len", recv: "void*"},
+	// the two constructors that take an argument: codegen only special-cases
+	// `new StringBuilder()`, so these allocate through the ordinary path and
+	// the buffer has to be created by hand.
+	"StringBuilder.init(I)": {fn: "ty_sb_init", recv: "void*"},
+	"StringBuffer.init(I)":  {fn: "ty_sb_init", recv: "void*"},
 
 	// ---- Enum
 	"Enum.ordinal()":      {fn: "ty_enum_ordinal", recv: "void*"},
@@ -307,6 +334,240 @@ var nativeTable = map[string]nativeFn{
 	"Enum.hashCode()":     {fn: "ty_enum_ordinal", recv: "void*"},
 	"Enum.equals(Object)": {fn: "ty_obj_eq", recv: "void*"},
 	"Enum.compareTo(O)":   {fn: "ty_enum_compare", recv: "void*"},
+
+	// ---- the rest of java.lang
+	//
+	// Everything below completes the prelude against Java's java.lang: the
+	// float half of Math, the trig and rounding functions, the character
+	// classifiers, System's environment and property lookups, the radix and
+	// bit-twiddling surface of the wrappers, the string methods that were
+	// missing, and StringBuilder/StringBuffer. Every helper is declared in
+	// internal/runtime/src/tyrt.h, so no entry needs a proto.
+
+	"Math.abs(F)":             {fn: "ty_abs_float"},
+	"Math.max(F,F)":           {fn: "ty_math_max_float"},
+	"Math.min(F,F)":           {fn: "ty_math_min_float"},
+	"Math.round(F)":           {fn: "ty_math_round_int"},
+	"Math.cbrt(D)":            {fn: "ty_math_cbrt"},
+	"Math.exp(D)":             {fn: "exp"},
+	"Math.log(D)":             {fn: "log"},
+	"Math.log10(D)":           {fn: "log10"},
+	"Math.sin(D)":             {fn: "sin"},
+	"Math.cos(D)":             {fn: "cos"},
+	"Math.tan(D)":             {fn: "tan"},
+	"Math.asin(D)":            {fn: "asin"},
+	"Math.acos(D)":            {fn: "acos"},
+	"Math.atan(D)":            {fn: "atan"},
+	"Math.atan2(D,D)":         {fn: "atan2"},
+	"Math.hypot(D,D)":         {fn: "hypot"},
+	"Math.sinh(D)":            {fn: "sinh"},
+	"Math.cosh(D)":            {fn: "cosh"},
+	"Math.tanh(D)":            {fn: "tanh"},
+	"Math.IEEEremainder(D,D)": {fn: "remainder"},
+	"Math.copySign(D,D)":      {fn: "copysign"},
+	"Math.copySign(F,F)":      {fn: "copysignf"},
+	"Math.nextAfter(D,D)":     {fn: "nextafter"},
+	"Math.nextAfter(F,D)":     {fn: "nextafterf"},
+	"Math.fma(D,D,D)":         {fn: "fma"},
+	"Math.toRadians(D)":       {fn: "ty_math_to_radians"},
+	"Math.toDegrees(D)":       {fn: "ty_math_to_degrees"},
+	"Math.rint(D)":            {fn: "rint"},
+	"Math.signum(D)":          {fn: "ty_signum_double"},
+	"Math.signum(F)":          {fn: "ty_signum_float"},
+	"Math.floorDiv(I,I)":      {fn: "ty_math_floor_div_int"},
+	"Math.floorDiv(J,J)":      {fn: "ty_math_floor_div_long"},
+	"Math.floorMod(I,I)":      {fn: "ty_math_floor_mod_int"},
+	"Math.floorMod(J,J)":      {fn: "ty_math_floor_mod_long"},
+
+	"System.identityHashCode(Object)": {fn: "ty_identity_hash"},
+	"System.getenv(String)":           {fn: "ty_getenv", recv: "tystr*"},
+	"System.getProperty(String)":      {fn: "ty_get_property", recv: "tystr*"},
+	"System.gc()":                     {fn: "ty_gc"},
+
+	// System.in: its two methods take no arguments, so the receiver is the
+	// only thing the helpers see.
+	"InputStream.read()":   {fn: "ty_in_read", recv: "void*"},
+	"InputStream.readln()": {fn: "ty_in_readln", recv: "void*"},
+
+	// ---- Character
+	"Character.isLetterOrDigit(C)": {fn: "ty_is_letter_or_digit"},
+	"Character.isAlphabetic(C)":    {fn: "ty_is_alphabetic"},
+	"Character.isUpperCase(C)":     {fn: "ty_is_upper_case"},
+	"Character.isLowerCase(C)":     {fn: "ty_is_lower_case"},
+	"Character.toUpperCase(C)":     {fn: "ty_char_upper"},
+	"Character.toLowerCase(C)":     {fn: "ty_char_lower"},
+	"Character.getNumericValue(C)": {fn: "ty_char_numeric"},
+	"Character.digit(C,I)":         {fn: "ty_char_digit"},
+	"Character.compare(C,C)":       {fn: "ty_char_compare"},
+	"Character.toString(C)":        {fn: "ty_char_tostr_val"},
+	"Character.hashCode(C)":        {fn: "ty_char_hash_val"},
+
+	// ---- Byte / Short / Boolean
+	"Byte.toString(B)":   {fn: "ty_byte_tostr_val"},
+	"Byte.compare(B,B)":  {fn: "ty_prim_cmp_int"},
+	"Byte.hashCode(B)":   {fn: "ty_byte_hash_val"},
+	"Short.toString(S)":  {fn: "ty_short_tostr_val"},
+	"Short.compare(S,S)": {fn: "ty_prim_cmp_int"},
+	"Short.hashCode(S)":  {fn: "ty_short_hash_val"},
+	// Byte.equals and Short.equals were the two wrappers with no entry at all,
+	// which is worse than a wrong one: nativeCall returns the literal 0 for a
+	// key it does not know, so Byte.valueOf(1).equals(Byte.valueOf(1)) was
+	// compiled to `false` with nothing in the generated C to show for it.
+	"Byte.equals(Object)":  {fn: "ty_box_equals", recv: "void*"},
+	"Short.equals(Object)": {fn: "ty_box_equals", recv: "void*"},
+	"Boolean.compare(Z,Z)": {fn: "ty_bool_compare"},
+	"Boolean.hashCode(Z)":  {fn: "ty_bool_hash_val"},
+
+	// ---- Integer
+	"Integer.parsable(String,I)":       {fn: "ty_str_parsable_int", recv: "tystr*"},
+	"Integer.parseIntDigits(String,I)": {fn: "ty_str_toint_radix", recv: "tystr*"},
+	"Integer.toString(I,I)":            {fn: "ty_radix_string_int"},
+	"Integer.toUnsignedString(I,I)":    {fn: "ty_unsigned_string_int"},
+	"Integer.compareUnsigned(I,I)":     {fn: "ty_int_cmp_unsigned"},
+	"Integer.signum(I)":                {fn: "ty_int_signum"},
+	"Integer.bitCount(I)":              {fn: "ty_int_bit_count"},
+	"Integer.numberOfLeadingZeros(I)":  {fn: "ty_int_nlz"},
+	"Integer.numberOfTrailingZeros(I)": {fn: "ty_int_ntz"},
+	"Integer.highestOneBit(I)":         {fn: "ty_int_highest_one"},
+	"Integer.lowestOneBit(I)":          {fn: "ty_int_lowest_one"},
+	"Integer.reverse(I)":               {fn: "ty_int_reverse"},
+	"Integer.reverseBytes(I)":          {fn: "ty_int_reverse_bytes"},
+	"Integer.rotateLeft(I,I)":          {fn: "ty_int_rotate_left"},
+	"Integer.rotateRight(I,I)":         {fn: "ty_int_rotate_right"},
+	"Integer.hashCode(I)":              {fn: "ty_int_hash_val"},
+
+	// ---- Long
+	"Long.parsableLong(String,I)":    {fn: "ty_str_parsable_long", recv: "tystr*"},
+	"Long.parseLongDigits(String,I)": {fn: "ty_str_tolong_radix", recv: "tystr*"},
+	"Long.toString(J,I)":             {fn: "ty_radix_string_long"},
+	"Long.toUnsignedString(J,I)":     {fn: "ty_unsigned_string_long"},
+	"Long.compareUnsigned(J,J)":      {fn: "ty_long_cmp_unsigned"},
+	"Long.signum(J)":                 {fn: "ty_long_signum"},
+	"Long.bitCount(J)":               {fn: "ty_long_bit_count"},
+	"Long.numberOfLeadingZeros(J)":   {fn: "ty_long_nlz"},
+	"Long.numberOfTrailingZeros(J)":  {fn: "ty_long_ntz"},
+	"Long.highestOneBit(J)":          {fn: "ty_long_highest_one"},
+	"Long.lowestOneBit(J)":           {fn: "ty_long_lowest_one"},
+	"Long.reverse(J)":                {fn: "ty_long_reverse"},
+	"Long.reverseBytes(J)":           {fn: "ty_long_reverse_bytes"},
+	"Long.rotateLeft(J,I)":           {fn: "ty_long_rotate_left"},
+	"Long.rotateRight(J,I)":          {fn: "ty_long_rotate_right"},
+	"Long.hashCode(J)":               {fn: "ty_long_hash_val"},
+
+	// ---- Float / Double
+	"Float.parsableFloat(String)":      {fn: "ty_str_parsable_float", recv: "tystr*"},
+	"Float.parseFloatDigits(String)":   {fn: "ty_str_tofloat_val", recv: "tystr*"},
+	"Float.isNaN(F)":                   {fn: "ty_float_isnan"},
+	"Float.isInfinite(F)":              {fn: "ty_float_is_infinite"},
+	"Float.isFinite(F)":                {fn: "ty_float_is_finite"},
+	"Float.hashCode(F)":                {fn: "ty_float_bits"},
+	"Float.floatToIntBits(F)":          {fn: "ty_float_bits"},
+	"Float.floatToRawIntBits(F)":       {fn: "ty_float_raw_bits"},
+	"Float.intBitsToFloat(I)":          {fn: "ty_bits_float"},
+	"Double.parsableDouble(String)":    {fn: "ty_str_parsable_double", recv: "tystr*"},
+	"Double.parseDoubleDigits(String)": {fn: "ty_str_todouble_val", recv: "tystr*"},
+	"Double.isInfinite(D)":             {fn: "ty_double_is_infinite"},
+	"Double.isFinite(D)":               {fn: "ty_double_is_finite"},
+	"Double.hashCode(D)":               {fn: "ty_double_hash_val"},
+	"Double.doubleToLongBits(D)":       {fn: "ty_double_bits"},
+	"Double.doubleToRawLongBits(D)":    {fn: "ty_double_raw_bits"},
+	"Double.longBitsToDouble(J)":       {fn: "ty_bits_double"},
+
+	// ---- String
+	"String.isBlank()":                   {fn: "ty_str_isblank", recv: "tystr*"},
+	"String.equalsIgnoreCase(String)":    {fn: "ty_str_eq_ic", recv: "tystr*"},
+	"String.compareToIgnoreCase(String)": {fn: "ty_str_cmp_ic", recv: "tystr*"},
+	"String.startsWith(String,I)":        {fn: "ty_str_starts_from", recv: "tystr*"},
+	"String.indexOf(I)":                  {fn: "ty_str_indexof_ch", recv: "tystr*"},
+	"String.indexOf(I,I)":                {fn: "ty_str_indexof_ch_from", recv: "tystr*"},
+	"String.indexOf(String,I)":           {fn: "ty_str_indexof_from", recv: "tystr*"},
+	"String.lastIndexOf(I)":              {fn: "ty_str_lastindexof_ch", recv: "tystr*"},
+	"String.lastIndexOf(I,I)":            {fn: "ty_str_lastindexof_ch_from", recv: "tystr*"},
+	"String.lastIndexOf(String)":         {fn: "ty_str_lastindexof", recv: "tystr*"},
+	"String.lastIndexOf(String,I)":       {fn: "ty_str_lastindexof_from", recv: "tystr*"},
+	"String.repeat(I)":                   {fn: "ty_str_repeat", recv: "tystr*"},
+	"String.strip()":                     {fn: "ty_str_strip", recv: "tystr*"},
+	"String.stripLeading()":              {fn: "ty_str_strip_leading", recv: "tystr*"},
+	"String.stripTrailing()":             {fn: "ty_str_strip_trailing", recv: "tystr*"},
+	"String.toCharArray()":               {fn: "ty_str_tochararray", recv: "tystr*"},
+	"String.getBytes()":                  {fn: "ty_str_getbytes", recv: "tystr*"},
+	"String.intern()":                    {fn: "ty_str_interned", recv: "tystr*"},
+	"String.replace(String,String)":      {fn: "ty_str_replace_str", recv: "tystr*"},
+	"String.replaceAll(String,String)":   {fn: "ty_str_replaceall", recv: "tystr*"},
+	"String.replaceFirst(String,String)": {fn: "ty_str_replacefirst", recv: "tystr*"},
+	"String.matches(String)":             {fn: "ty_str_matches", recv: "tystr*"},
+	"String.split(String,I)":             {fn: "ty_str_split_limit", recv: "tystr*"},
+	"String.valueOf(A)":                  {fn: "ty_str_of_chars"},
+	"String.valueOf(A,I,I)":              {fn: "ty_str_of_chars_part"},
+	"String.formatArgs(String,A)":        {fn: "ty_str_format", recv: "tystr*"},
+
+	// ---- StringBuilder and StringBuffer: one helper set, two classes
+	"StringBuilder.appendRaw(String)":      {fn: "ty_sb_append_str", recv: "void*"},
+	"StringBuilder.append(F)":              {fn: "ty_sb_append_float", recv: "void*"},
+	"StringBuilder.append(A)":              {fn: "ty_sb_append_chars", recv: "void*"},
+	"StringBuilder.insertRaw(I,String)":    {fn: "ty_sb_insert_str", recv: "void*"},
+	"StringBuilder.insert(I,Object)":       {fn: "ty_sb_insert_obj", recv: "void*"},
+	"StringBuilder.insert(I,I)":            {fn: "ty_sb_insert_int", recv: "void*"},
+	"StringBuilder.insert(I,J)":            {fn: "ty_sb_insert_long", recv: "void*"},
+	"StringBuilder.insert(I,F)":            {fn: "ty_sb_insert_float", recv: "void*"},
+	"StringBuilder.insert(I,D)":            {fn: "ty_sb_insert_double", recv: "void*"},
+	"StringBuilder.insert(I,Z)":            {fn: "ty_sb_insert_bool", recv: "void*"},
+	"StringBuilder.insert(I,C)":            {fn: "ty_sb_insert_char", recv: "void*"},
+	"StringBuilder.insert(I,A)":            {fn: "ty_sb_insert_chars", recv: "void*"},
+	"StringBuilder.delete(I,I)":            {fn: "ty_sb_delete", recv: "void*"},
+	"StringBuilder.deleteCharAt(I)":        {fn: "ty_sb_delete_charat", recv: "void*"},
+	"StringBuilder.replaceRaw(I,I,String)": {fn: "ty_sb_replace", recv: "void*"},
+	"StringBuilder.reverse()":              {fn: "ty_sb_reverse", recv: "void*"},
+	"StringBuilder.charAt(I)":              {fn: "ty_sb_charat", recv: "void*"},
+	"StringBuilder.setCharAt(I,C)":         {fn: "ty_sb_set_charat", recv: "void*"},
+	"StringBuilder.isEmpty()":              {fn: "ty_sb_isempty", recv: "void*"},
+	"StringBuilder.capacity()":             {fn: "ty_sb_capacity", recv: "void*"},
+	"StringBuilder.ensureCapacity(I)":      {fn: "ty_sb_ensure", recv: "void*"},
+	"StringBuilder.setLength(I)":           {fn: "ty_sb_set_length", recv: "void*"},
+	"StringBuilder.substring(I)":           {fn: "ty_sb_substring", recv: "void*"},
+	"StringBuilder.substring(I,I)":         {fn: "ty_sb_substring_to", recv: "void*"},
+	"StringBuilder.indexOf(String)":        {fn: "ty_sb_indexof", recv: "void*"},
+	"StringBuilder.indexOf(String,I)":      {fn: "ty_sb_indexof_from", recv: "void*"},
+	"StringBuilder.lastIndexOf(String)":    {fn: "ty_sb_lastindexof", recv: "void*"},
+
+	"StringBuffer.appendRaw(String)": {fn: "ty_sb_append_str", recv: "void*"},
+	"StringBuffer.append(F)":         {fn: "ty_sb_append_float", recv: "void*"},
+	"StringBuffer.append(A)":         {fn: "ty_sb_append_chars", recv: "void*"},
+	// StringBuffer's own entry points: the type appeared in the table only
+	// through the mixin-shaped methods above, so a plain append or length on
+	// it reached the run-time's "no implementation" trap.
+	"StringBuffer.append(Object)":         {fn: "ty_sb_append_obj", recv: "void*"},
+	"StringBuffer.append(I)":              {fn: "ty_sb_append_int", recv: "void*"},
+	"StringBuffer.append(J)":              {fn: "ty_sb_append_long", recv: "void*"},
+	"StringBuffer.append(C)":              {fn: "ty_sb_append_char", recv: "void*"},
+	"StringBuffer.append(D)":              {fn: "ty_sb_append_double", recv: "void*"},
+	"StringBuffer.append(Z)":              {fn: "ty_sb_append_bool", recv: "void*"},
+	"StringBuffer.toString()":             {fn: "ty_sb_tostring", recv: "void*"},
+	"StringBuffer.length()":               {fn: "ty_sb_len", recv: "void*"},
+	"StringBuffer.insertRaw(I,String)":    {fn: "ty_sb_insert_str", recv: "void*"},
+	"StringBuffer.insert(I,Object)":       {fn: "ty_sb_insert_obj", recv: "void*"},
+	"StringBuffer.insert(I,I)":            {fn: "ty_sb_insert_int", recv: "void*"},
+	"StringBuffer.insert(I,J)":            {fn: "ty_sb_insert_long", recv: "void*"},
+	"StringBuffer.insert(I,F)":            {fn: "ty_sb_insert_float", recv: "void*"},
+	"StringBuffer.insert(I,D)":            {fn: "ty_sb_insert_double", recv: "void*"},
+	"StringBuffer.insert(I,Z)":            {fn: "ty_sb_insert_bool", recv: "void*"},
+	"StringBuffer.insert(I,C)":            {fn: "ty_sb_insert_char", recv: "void*"},
+	"StringBuffer.insert(I,A)":            {fn: "ty_sb_insert_chars", recv: "void*"},
+	"StringBuffer.delete(I,I)":            {fn: "ty_sb_delete", recv: "void*"},
+	"StringBuffer.deleteCharAt(I)":        {fn: "ty_sb_delete_charat", recv: "void*"},
+	"StringBuffer.replaceRaw(I,I,String)": {fn: "ty_sb_replace", recv: "void*"},
+	"StringBuffer.reverse()":              {fn: "ty_sb_reverse", recv: "void*"},
+	"StringBuffer.charAt(I)":              {fn: "ty_sb_charat", recv: "void*"},
+	"StringBuffer.setCharAt(I,C)":         {fn: "ty_sb_set_charat", recv: "void*"},
+	"StringBuffer.isEmpty()":              {fn: "ty_sb_isempty", recv: "void*"},
+	"StringBuffer.capacity()":             {fn: "ty_sb_capacity", recv: "void*"},
+	"StringBuffer.ensureCapacity(I)":      {fn: "ty_sb_ensure", recv: "void*"},
+	"StringBuffer.setLength(I)":           {fn: "ty_sb_set_length", recv: "void*"},
+	"StringBuffer.substring(I)":           {fn: "ty_sb_substring", recv: "void*"},
+	"StringBuffer.substring(I,I)":         {fn: "ty_sb_substring_to", recv: "void*"},
+	"StringBuffer.indexOf(String)":        {fn: "ty_sb_indexof", recv: "void*"},
+	"StringBuffer.indexOf(String,I)":      {fn: "ty_sb_indexof_from", recv: "void*"},
+	"StringBuffer.lastIndexOf(String)":    {fn: "ty_sb_lastindexof", recv: "void*"},
 }
 
 // nativeCall renders a call to a prelude native method.
@@ -348,6 +609,9 @@ func (e *Emitter) nativeCall(m *ast.Method, recv string, args []ast.Expr) string
 		}
 		parts = append(parts, vals...)
 		call = nf.fn + "(" + strings.Join(parts, ", ") + ")"
+		if nf.proto != "" {
+			call = "({ extern " + nf.proto + "; " + call + "; })"
+		}
 	}
 	if e.isRef(m.Result) {
 		return "(" + e.ctype(m.Result) + ")" + call

@@ -1,0 +1,60 @@
+// java.time: dates, times, instants and durations.
+//
+// The calendar arithmetic is done on the epoch day, which is the one
+// representation where month lengths, leap years and days of the week fall out
+// of arithmetic instead of tables. The formatting is where the details live:
+// LocalTime pads its fraction to three, six or nine digits, Duration trims its
+// trailing zeros, and a duration counts hours rather than days -- three rules
+// that look arbitrary until you compare them against the JDK, which is what
+// this test's expectation file is.
+//
+// now() reads the system clock as UTC: there is no zone database here.
+
+class Main {
+  public static void main(String[] args) {
+    LocalDate d = LocalDate.of(2026, 9, 14)
+    System.out.println(d)
+    System.out.println(d.getDayOfWeek())
+    System.out.println(d.getMonth())
+    System.out.println(d.getYear() + " " + d.getMonthValue() + " " + d.getDayOfMonth())
+    System.out.println(d.plusDays(20))
+    System.out.println(d.minusDays(300))
+    System.out.println(d.plusMonths(5))
+    System.out.println(d.plusYears(1))
+    System.out.println(d.isLeapYear())
+    System.out.println(LocalDate.of(2024, 2, 29))
+    System.out.println(LocalDate.of(2024, 1, 31).plusMonths(1))
+    System.out.println(LocalDate.ofEpochDay(0))
+    System.out.println(d.toEpochDay())
+    System.out.println(d.lengthOfMonth())
+    System.out.println(DayOfWeek.of(1) + " " + Month.of(12))
+
+    LocalTime t = LocalTime.of(12, 30)
+    System.out.println(t)
+    System.out.println(LocalTime.of(12, 30, 5))
+    System.out.println(LocalTime.of(23, 59, 59).plusSeconds(2))
+    System.out.println(LocalTime.of(1, 2, 3, 500000000))
+    System.out.println(LocalTime.of(1, 2, 3, 5000000))
+    System.out.println(LocalTime.of(1, 2, 3, 5))
+
+    System.out.println(LocalDateTime.of(2026, 9, 14, 12, 30, 5))
+    System.out.println(LocalDateTime.of(2026, 9, 14, 12, 30).plusHours(1))
+
+    System.out.println(Instant.ofEpochMilli(1757833096123L))
+    System.out.println(Instant.ofEpochSecond(0))
+
+    System.out.println(Duration.ofMinutes(90))
+    System.out.println(Duration.ofSeconds(0))
+    System.out.println(Duration.ofMillis(1500))
+    System.out.println(Duration.ofMillis(1))
+    System.out.println(Duration.ofDays(2).plus(Duration.ofHours(3)))
+    System.out.println(Duration.ofMillis(-1500))
+
+    System.out.println(Period.between(LocalDate.of(2020, 1, 15), LocalDate.of(2026, 9, 14)))
+
+    // comparisons, which is what the Comparable implementation is for
+    System.out.println(LocalDate.of(2020, 1, 1).isBefore(LocalDate.of(2021, 1, 1)))
+    System.out.println(LocalDate.of(2020, 1, 1).isAfter(LocalDate.of(2021, 1, 1)))
+    System.out.println(LocalDate.of(2020, 1, 1).equals(LocalDate.of(2020, 1, 1)))
+  }
+}

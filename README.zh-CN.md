@@ -288,28 +288,54 @@ JEP 395 record、JEP 394 `instanceof` 模式、JEP 409 sealed 类（`sealed`／`
 
 ## 标准库
 
-标准库以 **Teyru 本身**编写（`lib/*.teyru`），每次编译都与用户程序
-一起被编译与检查：
+标准库以 **Teyru 本身**编写（`lib/*.teyru`），每次编译都和使用者程序一起被编译与
+检查。包名沿用 Java 的写法，所以 `import java.util.List` 原样可用：
 
-`Object`、`String`、`StringBuilder`、`Math`、`System`、`PrintStream`、
-`Iterable`／`Iterator`、`Comparable`、`AutoCloseable`、`Cloneable`、`Enum`、`Record`、
-八种原生包装类（`Byte`／`Short`／`Integer`／`Long`／`Float`／`Double`／`Character`／`Boolean`）与它们的父类 `Number`、
-集合（`List`／`ArrayList`／`Map`／`HashMap`），以及 `Throwable` 家族（`Exception`、`RuntimeException`、`NullPointerException`、
-`ArrayIndexOutOfBoundsException`、`ArithmeticException`、`ClassCastException`、
-`IllegalArgumentException`、`IllegalStateException`、`IndexOutOfBoundsException`、
-`NoSuchElementException`、`NegativeArraySizeException`、`AssertionError`、
-`UnsupportedOperationException`）。
+| 包 | 内容 |
+|---|---|
+| `java.lang` | `Object`、`Class`、`String`（`format`／`join`／`valueOf` 等）、`StringBuilder`、`Math`、`System`、`PrintStream`、八个包装类和 `Number`、`Throwable` 家族、`Enum`、`Record` |
+| `java.util` | `List`／`ArrayList`／`LinkedList`、`Set`／`HashSet`／`LinkedHashSet`／`TreeSet`、`Map`／`HashMap`／`LinkedHashMap`／`TreeMap`、`Deque`／`ArrayDeque`、`Arrays`、`Collections`、`Objects`、`Optional`、`StringJoiner` |
+| `java.time` | `LocalDate`／`LocalTime`／`LocalDateTime`／`Instant`／`Duration`／`Period` |
+| `java.io` | `File`、`Path`／`Paths`、`Files` |
+| `java.util.regex` | `Pattern`／`Matcher` |
+| `java.net` | `ServerSocket`、`Socket` 及其输入输出流 |
+| `com.google.gson` | Gson 的树状 API，以及由编译器生成的对象绑定（[docs/json.md](docs/json.md)） |
+| 框架 | Spring 形状的容器与 web 层（[docs/framework.md](docs/framework.md)） |
 
-`ArrayList` 实现 `Iterable`，所以 `for (String s : names)` 与 Java 写法一致。
-没有 `printf`、没有文件 I/O——这些仍是刻意的范围限制。
+集合以 Teyru 编写，所以 `for` 循环直接支持：
 
-需要自己的原生库时，声明 `native` 方法并用 C 实现，完整说明见
-[`docs/native.md`](docs/native.md)：
+```teyru
+List<String> names = new ArrayList<String>()
+names.add("ada")
+for (String n : names) {
+  System.out.println(n)
+}
+```
+
+依赖用 `teyru.mod` 声明，获取与校验照 Go 的做法（[docs/modules.md](docs/modules.md)）：
 
 ```sh
-teyru build --native-header native.h program.teyru   # 生成要实现的声明
+teyru mod init example.com/app
+teyru get example.com/greeting@v0.1.0
+teyru build ./...
+```
+
+没有反射、没有线程、没有 `Stream`、没有 `BigDecimal`、没有时区数据库——这些缺席都是刻意的，理由记在
+[docs/language.md](docs/language.md) §11 与 §13。
+
+需要自己的原生库时，声明 `native` 方法并用 C 实现：
+
+```teyru
+class Native {
+  public static native int add(int a, int b)
+}
+```
+```sh
+teyru build --native-header native.h program.teyru   # 生成要实现的原型
 teyru build --native impl.c program.teyru            # 一起编译
 ```
+
+完整说明见 [`docs/native.md`](docs/native.md)。
 
 ---
 

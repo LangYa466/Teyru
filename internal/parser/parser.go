@@ -197,16 +197,31 @@ func (p *parser) parseFile() *ast.File {
 		if p.accept("static") {
 			imp.Static = true
 		}
-		var parts []string
-		parts = append(parts, p.ident())
-		for p.accept(".") {
-			if p.accept("*") {
-				imp.Star = true
-				break
+		// An import path is a dotted name (java.util.List) or a module path
+		// (example.com/dep/pkg): both spellings name the same thing to the
+		// resolver, so a slash is read as another separator and the two join
+		// the same way. A segment may carry a dash, which module paths use
+		// (example.com/my-module/pkg) and an identifier cannot.
+		var b strings.Builder
+		b.WriteString(p.ident())
+		for {
+			if p.accept(".") {
+				if p.accept("*") {
+					imp.Star = true
+					break
+				}
+				b.WriteByte('.')
+				b.WriteString(p.pathSegment())
+				continue
 			}
-			parts = append(parts, p.ident())
+			if p.accept("/") {
+				b.WriteByte('.')
+				b.WriteString(p.pathSegment())
+				continue
+			}
+			break
 		}
-		imp.Path = strings.Join(parts, ".")
+		imp.Path = b.String()
 		file.Imports = append(file.Imports, imp)
 		p.terminator()
 	}
@@ -978,6 +993,17 @@ func (p *parser) parseStatement() ast.Stmt {
 	x := p.parseExpr()
 	p.terminator()
 	return &ast.ExprStmt{Pos: pos, X: x}
+}
+
+// pathSegment reads one segment of an import path: an identifier, optionally
+// with dashes in it.
+func (p *parser) pathSegment() string {
+	s := p.ident()
+	for p.is("-") {
+		p.next()
+		s += "-" + p.ident()
+	}
+	return s
 }
 
 func (p *parser) isLocalClassAhead() bool {

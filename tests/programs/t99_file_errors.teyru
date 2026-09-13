@@ -1,0 +1,134 @@
+// Failures, as exceptions, and the line splitter's edge cases.
+//
+// A file layer that returned sentinels would put the decision at every call
+// site; this one raises, and the class of the exception is the answer to "what
+// went wrong". The two that callers branch on are apart in the hierarchy --
+// NoSuchFileException extends IOException -- so the catch order below is the
+// one a real program has to use, and it is checked here rather than assumed.
+
+class Main {
+  public static void main(String[] args) {
+    Path dir = Files.createTempDirectory("teyru-t99e")
+    Path missing = dir.resolve("not-there.txt")
+
+    // The question exists() answers without raising, and the one kindOf
+    // answers with a code, so a caller can pick.
+    System.out.println("exists: " + Files.exists(missing))
+    System.out.println("kind none: " + (new File(missing.toString()).kindOf() == Fs.TY_FILE_NONE))
+    System.out.println("length of missing: " + new File(missing.toString()).length())
+    System.out.println("list of missing: " + (new File(missing.toString()).list() == null))
+
+    try {
+      Files.readString(missing)
+      System.out.println("read: NOT RAISED")
+    } catch (NoSuchFileException e) {
+      System.out.println("read: " + (e.getMessage().contains("no such file")))
+    }
+
+    try {
+      Files.delete(missing)
+      System.out.println("delete: NOT RAISED")
+    } catch (NoSuchFileException e) {
+      System.out.println("delete: " + (e.getMessage().contains("no such file")))
+    }
+
+    // A missing directory in the middle of the path is the e-b-n-o case that
+    // is not a missing file: nothing is there, but the caller asked to write.
+    try {
+      Files.writeString(dir.resolve("no").resolve("such").resolve("dir.txt"), "x")
+      System.out.println("write: NOT RAISED")
+    } catch (IOException e) {
+      System.out.println("write: " + (e.getMessage().contains("cannot write")))
+    }
+
+    // The catch order a caller needs: the specific one first, or the general
+    // one swallows it. Both lines have to print, which is the whole point of
+    // NoSuchFileException being a subclass rather than a sibling.
+    try {
+      Files.readString(missing)
+    } catch (NoSuchFileException e) {
+      System.out.println("specific first: " + true)
+    } catch (IOException e) {
+      System.out.println("specific first: " + false)
+    }
+
+    try {
+      Files.readString(missing)
+    } catch (IOException e) {
+      // Caught as the parent it is, so a program that only wants "any I/O
+      // problem" does not have to enumerate.
+      System.out.println("caught as IOException: " + (e instanceof IOException))
+    }
+
+    // A directory is not a file: reading one is a failure, and it is not the
+    // absent-file one, so it must not come back as NoSuchFileException.
+    try {
+      Files.readString(dir)
+      System.out.println("read dir: NOT RAISED")
+    } catch (NoSuchFileException e) {
+      System.out.println("read dir: wrong class")
+    } catch (IOException e) {
+      System.out.println("read dir: " + (e.getMessage().contains("cannot")))
+    }
+
+    // ---- readAllLines, all three terminators ----
+
+    Path f = dir.resolve("lines.txt")
+
+    Files.writeString(f, "a\nb\nc\n")
+    String[] l1 = Files.readAllLines(f)
+    System.out.println("lf: " + l1.length + " " + l1[2])
+
+    // A file with no terminator at the end still has a last line. This is the
+    // case a splitter that counts newlines gets wrong by one.
+    Files.writeString(f, "a\nb\nc")
+    String[] l2 = Files.readAllLines(f)
+    System.out.println("no trailing: " + l2.length + " " + l2[2])
+
+    // CRLF, and a lone CR as its own terminator: "\r\n" must be one break and
+    // not two, or a file written on Windows comes back with empty lines in it.
+    Files.writeString(f, "a\r\nb\r\nc\r\n")
+    String[] l3 = Files.readAllLines(f)
+    System.out.println("crlf: " + l3.length + " " + l3[1] + " " + l3[2].length())
+
+    Files.writeString(f, "a\rb\rc\r")
+    String[] l4 = Files.readAllLines(f)
+    System.out.println("cr: " + l4.length + " " + l4[1])
+
+    // An empty file has no lines, and a file of one terminator has one empty
+    // line -- which is one line, not zero and not two.
+    Files.writeString(f, "")
+    System.out.println("empty: " + Files.readAllLines(f).length)
+    Files.writeString(f, "\n")
+    String[] l5 = Files.readAllLines(f)
+    System.out.println("one terminator: " + l5.length + " empty: " + (l5[0].length() == 0))
+    Files.writeString(f, "\r\n\r\n")
+    System.out.println("two crlf: " + Files.readAllLines(f).length)
+
+    // Mixed terminators in one file, which is what a merge of two machines
+    // produces, and the byte before a "\r\n" that is not a terminator at all.
+    Files.writeString(f, "a\r\nb\nc\rd\n")
+    String[] l6 = Files.readAllLines(f)
+    System.out.println("mixed: " + l6.length + " " + l6[0] + l6[1] + l6[2] + l6[3])
+    Files.writeString(f, "a\r\rb\n")
+    String[] l7 = Files.readAllLines(f)
+    System.out.println("double cr: " + l7.length + " " + (l7[1].length() == 0))
+
+    // Non-ASCII, so the byte count and the character count are different: the
+    // reader must not treat a size in bytes as a length in characters.
+    Files.writeString(f, "héllo\nwörld\n")
+    String[] l8 = Files.readAllLines(f)
+    System.out.println("utf8 lines: " + l8.length + " " + l8[0].equals("héllo"))
+    System.out.println("utf8 size: " + Files.size(f))
+
+    // Rewriting a file replaces it: the append flag is what decides, and the
+    // default is not to append.
+    Files.writeString(f, "short\n")
+    Files.writeString(f, "short\n")
+    System.out.println("overwrite: " + Files.readString(f).equals("short\n"))
+
+    Files.delete(f)
+    Files.delete(dir)
+    System.out.println("cleaned: " + !Files.exists(dir))
+  }
+}

@@ -1,0 +1,716 @@
+package teyru
+
+// Files, shaped like java.io.File and java.nio.file.
+//
+// The C half lives in internal/runtime/src/tyrt_net.c, next to the sockets: a
+// descriptor is a descriptor, and the two layers share the write loop that a
+// short write makes necessary. What they do not share is a convention for
+// failure, because a file call fails in a way a socket call does not: "the path
+// is not there" is an answer, not an error, and half of java.io is built out of
+// asking that question. So the file helpers answer with a small integer whose
+// sign is the outcome -- TY_FILE_NONE for a path that is not there, TY_FILE_REG,
+// TY_FILE_DIR or TY_FILE_OTHER for one that is, and a negative errno only when
+// the question cannot be answered at all -- and everything in this file turns
+// the negative case into an exception.
+//
+// Nothing here runs a shell. Every path is passed to open, stat, opendir or
+// unlink as bytes, so a file name with a space, a quoting character or a
+// semicolon in it is a file name and never a command. That is the difference
+// between a language that can be handed a path and one that can be attacked
+// through it, and it costs nothing.
+//
+// The natives below follow the same rule as lib/15_net.teyru's, and for the same
+// reason: each carries a body that throws, because the compiler generates a body
+// for a `native` method of a prelude class that calls the C helper without the
+// prototype the call sites carry. The long explanation is at the top of
+// lib/15_net.teyru; the short one is that these bodies never run, and that one
+// that throws is worth more than one that returns a plausible zero.
+
+class NoSuchFileException extends IOException {
+  public NoSuchFileException() {
+  }
+  public NoSuchFileException(String message) {
+    super(message)
+  }
+}
+
+// ---------------------------------------------------------------- the C surface
+
+final class Fs {
+  /* What a path names, matching the four constants in tyrt_net.c. TY_FILE_NONE
+     is 0 because "not there" is an answer; a failure is negative, and every
+     caller below has to check the sign before it compares against these. */
+  public static final int TY_FILE_NONE = 0
+  public static final int TY_FILE_REG = 1
+  public static final int TY_FILE_DIR = 2
+  public static final int TY_FILE_OTHER = 3
+
+  // TY_FILE_NONE (0) for a path that is not there, 1, 2 or 3 for one that is,
+  // and a negative code only when the question cannot be answered.
+  public static int kind0(String path) {
+    throw new IllegalStateException("Fs.kind0 is implemented in C")
+  }
+  public static long size0(String path) {
+    throw new IllegalStateException("Fs.size0 is implemented in C")
+  }
+  public static int delete0(String path) {
+    throw new IllegalStateException("Fs.delete0 is implemented in C")
+  }
+  public static int mkdirs0(String path) {
+    throw new IllegalStateException("Fs.mkdirs0 is implemented in C")
+  }
+  // The names of a directory's entries, sorted, or null with the reason in
+  // err[0]: an object cannot be returned through an out-parameter, so the
+  // reason comes back in an array the caller made.
+  public static String[] list0(String path, int[] err) {
+    throw new IllegalStateException("Fs.list0 is implemented in C")
+  }
+  public static byte[] readBytes0(String path, int[] err) {
+    throw new IllegalStateException("Fs.readBytes0 is implemented in C")
+  }
+  public static int writeBytes0(String path, byte[] b, int off, int len, boolean append) {
+    throw new IllegalStateException("Fs.writeBytes0 is implemented in C")
+  }
+  public static int writeStr0(String path, String s, boolean append) {
+    throw new IllegalStateException("Fs.writeStr0 is implemented in C")
+  }
+  public static String tempDir0(String prefix) {
+    throw new IllegalStateException("Fs.tempDir0 is implemented in C")
+  }
+
+  // ---- what everything above is wrapped in ----
+
+  // The kind of a path, with "cannot be answered" turned into an exception.
+  // Every caller that wants the answer as a kind rather than as a yes/no goes
+  // through here, so the errno has exactly one place to become a message.
+  public static int kind(String path) {
+    int k = kind0(path)
+    if (k < 0) {
+      throw new IOException("cannot stat " + path + ": " + Net.strerror(k))
+    }
+    return k
+  }
+
+  // The reason a call that returned null had, as an exception. The array is
+  // always written before null is returned, so a null return and an unset
+  // element cannot both happen.
+  public static IOException failure(String what, int[] err) {
+    return new IOException(what + ": " + Net.strerror(err[0]))
+  }
+
+  // A path that is there, whatever kind of thing it is: a regular file, a
+  // directory, a fifo or a device node. One call, because the answer is the
+  // sign of the one code and asking three times would be three syscalls.
+  public static boolean exists(String path) {
+    return kind0(path) > 0
+  }
+
+  // ---- the error messages ----
+
+  // ENOENT, as a check. ty_file_kind already answers "not there" without an
+  // exception, so this exists for the paths that fail later than the stat --
+  // an open that lost a race with an unlink, mostly.
+  public static boolean missing(String path) {
+    return kind0(path) == TY_FILE_NONE
+  }
+}
+
+// ---------------------------------------------------------------- File
+
+// One path, and the questions java.io.File asks about it. It is a value, not a
+// handle: the path is a string and nothing is opened until one of these methods
+// is called, which is what lets a File be built, passed around and compared
+// without a descriptor behind it.
+class File extends Object implements Comparable<File> {
+  // Java's File.separator is the platform's, and every path in this file is
+  // built by joining with it. It is a field rather than a call because a
+  // separator cannot change while the program runs.
+  public static final String separator = "/"
+
+  private String path
+
+  public File(String path) {
+    if (path == null) {
+      throw new NullPointerException("path")
+    }
+    this.path = path
+  }
+
+  // Java's two-argument constructor: the child, joined to the parent unless the
+  // child is already absolute.
+  public File(String parent, String child) {
+    if (parent == null) {
+      throw new NullPointerException("parent")
+    }
+    if (child == null) {
+      throw new NullPointerException("child")
+    }
+    if (isAbsolutePath(child) || parent.length() == 0) {
+      this.path = child
+    } else if (parent.endsWith(separator)) {
+      this.path = parent + child
+    } else {
+      this.path = parent + separator + child
+    }
+  }
+
+  public File(File parent, String child) {
+    this(parent.getPath(), child)
+  }
+
+  public String getPath() {
+    return path
+  }
+
+  public String getName() {
+    String p = stripTrailing()
+    if (p.equals(separator)) {
+      return separator
+    }
+    int i = p.lastIndexOf(47)
+    if (i < 0) {
+      return p
+    }
+    return p.substring(i + 1)
+  }
+
+  // The parent path, or null at the top: null and not "" because "" is a path
+  // this class would happily hand back to the filesystem, and the filesystem
+  // would read it as "the current directory".
+  public String getParent() {
+    String p = stripTrailing()
+    if (p.equals(separator)) {
+      return null
+    }
+    int i = p.lastIndexOf(47)
+    if (i < 0) {
+      return null
+    }
+    if (i == 0) {
+      return separator
+    }
+    return p.substring(0, i)
+  }
+
+  public File getParentFile() {
+    String p = getParent()
+    if (p == null) {
+      return null
+    }
+    return new File(p)
+  }
+
+  public boolean isAbsolute() {
+    return isAbsolutePath(path)
+  }
+
+  // The path made absolute against the directory the process started in.
+  // Dots are not resolved and symlinks are not followed, so this is the path a
+  // caller can hand to another program and not the canonical one; Java's
+  // getCanonicalPath is the one that walks the filesystem and this is not it.
+  public String getAbsolutePath() {
+    if (isAbsolutePath(path)) {
+      return path
+    }
+    String dir = System.getProperty("user.dir")
+    if (dir == null || dir.length() == 0) {
+      return path
+    }
+    if (dir.endsWith(separator)) {
+      return dir + path
+    }
+    return dir + separator + path
+  }
+
+  public File getAbsoluteFile() {
+    return new File(getAbsolutePath())
+  }
+
+  public boolean exists() {
+    // A path whose parent cannot be searched answers "no" rather than raising,
+    // which is what java.io.File.exists does and what makes it usable in a
+    // condition. The distinction it costs is between "not there" and "cannot
+    // tell", and every caller that needs it asks kindOf instead.
+    return Fs.kind0(path) > 0
+  }
+
+  public boolean isFile() {
+    return Fs.kind0(path) == Fs.TY_FILE_REG
+  }
+
+  public boolean isDirectory() {
+    return Fs.kind0(path) == Fs.TY_FILE_DIR
+  }
+
+  // The kind of this path, with the errno raised as an exception: the version
+  // of exists() for a caller that has to tell a permission problem from an
+  // absent file.
+  public int kindOf() {
+    return Fs.kind(path)
+  }
+
+  // The size in bytes, or 0 when the question has no answer -- a directory, a
+  // socket node, a file that is not there. Zero is what Java answers, and it is
+  // why length() is not the way to ask whether a file exists.
+  public long length() {
+    long n = Fs.size0(path)
+    if (n < 0) {
+      return 0
+    }
+    return n
+  }
+
+  public boolean delete() {
+    return Fs.delete0(path) == 0
+  }
+
+  public boolean mkdirs() {
+    return Fs.mkdirs0(path) == 0
+  }
+
+  // The names of the entries, sorted, or null when the path is not a directory
+  // or cannot be read -- Java's contract, and the reason this is separate from
+  // list() below: a caller that wants a reason wants listEntries, not a null.
+  public String[] list() {
+    int[] err = new int[1]
+    return Fs.list0(path, err)
+  }
+
+  public File[] listFiles() {
+    String[] names = list()
+    if (names == null) {
+      return null
+    }
+    File[] out = new File[names.length]
+    for (int i = 0 : i < names.length : i++) {
+      out[i] = new File(join(path, names[i]))
+    }
+    return out
+  }
+
+  // The listing with the failure raised rather than swallowed. The difference
+  // between this and list() is the difference between "there is nothing there"
+  // and "there is nothing there I am allowed to see", and a program that scans
+  // a directory usually needs to know which one it got.
+  public String[] listEntries() {
+    int[] err = new int[1]
+    String[] names = Fs.list0(path, err)
+    if (names == null) {
+      throw Fs.failure("cannot list " + path, err)
+    }
+    return names
+  }
+
+  public Path toPath() {
+    return Path.of(path)
+  }
+
+  // A path built the one way this class builds them, so that listFiles and the
+  // two-argument constructor agree with each other.
+  public static String join(String dir, String name) {
+    if (dir.length() == 0) {
+      return name
+    }
+    if (dir.endsWith(separator)) {
+      return dir + name
+    }
+    return dir + separator + name
+  }
+
+  public static boolean isAbsolutePath(String p) {
+    return p.length() > 0 && p.charAt(0) == 47
+  }
+
+  // The path without its trailing separators, except that the root keeps its
+  // one. Nothing else is normalized: "a//b" and "a/./b" are left as the caller
+  // wrote them, because deciding they mean the same thing is a filesystem
+  // question and this class never asks it.
+  private String stripTrailing() {
+    String p = path
+    while (p.length() > 1 && p.endsWith(separator)) {
+      p = p.substring(0, p.length() - 1)
+    }
+    return p
+  }
+
+  public int compareTo(File o) {
+    return path.compareTo(o.getPath())
+  }
+
+  public boolean equals(Object o) {
+    if (!(o instanceof File)) {
+      return false
+    }
+    return path.equals(((File) o).getPath())
+  }
+
+  public int hashCode() {
+    return path.hashCode()
+  }
+
+  public String toString() {
+    return path
+  }
+}
+
+// ---------------------------------------------------------------- Path
+
+// java.nio.file.Path, which in Java is an interface with one implementation
+// behind a factory. The interface is not reproduced: there is nothing here that
+// a second implementation would be, so a final class with a factory is the same
+// shape with one less layer.
+final class Path extends Object implements Comparable<Path> {
+  private String p
+
+  private Path(String p) {
+    this.p = p
+  }
+
+  // Java 11's Path.of, which is Paths.get under another name.
+  public static Path of(String first) {
+    if (first == null) {
+      throw new NullPointerException("path")
+    }
+    return new Path(first)
+  }
+
+  // A later element that is absolute replaces everything before it, which is
+  // what UnixPath.resolve does and the only way to write a path builder that
+  // cannot be talked into escaping the directory it was given.
+  public static Path of(String first, String... more) {
+    if (first == null) {
+      throw new NullPointerException("path")
+    }
+    String p = first
+    for (int i = 0 : i < more.length : i++) {
+      String part = more[i]
+      if (part == null) {
+        throw new NullPointerException("path element")
+      }
+      if (File.isAbsolutePath(part)) {
+        p = part
+        continue
+      }
+      p = File.join(p, part)
+    }
+    return new Path(p)
+  }
+
+  public Path resolve(String other) {
+    if (File.isAbsolutePath(other)) {
+      return new Path(other)
+    }
+    return new Path(File.join(p, other))
+  }
+
+  public Path resolve(Path other) {
+    return resolve(other.toString())
+  }
+
+  public Path getFileName() {
+    String n = toFile().getName()
+    return new Path(n)
+  }
+
+  public Path getParent() {
+    String n = toFile().getParent()
+    if (n == null) {
+      return null
+    }
+    return new Path(n)
+  }
+
+  public boolean isAbsolute() {
+    return File.isAbsolutePath(p)
+  }
+
+  public File toFile() {
+    return new File(p)
+  }
+
+  public Path toAbsolutePath() {
+    return new Path(toFile().getAbsolutePath())
+  }
+
+  public int compareTo(Path o) {
+    return p.compareTo(o.toString())
+  }
+
+  public boolean equals(Object o) {
+    if (!(o instanceof Path)) {
+      return false
+    }
+    return p.equals(((Path) o).toString())
+  }
+
+  public int hashCode() {
+    return p.hashCode()
+  }
+
+  public String toString() {
+    return p
+  }
+}
+
+final class Paths {
+  public static Path get(String first, String... more) {
+    return Path.of(first, more)
+  }
+
+  public static Path get(String first) {
+    return Path.of(first)
+  }
+}
+
+// ---------------------------------------------------------------- Files
+
+// The static helpers of java.nio.file.Files, cut down to the ones a program
+// that reads and writes text needs. Every one of them raises on failure: this
+// class is the side of the layer that has decided a missing file is an error,
+// which is why it exists next to File rather than inside it.
+final class Files {
+  public static boolean exists(Path p) {
+    return exists(p.toString())
+  }
+
+  public static boolean exists(String p) {
+    return Fs.kind0(p) > 0
+  }
+
+  public static boolean isDirectory(Path p) {
+    return Fs.kind0(p.toString()) == Fs.TY_FILE_DIR
+  }
+
+  public static boolean isDirectory(String p) {
+    return Fs.kind0(p) == Fs.TY_FILE_DIR
+  }
+
+  public static boolean isRegularFile(String p) {
+    return Fs.kind0(p) == Fs.TY_FILE_REG
+  }
+
+  public static long size(Path p) {
+    return size(p.toString())
+  }
+
+  public static long size(String p) {
+    long n = Fs.size0(p)
+    if (n < 0) {
+      // The cast is only for the message: a size is a long and a status code
+      // is an int, and the code is what strerror knows how to read.
+      throw new IOException("cannot stat " + p + ": " + Net.strerror((int) n))
+    }
+    return n
+  }
+
+  public static byte[] readAllBytes(Path p) {
+    return readAllBytes(p.toString())
+  }
+
+  // The whole file, read to the end of it rather than to the size a stat
+  // reports: a file that grows while it is being read is read as it is, and a
+  // file under /proc that reports a size of 0 still comes back whole.
+  public static byte[] readAllBytes(String p) {
+    int[] err = new int[1]
+    byte[] b = Fs.readBytes0(p, err)
+    if (b == null) {
+      // The second stat is on the failure path only, and it is what tells a
+      // caller that the file is not there from the fact that it is not
+      // readable: java.nio.file.Files reports the first as NoSuchFileException
+      // and a program that catches it is asking exactly that question.
+      if (Fs.missing(p)) {
+        throw new NoSuchFileException("no such file: " + p)
+      }
+      throw Fs.failure("cannot read " + p, err)
+    }
+    return b
+  }
+
+  public static String readString(Path p) {
+    return readString(p.toString())
+  }
+
+  public static String readString(String p) {
+    byte[] b = readAllBytes(p)
+    return Net.stringFrom(b, 0, b.length)
+  }
+
+  public static void writeString(Path p, String text) {
+    writeString(p.toString(), text)
+  }
+
+  public static void writeString(String p, String text) {
+    writeString(p, text, false)
+  }
+
+  public static void writeString(Path p, String text, boolean append) {
+    writeString(p.toString(), text, append)
+  }
+
+  // Written through the same loop the sockets use, so a write that the kernel
+  // accepts in part is finished rather than silently truncated, and the file is
+  // closed before this returns -- a caller that writes and then reads the same
+  // path sees its own bytes.
+  public static void writeString(String p, String text, boolean append) {
+    if (text == null) {
+      throw new NullPointerException("text")
+    }
+    int n = Fs.writeStr0(p, text, append)
+    if (n < 0) {
+      throw new IOException("cannot write " + p + ": " + Net.strerror(n))
+    }
+  }
+
+  public static void write(Path p, byte[] b) {
+    write(p.toString(), b, 0, b.length)
+  }
+
+  public static void write(Path p, byte[] b, int off, int len) {
+    write(p.toString(), b, off, len)
+  }
+
+  public static void write(String p, byte[] b, int off, int len) {
+    int n = Fs.writeBytes0(p, b, off, len, false)
+    if (n < 0) {
+      throw new IOException("cannot write " + p + ": " + Net.strerror(n))
+    }
+  }
+
+  public static void append(String p, byte[] b, int off, int len) {
+    int n = Fs.writeBytes0(p, b, off, len, true)
+    if (n < 0) {
+      throw new IOException("cannot append to " + p + ": " + Net.strerror(n))
+    }
+  }
+
+  public static void append(Path p, byte[] b, int off, int len) {
+    append(p.toString(), b, off, len)
+  }
+
+  // The lines of the file, without their terminators. An array rather than
+  // Java's List<String>: the C side already returns an array and the caller can
+  // copy it into a List in one call, where the other way round would mean this
+  // layer depending on a collection class to answer a question about bytes.
+  //
+  // The last line is a line even when the file does not end with a newline, and
+  // a "\r\n" and a lone "\r" are terminators too, which is what makes this work
+  // on a file written on any of the three platforms.
+  public static String[] readAllLines(Path p) {
+    return readAllLines(p.toString())
+  }
+
+  public static String[] readAllLines(String p) {
+    String text = readString(p)
+    int n = text.length()
+    String[] out = new String[countLines(text)]
+    int at = 0
+    int line = 0
+    while (at < n) {
+      int end = at
+      while (end < n && text.charAt(end) != 10 && text.charAt(end) != 13) {
+        end++
+      }
+      out[line] = text.substring(at, end)
+      line++
+      at = skipTerminator(text, end)
+    }
+    return out
+  }
+
+  /* The two walks have to agree: the count sizes the array and the split fills
+     it, so both step over a terminator the same way or one of them writes past
+     the end. A "
+" is one terminator and not two empty lines. */
+  private static int skipTerminator(String text, int at) {
+    int n = text.length()
+    if (at >= n) {
+      return at
+    }
+    if (text.charAt(at) == 13) {
+      at++
+      if (at < n && text.charAt(at) == 10) {
+        at++
+      }
+      return at
+    }
+    return at + 1
+  }
+
+  private static int countLines(String text) {
+    int n = text.length()
+    int count = 0
+    int at = 0
+    while (at < n) {
+      int end = at
+      while (end < n && text.charAt(end) != 10 && text.charAt(end) != 13) {
+        end++
+      }
+      count++
+      at = skipTerminator(text, end)
+    }
+    return count
+  }
+
+  // Every missing directory in the path, created. A path that is already a
+  // directory is not an error, as in Java: the call means "make sure this is
+  // there", and a caller that had to check first would be racing every other
+  // process that might create it.
+  public static void createDirectories(Path p) {
+    createDirectories(p.toString())
+  }
+
+  public static void createDirectories(String p) {
+    int r = Fs.mkdirs0(p)
+    if (r < 0) {
+      throw new IOException("cannot create directory " + p + ": " + Net.strerror(r))
+    }
+  }
+
+  public static void delete(Path p) {
+    delete(p.toString())
+  }
+
+  public static void delete(String p) {
+    int r = Fs.delete0(p)
+    if (r < 0) {
+      if (Fs.missing(p)) {
+        throw new NoSuchFileException("no such file: " + p)
+      }
+      throw new IOException("cannot delete " + p + ": " + Net.strerror(r))
+    }
+  }
+
+  // Java's naming: deleteIfExists answers whether there was anything to delete,
+  // and catches only the case where there was not.
+  public static boolean deleteIfExists(Path p) {
+    if (!exists(p)) {
+      return false
+    }
+    delete(p)
+    return true
+  }
+
+  // A directory nobody else will use, created with mkdtemp, so two processes
+  // asking at once cannot be handed the same name. The caller owns it and has
+  // to delete it; nothing here cleans up at exit, because a temp directory that
+  // a crashed program still wanted is worse than one that lingers.
+  public static Path createTempDirectory(String prefix) {
+    String d = Fs.tempDir0(prefix)
+    if (d == null) {
+      throw new IOException("cannot create a temporary directory")
+    }
+    return Path.of(d)
+  }
+
+  public static String readString(File f) {
+    return readString(f.getPath())
+  }
+
+  public static void writeString(File f, String text) {
+    writeString(f.getPath(), text)
+  }
+
+  public static String[] readAllLines(File f) {
+    return readAllLines(f.getPath())
+  }
+}

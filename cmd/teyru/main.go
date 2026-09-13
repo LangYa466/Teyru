@@ -3,22 +3,38 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/LangYa466/Teyru/internal/driver"
+	"github.com/LangYa466/Teyru/internal/mod"
 )
 
 const usage = `teyru - the Teyru compiler
 
 usage:
-  teyru build [flags] <files...>   compile to a native executable
-  teyru run   [flags] <files...> [-- args...]  compile and run
-  teyru emit  [flags] <files...>   print the generated C
-  teyru emit-llvm [flags] <files...>  print the LLVM IR the backend feeds to LLVM
+  teyru build [flags] <paths...>   compile to a native executable
+  teyru run   [flags] <paths...> [-- args...]  compile and run
+  teyru emit  [flags] <paths...>   print the generated C
+  teyru emit-llvm [flags] <paths...>  print the LLVM IR the backend feeds to LLVM
+  teyru get <module>@<version>     fetch a module into the cache and require it
+  teyru mod init <module-path>     write teyru.mod for a new module
+  teyru mod tidy                   make teyru.mod and teyru.sum match the sources
   teyru version                    print the version
+
+paths:
+  <dir>       the package tree rooted at <dir>, walked recursively
+  ./...       <dir> and every package under it (the module's own packages)
+  (none)      the module the current directory is in, or the current
+              directory when there is no module
+
+  A directory that holds a teyru.mod is a module: imports of a path that
+  names one of its required modules are resolved from the module cache
+  ($TEYRUPATH/pkg/mod/<module>@<version>), with no flags.
 
 flags:
   -o <path>     output executable (default a.out)
@@ -48,6 +64,14 @@ func run() int {
 	}
 	cmd := os.Args[1]
 	args := os.Args[2:]
+	// The module commands take no compiler flags: their arguments are a module
+	// path and a version, and a `-o` among them would have to be an error.
+	switch cmd {
+	case "mod":
+		return runMod(args)
+	case "get":
+		return runGet(args)
+	}
 	opts := driver.Options{Out: "a.out"}
 	var files []string
 	var progArgs []string
@@ -120,6 +144,17 @@ func run() int {
 		return 2
 	}
 
+	// `./...` is Go's spelling of "this directory and every package under it".
+	// The driver compiles a directory as its whole tree already, so the
+	// wildcard is the directory it names -- and a build with no path at all is
+	// the module the current directory is in.
+	paths, err := expandPaths(files)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "teyru: %v\n", err)
+		return 2
+	}
+	files = paths
+
 	if cmd == "run" {
 		dir, err := os.MkdirTemp("", "teyru-build-")
 		if err != nil {
@@ -191,4 +226,174 @@ func run() int {
 func fail(err error) {
 	fmt.Fprintf(os.Stderr, "teyru: %v\n", err)
 	os.Exit(1)
+}
+
+// expandPaths turns the paths of a build into the directories and files the
+// driver reads.
+func expandPaths(paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		// Inside a module, `teyru build` builds the module: its main package
+		// and every package under it. Without one it is the current directory,
+		// which is what the driver defaults to anyway.
+		if root, ok, err := mod.FindModuleDir("."); err == nil && ok {
+			return []string{root}, nil
+		}
+		return nil, nil
+	}
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		switch {
+		case p == "...":
+			return nil, fmt.Errorf("`...` names nothing on its own: write ./... for this directory and the packages under it")
+		case strings.HasSuffix(p, "/..."):
+			dir := strings.TrimSuffix(p, "/...")
+			if dir == "" {
+				dir = "."
+			}
+			out = append(out, dir)
+		default:
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// runMod dispatches `teyru mod <subcommand>`.
+func runMod(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprint(os.Stderr, "teyru: mod wants a subcommand: init, tidy\n")
+		return 2
+	}
+	switch args[0] {
+	case "init":
+		return modInit(args[1:])
+	case "tidy":
+		return modTidy(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "teyru: unknown mod subcommand %q\n", args[0])
+		fmt.Fprint(os.Stderr, "teyru: mod wants a subcommand: init, tidy\n")
+		return 2
+	}
+}
+
+// modInit writes a teyru.mod in the current directory.
+func modInit(args []string) int {
+	if len(args) != 1 {
+		fmt.Fprint(os.Stderr, "teyru: mod init wants a module path, such as example.com/myapp\n")
+		return 2
+	}
+	path := args[0]
+	if !mod.ValidPath(path) {
+		fmt.Fprintf(os.Stderr, "teyru: %q is not a module path: it is the prefix every import path of this module starts with, such as example.com/myapp\n", path)
+		return 2
+	}
+	if _, err := os.Stat(mod.ModuleFileName); err == nil {
+		fmt.Fprintf(os.Stderr, "teyru: %s already exists\n", mod.ModuleFileName)
+		return 1
+	}
+	if err := mod.New(path).Write(mod.ModuleFileName); err != nil {
+		fail(err)
+	}
+	fmt.Printf("teyru: created %s for module %s\n", mod.ModuleFileName, path)
+	return 0
+}
+
+// modTidy makes teyru.mod and teyru.sum agree with the module's sources.
+func modTidy(args []string) int {
+	if len(args) != 0 {
+		fmt.Fprint(os.Stderr, "teyru: mod tidy takes no arguments\n")
+		return 2
+	}
+	graph, err := loadGraph(".")
+	if err != nil {
+		fail(err)
+	}
+	notes, err := mod.Tidy(graph)
+	for _, n := range notes {
+		fmt.Fprintf(os.Stderr, "teyru: %s\n", n)
+	}
+	if err != nil {
+		fail(err)
+	}
+	if len(notes) == 0 {
+		fmt.Fprintf(os.Stderr, "teyru: %s and %s are already as the sources want them\n", mod.ModuleFileName, mod.SumFileName)
+	}
+	return 0
+}
+
+// runGet fetches one module version into the cache and records it.
+func runGet(args []string) int {
+	if len(args) != 1 {
+		fmt.Fprint(os.Stderr, "teyru: get wants one module and version, such as example.com/dep@v1.0.0\n")
+		return 2
+	}
+	path, version, ok := strings.Cut(args[0], "@")
+	if !ok || path == "" || version == "" {
+		fmt.Fprintf(os.Stderr, "teyru: %q is not <module>@<version>: write `teyru get example.com/dep@v1.0.0`\n", args[0])
+		return 2
+	}
+	if !mod.ValidPath(path) {
+		fmt.Fprintf(os.Stderr, "teyru: %q is not a module path\n", path)
+		return 2
+	}
+	if _, err := mod.ParseVersion(version); err != nil {
+		fmt.Fprintf(os.Stderr, "teyru: %v\n", err)
+		return 2
+	}
+	if err := mod.CheckImportPath(path, version); err != nil {
+		fail(err)
+	}
+	graph, err := loadGraph(".")
+	if err != nil {
+		fail(err)
+	}
+	cached := graph.Cache.Has(path, version)
+	if cached {
+		fmt.Fprintf(os.Stderr, "teyru: %s@%s is already in the cache\n", path, version)
+	} else {
+		fmt.Fprintf(os.Stderr, "teyru: fetching %s@%s\n", path, version)
+	}
+	fetcher := mod.NewGitFetcher()
+	fetcher.Log = func(format string, args ...any) { fmt.Fprintf(os.Stderr, "teyru: "+format+"\n", args...) }
+	dir, err := graph.Cache.Fetch(fetcher, path, version)
+	if err != nil {
+		fail(err)
+	}
+	tree, modFile, err := mod.TreeHash(dir)
+	if err != nil {
+		fail(err)
+	}
+	// An entry that is already there is checked, never overwritten: a module
+	// version with two different contents is the one thing the checksum file
+	// exists to make impossible.
+	if want, ok := graph.Sums.Lookup(path, version, false); ok && want != tree {
+		fail(&mod.SumMismatchError{Path: path, Version: version, Want: want, Got: tree})
+	}
+	graph.Sums.Set(path, version, tree, false)
+	if modFile != "" {
+		graph.Sums.Set(path, version, modFile, true)
+	}
+	if err := graph.Sums.Write(graph.Main.SumFilePath()); err != nil {
+		fail(err)
+	}
+	graph.Main.File.Add(path, version)
+	if err := graph.Main.File.Write(graph.Main.ModFilePath()); err != nil {
+		fail(err)
+	}
+	fmt.Fprintf(os.Stderr, "teyru: %s %s -> %s\n", path, version, dir)
+	return 0
+}
+
+// loadGraph loads the module the current directory is in, with the error a
+// user can act on when there is none.
+func loadGraph(dir string) (*mod.Graph, error) {
+	g, err := mod.LoadGraph(dir)
+	if err != nil {
+		var noMod *mod.NoModuleError
+		if errors.As(err, &noMod) {
+			return nil, fmt.Errorf("%w: run `teyru mod init <module-path>` to start one", err)
+		}
+		return nil, err
+	}
+	return g, nil
 }
