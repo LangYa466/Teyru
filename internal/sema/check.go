@@ -683,6 +683,15 @@ func (ctx *methodCtx) checkLocalVar(v *ast.LocalVar) {
 		if v.Type.Name == "val" || v.Mods.Has(ast.ModFinal) {
 			v2.Final = true
 		}
+		// A final variable declared with an initializer has spent its one
+		// assignment. Without this the counter stayed at zero until the second
+		// assignment, so the first reassignment of a `val` went through -- the
+		// declaration was not counted as the assignment it is. A `final int x`
+		// with no initializer still gets its one assignment, which is Java's
+		// rule (JLS 16); `val` cannot be written that way at all.
+		if v2.Final && vd.Init != nil {
+			v2.Assigns = 1
+		}
 		vd.Sym = v2
 		_ = i
 	}
@@ -1796,16 +1805,29 @@ func (ctx *methodCtx) assignable(e ast.Expr) bool {
 }
 
 func (ctx *methodCtx) checkFinalAssign(target ast.Expr) {
-	id, ok := target.(*ast.Ident)
-	if !ok {
+	if id, ok := target.(*ast.Ident); ok {
+		if lv, ok := id.Ref.(*ast.Var); ok && lv.Final && lv.Assigns > 0 {
+			ctx.errf(target.GetPos(), "TY-TYP-0057", "cannot assign a value to final variable %s", lv.Name)
+		}
+		ctx.checkFinalField(target, id.Ref)
 		return
 	}
-	if lv, ok := id.Ref.(*ast.Var); ok && lv.Final && lv.Assigns > 0 {
-		ctx.errf(target.GetPos(), "TY-TYP-0057", "cannot assign a value to final variable %s", lv.Name)
+	// `o.k = 9` is a field of another object, and only the bare name was
+	// examined: the check stopped at any target that was not an identifier, so
+	// a `final` field was writable from anywhere and the modifier meant
+	// nothing outside the class that declared it.
+	if sel, ok := target.(*ast.Select); ok {
+		ctx.checkFinalField(target, sel.Ref)
 	}
-	if f, ok := id.Ref.(*ast.Field); ok && f.Mods.Has(ast.ModFinal) && f.Owner != ctx.cl {
-		ctx.errf(target.GetPos(), "TY-TYP-0058", "cannot assign a value to final field %s", f.Name)
+}
+
+// checkFinalField rejects an assignment to a final field of another class.
+func (ctx *methodCtx) checkFinalField(target ast.Expr, ref any) {
+	f, ok := ref.(*ast.Field)
+	if !ok || !f.Mods.Has(ast.ModFinal) || f.Owner == ctx.cl {
+		return
 	}
+	ctx.errf(target.GetPos(), "TY-TYP-0058", "cannot assign a value to final field %s", f.Name)
 }
 
 func (ctx *methodCtx) checkBinary(v *ast.Binary, want ast.Type) {
