@@ -1,43 +1,285 @@
 package teyru
 
+/* String is the one class in java.lang whose Java surface is large enough that
+   the shape of its implementation matters. The rule followed here is the one
+   the rest of the prelude follows: a method that is a loop over bytes is C
+   (native, in tyrt.c), a method that is a decision about arguments is Teyru.
+   So substring, indexOf and the case conversions are native, while everything
+   that has to raise a Java-shaped exception -- the bounds checks, the parse
+   failures, the regex guard -- stays on this side of the boundary, where the
+   exception classes exist.
+
+   charAt and length are byte-oriented: a Teyru string is UTF-8 bytes and a
+   `char` is one byte of it. That is the pre-existing convention of the runtime
+   (see ty_str_charat) and every method here keeps to it, so toCharArray,
+   charAt and substring agree with each other even though none of them agrees
+   with Java for a non-ASCII string. */
 class String extends Object implements Comparable<String> {
   public native String(String original)
   public native int length()
   public native boolean isEmpty()
+  public native boolean isBlank()
   public native char charAt(int index)
   public native boolean equals(Object o)
+  public native boolean equalsIgnoreCase(String s)
   public native int hashCode()
+  public native int compareTo(String s)
+  public native int compareToIgnoreCase(String s)
+  public native boolean startsWith(String prefix)
+  public native boolean startsWith(String prefix, int offset)
+  public native boolean endsWith(String suffix)
+  public native boolean contains(String s)
+  public native int indexOf(int ch)
+  public native int indexOf(int ch, int from)
   public native int indexOf(String s)
+  public native int indexOf(String s, int from)
+  public native int lastIndexOf(int ch)
+  public native int lastIndexOf(int ch, int from)
+  public native int lastIndexOf(String s)
+  public native int lastIndexOf(String s, int from)
   public native String substring(int from)
   public native String substring(int from, int to)
+  public native String concat(String s)
+  public native String repeat(int count)
+  public native String strip()
+  public native String stripLeading()
+  public native String stripTrailing()
+  public native String trim()
   public native String toUpperCase()
   public native String toLowerCase()
-  public native String trim()
-  public native boolean contains(String s)
-  public native boolean startsWith(String s)
-  public native boolean endsWith(String s)
-  public native String replace(char a, char b)
-  public native int compareTo(String s)
-  public native String concat(String s)
-  public native String[] split(String sep)
+  public native char[] toCharArray()
+  public native byte[] getBytes()
+  public native String intern()
   public native String toString()
+  public native String replace(char old, char now)
+  public native String replace(String old, String now)
+  /* Java's three regex methods, answered for a literal pattern. Teyru has no
+     regular expression engine and will not grow one here, so the C side tests
+     the pattern for metacharacters and calls ty_unimplemented with the method
+     name when it finds one -- a loud exit 70 rather than a silent wrong
+     answer. A literal pattern is by far the common call, and for it these are
+     exact. The search is not anchored for replaceAll/replaceFirst (Java's
+     literal-looking patterns are unanchored too) but matches() is anchored at
+     both ends, as Java defines it. */
+  public native String replaceAll(String re, String rep)
+  public native String replaceFirst(String re, String rep)
+  public native boolean matches(String re)
+  public native String[] split(String re)
+  public native String[] split(String re, int limit)
+
+  public static native String valueOf(Object v)
+  public static native String valueOf(char[] v)
+  public static native String valueOf(char[] v, int offset, int count)
+  public static native String valueOf(boolean v)
+  public static native String valueOf(char c)
   public static native String valueOf(int v)
   public static native String valueOf(long v)
-  public static native String valueOf(double v)
   public static native String valueOf(float v)
-  public static native String valueOf(boolean v)
-  public static native String valueOf(char v)
-  public static native String valueOf(Object v)
+  public static native String valueOf(double v)
+  public static String copyValueOf(char[] v) {
+    return valueOf(v)
+  }
+  public static String copyValueOf(char[] v, int offset, int count) {
+    return valueOf(v, offset, count)
+  }
+
+  /* format is the one place the prelude needs a native method that takes a
+     vararg array. Varargs are packed at the call site (packVarargs) but a
+     native call passes the arguments through untouched, so a `native` method
+     declared `Object...` would receive each argument as a separate parameter
+     and the C helper could not see the count. The wrapper below is therefore a
+     normal method -- whose body does see the packed array -- delegating to a
+     private native that takes the array. */
+  public static String format(String fmt, Object... args) {
+    if (fmt == null) {
+      throw new NullPointerException()
+    }
+    return formatArgs(fmt, args)
+  }
+  private static native String formatArgs(String fmt, Object[] args)
+
+  /* join is pure Teyru: it is a loop over an array, and the loop is clearer
+     here than as a C helper. The null argument checks are Java's. */
+  public static String join(String delim, String... elements) {
+    if (delim == null) {
+      throw new NullPointerException()
+    }
+    if (elements == null) {
+      throw new NullPointerException()
+    }
+    if (elements.length == 0) {
+      return ""
+    }
+    StringBuilder sb = new StringBuilder()
+    for (var i = 0 : i < elements.length : i++) {
+      if (i > 0) {
+        sb.append(delim)
+      }
+      sb.append(elements[i])
+    }
+    return sb.toString()
+  }
 }
 
+/* StringBuilder is the mutable byte buffer behind string building and
+   String.format. It is allocated by the runtime (ty_sb_new, wired through
+   specialNew) rather than by generated code, so every native below casts its
+   receiver to the runtime's tySB.
+
+   StringBuffer is the same class under its old, synchronized name: Java has
+   both, they differ only in thread safety, and Teyru has no threads, so the
+   two share one implementation and one C helper set. Programs that mention
+   StringBuffer get Java's API and Java's semantics; programs that mention
+   StringBuilder get the faster name. */
 class StringBuilder extends Object {
-  public native StringBuilder append(String s)
+  /* The two constructors that take an argument. `new StringBuilder()` is
+     allocated by the runtime (specialNew maps it to ty_sb_new, which is what
+     gives a builder its buffer); a `new` with an argument is an ordinary
+     allocation followed by this constructor, so the buffer is created by
+     init -- before anything can append to it -- and the capacity Java takes
+     is only a hint. append and insert on a builder are the same methods
+     either way, so an object built by either path behaves identically. */
+  /* the no-argument form is what specialNew allocates, so this body is empty:
+     declaring it only keeps the class constructible now that it has others. */
+  public StringBuilder() {
+  }
+  public StringBuilder(int capacity) {
+    init(capacity)
+  }
+  public StringBuilder(String s) {
+    if (s == null) {
+      throw new NullPointerException()
+    }
+    init(s.length())
+    appendRaw(s)
+  }
+  private native void init(int capacity)
+  /* append(String) and insert(int, String) take null for the four characters
+     "null", as Java's do. The runtime's ty_sb_append_str writes nothing for a
+     null, which is the behaviour the print helpers want and the behaviour the
+     builder must not have, so the substitution happens here, in front of a
+     private native that is never handed a null. */
+  public StringBuilder append(String s) {
+    return appendRaw(s == null ? "null" : s)
+  }
+  private native StringBuilder appendRaw(String s)
   public native StringBuilder append(Object o)
   public native StringBuilder append(int v)
   public native StringBuilder append(long v)
-  public native StringBuilder append(char c)
+  public native StringBuilder append(float v)
   public native StringBuilder append(double v)
   public native StringBuilder append(boolean v)
-  public native String toString()
+  public native StringBuilder append(char c)
+  public native StringBuilder append(char[] chars)
+  public StringBuilder insert(int at, String s) {
+    return insertRaw(at, s == null ? "null" : s)
+  }
+  private native StringBuilder insertRaw(int at, String s)
+  public native StringBuilder insert(int at, Object o)
+  public native StringBuilder insert(int at, int v)
+  public native StringBuilder insert(int at, long v)
+  public native StringBuilder insert(int at, float v)
+  public native StringBuilder insert(int at, double v)
+  public native StringBuilder insert(int at, boolean v)
+  public native StringBuilder insert(int at, char c)
+  public native StringBuilder insert(int at, char[] chars)
+  public native StringBuilder delete(int from, int to)
+  public native StringBuilder deleteCharAt(int at)
+  public StringBuilder replace(int from, int to, String s) {
+    return replaceRaw(from, to, s == null ? "null" : s)
+  }
+  private native StringBuilder replaceRaw(int from, int to, String s)
+  public native StringBuilder reverse()
+  public native char charAt(int at)
+  public native void setCharAt(int at, char c)
   public native int length()
+  public native boolean isEmpty()
+  public native int capacity()
+  public native void ensureCapacity(int min)
+  public native void setLength(int n)
+  public native String substring(int from)
+  public native String substring(int from, int to)
+  public native int indexOf(String s)
+  public native int indexOf(String s, int from)
+  public native int lastIndexOf(String s)
+  public native String toString()
+}
+
+class StringBuffer extends Object {
+  /* StringBuilder is one of the classes the compiler aliases to a runtime
+     struct (sema marks it Special = "sb", and `C_teyru_StringBuilder` becomes
+     `tySB`), but only StringBuilder is marked: StringBuffer's C type is a
+     struct of its own. That is invisible while every StringBuffer comes from
+     ty_sb_new -- one pointer, cast to tySB by the natives -- and stops being
+     invisible the moment a constructor has to allocate one, because the
+     allocation is then `sizeof` the generated struct. These three fields are
+     what makes that struct the same size and shape as tySB (obj, len, cap,
+     buf), so a StringBuffer built by a constructor and one built by the
+     runtime are the same object. They are private, never read by Teyru code,
+     and buf is a long rather than an Object on purpose: as a reference the
+     collector would follow it into the builder's malloc'd bytes. */
+  private long len
+  private long cap
+  private long buf
+  /* the same three constructors as StringBuilder, for the same reason */
+  public StringBuffer() {
+  }
+  public StringBuffer(int capacity) {
+    init(capacity)
+  }
+  public StringBuffer(String s) {
+    if (s == null) {
+      throw new NullPointerException()
+    }
+    init(s.length())
+    append(s)
+  }
+  private native void init(int capacity)
+  /* append(String) takes null for "null" here too -- the same wrapper around
+     the same native StringBuilder uses, so the two names really do share one
+     implementation and not just one set of C helpers. */
+  public StringBuffer append(String s) {
+    return appendRaw(s == null ? "null" : s)
+  }
+  private native StringBuffer appendRaw(String s)
+  public native StringBuffer append(Object o)
+  public native StringBuffer append(int v)
+  public native StringBuffer append(long v)
+  public native StringBuffer append(float v)
+  public native StringBuffer append(double v)
+  public native StringBuffer append(boolean v)
+  public native StringBuffer append(char c)
+  public native StringBuffer append(char[] chars)
+  public StringBuffer insert(int at, String s) {
+    return insertRaw(at, s == null ? "null" : s)
+  }
+  private native StringBuffer insertRaw(int at, String s)
+  public native StringBuffer insert(int at, Object o)
+  public native StringBuffer insert(int at, int v)
+  public native StringBuffer insert(int at, long v)
+  public native StringBuffer insert(int at, float v)
+  public native StringBuffer insert(int at, double v)
+  public native StringBuffer insert(int at, boolean v)
+  public native StringBuffer insert(int at, char c)
+  public native StringBuffer insert(int at, char[] chars)
+  public native StringBuffer delete(int from, int to)
+  public native StringBuffer deleteCharAt(int at)
+  public StringBuffer replace(int from, int to, String s) {
+    return replaceRaw(from, to, s == null ? "null" : s)
+  }
+  private native StringBuffer replaceRaw(int from, int to, String s)
+  public native StringBuffer reverse()
+  public native char charAt(int at)
+  public native void setCharAt(int at, char c)
+  public native int length()
+  public native boolean isEmpty()
+  public native int capacity()
+  public native void ensureCapacity(int min)
+  public native void setLength(int n)
+  public native String substring(int from)
+  public native String substring(int from, int to)
+  public native int indexOf(String s)
+  public native int indexOf(String s, int from)
+  public native int lastIndexOf(String s)
+  public native String toString()
 }

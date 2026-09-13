@@ -73,7 +73,7 @@ wide long | 15000000000 (Gson: 15000000000)
 wide byte | -1 (Gson: 0)
 wide short | -1 (Gson: -10752)
 overflow double | Infinity (Gson: Infinity)
-negative zero | 0.0 (Gson: -0.0)
+negative zero | -0.0 (Gson: -0.0)
 lone surrogate | "?" (Gson: "?" too)
 == accesses that differ from Gson ==
 empty document | rejected: empty document at line 1 column 1 (Gson: JsonNull.INSTANCE)

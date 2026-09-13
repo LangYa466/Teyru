@@ -465,11 +465,15 @@ void *ty_alloc_arr(int64_t len, size_t elemsize) {
 
 /* ------------------------------------------------------------------ exceptions */
 
+/* Java's uncaught handler prints the throwable's own toString -- that is what
+   ThreadGroup.uncaughtException does -- and nothing else. Composing the class
+   name here as well would double it, and would print the class in front of a
+   toString a program had overridden. */
 void ty_uncaught(void *p) {
   tyobj *e = (tyobj*)p;
   tystr *s = ((tystr *(*)(void *))e->cls->vtable[0])(e);
   char *msg = s ? s->data : (char *)"?";
-  fprintf(stderr, "Exception in thread \"main\" %s: %.*s\n", e->cls->name, (int)(s ? s->len : 1), msg);
+  fprintf(stderr, "Exception in thread \"main\" %.*s\n", (int)(s ? s->len : 1), msg);
   exit(1);
 }
 
@@ -679,13 +683,23 @@ tystr *ty_str_of_char(uint16_t c) {
 }
 /* Shortest representation that reads back exactly, formatted the way Java's
    Double.toString does: plain decimal when 1e-3 <= |v| < 1e7, scientific
-   otherwise, and always with a fractional part. */
-static int fmt_generic(char *buf, size_t cap, long double v, int lo, int hi) {
+   otherwise, and always with a fractional part.
+
+   The search runs from two significant digits up, which is Java's lower bound
+   (the digits after the point are never empty: 1.0, not 1) and is what makes
+   the subnormals come out right -- Double.MIN_VALUE is 4.9E-324 and not the
+   4.94065645841247E-324 that rounding its exact value to fifteen digits gives.
+   is_float narrows the round-trip test to float precision, so a float is
+   spelled with the digits that bring back that float and not the nearest
+   double's. */
+static int fmt_generic(char *buf, size_t cap, long double v, int lo, int hi, int is_float) {
   char tmp[96];
   int prec = hi;
   for (int p = lo; p <= hi; p++) {
     snprintf(tmp, sizeof tmp, "%.*Le", p - 1, v);
-    if ((long double)strtod(tmp, NULL) == v) { prec = p; break; }
+    long double back = strtod(tmp, NULL);
+    if (is_float) back = (float)back;
+    if (back == v) { prec = p; break; }
   }
   snprintf(tmp, sizeof tmp, "%.*Le", prec - 1, v);
   /* split "[-]d.dddde±XX" into digits and an exponent */
@@ -744,7 +758,7 @@ static int fmt_double(char *buf, size_t cap, double v) {
   /* signbit, not `v < 0`: Java spells the negative zero "-0.0" and the two
      zeros compare equal, so the sign has to be read from the bits. */
   if (v == 0.0) return snprintf(buf, cap, signbit(v) ? "-0.0" : "0.0");
-  return fmt_generic(buf, cap, (long double)v, 15, 17);
+  return fmt_generic(buf, cap, (long double)v, 2, 17, 0);
 }
 
 static int fmt_float(char *buf, size_t cap, float v) {
@@ -752,14 +766,7 @@ static int fmt_float(char *buf, size_t cap, float v) {
   if (v == 1.0f / 0.0f) return snprintf(buf, cap, "Infinity");
   if (v == -1.0f / 0.0f) return snprintf(buf, cap, "-Infinity");
   if (v == 0.0f) return snprintf(buf, cap, signbit(v) ? "-0.0" : "0.0");
-  char tmp[96];
-  int prec = 9;
-  for (int p = 6; p <= 9; p++) {
-    snprintf(tmp, sizeof tmp, "%.*e", p - 1, (double)v);
-    if ((float)strtod(tmp, NULL) == v) { prec = p; break; }
-  }
-  snprintf(tmp, sizeof tmp, "%.*e", prec - 1, (double)v);
-  return fmt_generic(buf, cap, strtold(tmp, NULL), prec, prec);
+  return fmt_generic(buf, cap, (long double)v, 2, 9, 1);
 }
 
 tystr *ty_str_of_double(double v) {
@@ -1232,20 +1239,28 @@ double ty_math_to_degrees(double rad) { return rad * (180.0 / 3.1415926535897932
    the wider type -- the check would compare equal cubes and the library's answer
    stands unchanged. */
 double ty_math_cbrt(double x) {
-  double y, best, c, d;
+  double y, best, lo, hi, d;
   long double bx, bd;
+  int k;
   if (x != x || x == 0.0 || x == 1.0 / 0.0 || x == -1.0 / 0.0) return cbrt(x);
   y = cbrt(x);
 #if LDBL_MANT_DIG > DBL_MANT_DIG
   bx = (long double)x;
   best = y;
   bd = fabsl((long double)y * y * y - bx);
-  c = nextafter(y, -1.0 / 0.0);
-  d = fabsl((long double)c * c * c - bx);
-  if (d < bd) { best = c; bd = d; }
-  c = nextafter(y, 1.0 / 0.0);
-  d = fabsl((long double)c * c * c - bx);
-  if (d < bd) best = c;
+  lo = y;
+  hi = y;
+  /* two doubles each way, because the library's error is sometimes two ulps
+     rather than one (cbrt(1e-10) is), and the search has to contain the
+     correctly rounded answer before it can find it */
+  for (k = 0; k < 2; k++) {
+    lo = nextafter(lo, -1.0 / 0.0);
+    hi = nextafter(hi, 1.0 / 0.0);
+    d = fabsl((long double)lo * lo * lo - bx);
+    if (d < bd) { best = lo; bd = d; }
+    d = fabsl((long double)hi * hi * hi - bx);
+    if (d < bd) { best = hi; bd = d; }
+  }
   return best;
 #else
   return y;
@@ -1400,6 +1415,9 @@ int32_t ty_double_hash_val(double v) {
   return (int32_t)(b ^ (int64_t)((uint64_t)b >> 32));
 }
 int32_t ty_bool_hash_val(int32_t v) { return v ? 1231 : 1237; }
+/* Boolean.hashCode() is that same class hash and not the raw value the
+   unboxing helper answers with; a Boolean's %h used to print 1. */
+int32_t ty_bool_hash_box(void *o) { return ty_unbox_bool(o) ? 1231 : 1237; }
 int32_t ty_identity_hash(void *o) { return ty_obj_hash(o); }
 
 tystr *ty_byte_tostr_val(int32_t v) { return ty_str_of_int(v); }
@@ -2500,8 +2518,10 @@ static void fmt_hex_body(fmtbuf *b, double v, int32_t prec, int upper) {
   char hex[24], t[24];
   int n;
   if (exp == 0) {
+    /* a subnormal, or a zero: Java writes %a of 0.0 as "0x0.0p0" and only a
+       subnormal carries the smallest exponent */
     lead = 0;
-    e2 = -1022;
+    e2 = mant == 0 ? 0 : -1022;
   } else {
     lead = 1;
     mant |= (1ull << 52);
@@ -2559,7 +2579,7 @@ static void fmt_hex_body(fmtbuf *b, double v, int32_t prec, int upper) {
 /* ------------------------------------------------------------- the flags */
 
 typedef struct {
-  int minus, plus, space, zero, comma, alt;
+  int minus, plus, space, zero, comma, alt, paren;
   int32_t width; /* -1 when the format gave none */
 } fmtflags;
 
@@ -2569,20 +2589,28 @@ typedef struct {
    already inside the body. */
 static void fmt_put(fmtbuf *b, const fmtflags *f, const char *prefix, int64_t plen,
                     const char *body, int64_t blen) {
-  int64_t total = plen + blen;
+  /* The parentheses flag replaces the minus of a negative number, and the
+     closing parenthesis is part of the field the width counts -- so `%(10d` of
+     -42 is "      (42)", six spaces and four characters. */
+  int paren = f->paren && plen == 1 && prefix[0] == '-';
+  int64_t total = plen + blen + (paren ? 1 : 0);
   int64_t pad = f->width > 0 && f->width > total ? f->width - total : 0;
+  if (paren) prefix = "(";
   if (f->minus) {
     fmtb_add(b, prefix, plen);
     fmtb_add(b, body, blen);
+    if (paren) fmtb_ch(b, ')');
     fmtb_rep(b, ' ', pad);
   } else if (f->zero) {
     fmtb_add(b, prefix, plen);
     fmtb_rep(b, '0', pad);
     fmtb_add(b, body, blen);
+    if (paren) fmtb_ch(b, ')');
   } else {
     fmtb_rep(b, ' ', pad);
     fmtb_add(b, prefix, plen);
     fmtb_add(b, body, blen);
+    if (paren) fmtb_ch(b, ')');
   }
 }
 
@@ -2594,6 +2622,23 @@ static int group_digits(const char *d, int n, char *out) {
     out[o++] = d[i];
   }
   return o;
+}
+
+/* A null argument prints as the four letters of its own name -- uppercased by
+   the conversions that uppercase, cut short by the precision and padded by the
+   width, but never zero filled, so %08d of a null is "    null". That is
+   Java's rule for every conversion that takes an argument except %b, whose
+   null is a "false" instead. */
+static void fmt_null(fmtbuf *out, const fmtflags *f, int upper, int32_t P) {
+  char body[4] = {'n', 'u', 'l', 'l'};
+  int64_t blen = 4;
+  fmtflags nf = *f;
+  int k;
+  if (P >= 0 && blen > P) blen = P;
+  if (upper)
+    for (k = 0; k < blen; k++) body[k] = (char)ty_char_upper((unsigned char)body[k]);
+  nf.zero = 0;
+  fmt_put(out, &nf, "", 0, body, blen);
 }
 
 /* A number formatted into `t` is moved into the body, with its integer part
@@ -2636,36 +2681,77 @@ static int arg_is_javalang(void *o) {
    message travels on IllegalArgumentException. */
 static void bad_arg(char conv, void *o) {
   char msg[160];
-  snprintf(msg, sizeof msg, "%c != %s%s", conv, arg_is_javalang(o) ? "java.lang." : "",
-           arg_class(o));
+  const char *name = arg_class(o);
+  if (arg_is_javalang(o)) {
+    /* Java names its own classes by their binary name; here the class carries
+       this runtime's package, so the simple name is what is left of it */
+    const char *dot = strrchr(name, '.');
+    if (dot) name = dot + 1;
+    snprintf(msg, sizeof msg, "%c != java.lang.%s", conv, name);
+  } else {
+    snprintf(msg, sizeof msg, "%c != %s", conv, name);
+  }
   ty_throw(ty_illarg(msg));
 }
 /* Java's flag check: a combination the conversion gives no meaning to is an
    error rather than something to ignore, so `%,x` and `%+s` stop the program
    the way they do in Java. The flags are listed in the order Java's own
    toString prints them. */
-static void bad_flags(char conv, const fmtflags *f) {
-  char msg[64], flags[8];
+static int flag_str(char *out, const fmtflags *f) {
   int n = 0;
-  if (f->minus) flags[n++] = '-';
-  if (f->alt) flags[n++] = '#';
-  if (f->plus) flags[n++] = '+';
-  if (f->space) flags[n++] = ' ';
-  if (f->zero) flags[n++] = '0';
-  if (f->comma) flags[n++] = ',';
-  flags[n] = 0;
-  snprintf(msg, sizeof msg, "Conversion = %c, Flags = %s", conv, flags);
+  if (f->minus) out[n++] = '-';
+  if (f->alt) out[n++] = '#';
+  if (f->plus) out[n++] = '+';
+  if (f->space) out[n++] = ' ';
+  if (f->zero) out[n++] = '0';
+  if (f->comma) out[n++] = ',';
+  if (f->paren) out[n++] = '(';
+  out[n] = 0;
+  return n;
+}
+/* A flag the conversion gives no meaning to: "Conversion = x, Flags = ,". */
+static void bad_flags(char conv, const fmtflags *f) {
+  char msg[80], fl[8];
+  flag_str(fl, f);
+  snprintf(msg, sizeof msg, "Conversion = %c, Flags = %s", conv, fl);
   ty_throw(ty_illarg(msg));
 }
-static void check_flags(char conv, const fmtflags *f) {
+/* A flag combination that contradicts itself, and a flag on a conversion that
+   takes none: Java names the flags alone, in quotes. */
+static void bad_flag_set(const fmtflags *f) {
+  char msg[80], fl[8];
+  flag_str(fl, f);
+  snprintf(msg, sizeof msg, "Flags = '%s'", fl);
+  ty_throw(ty_illarg(msg));
+}
+/* A '-' with no width has nothing to justify against, and Java quotes the
+   specifier back, exactly as it was written. */
+static void bad_width(tystr *fmt, int64_t spec0, int64_t speclen) {
+  char msg[80];
+  int64_t n = speclen;
+  if (n > 76) n = 76;
+  memcpy(msg, fmt->data + spec0, (size_t)n);
+  msg[n] = 0;
+  ty_throw(ty_illarg(msg));
+}
+static void bad_int(const char *prefix, int64_t v) {
+  char msg[32];
+  snprintf(msg, sizeof msg, "%s%d", prefix, (int)v);
+  ty_throw(ty_illarg(msg));
+}
+static void check_flags(char conv, const fmtflags *f, tystr *fmt, int64_t spec0, int64_t speclen) {
   int numeric = strchr("doxXeEfgGaA", conv) != NULL;
   int signed_ok = strchr("deEfgGaA", conv) != NULL;
   int alt_ok = strchr("oxXeEfgGaA", conv) != NULL;
   int group_ok = strchr("dfgG", conv) != NULL;
+  int paren_ok = strchr("deEfgG", conv) != NULL;
+  /* '-' and '0' contradict each other, and Java refuses the pair by name */
+  if (f->minus && f->zero) bad_flag_set(f);
   if ((f->zero && !numeric) || (f->plus && !signed_ok) || (f->space && !signed_ok) ||
-      (f->alt && !alt_ok) || (f->comma && !group_ok) || (f->minus && f->zero)) {
+      (f->alt && !alt_ok) || (f->comma && !group_ok) || (f->paren && !paren_ok)) {
     bad_flags(conv, f);
   }
+  if (f->minus && f->width < 0) bad_width(fmt, spec0, speclen);
 }
 
 /* Which box an argument is. The numbering is the runtime's: 1 boolean, 2 byte,
@@ -2730,18 +2816,26 @@ static int radix_digits(uint64_t m, int radix, int upper, char *out) {
 
 /* The next argument, or Java's complaint about the specifier that wanted one:
    "Format specifier '%d'", quoted from the format exactly as it was written. */
-static void *next_arg(tyarr *args, int64_t *ai, tystr *fmt, int64_t spec0, int64_t speclen) {
+static void *next_arg(tyarr *args, int64_t *ai, int64_t fixed, tystr *fmt, int64_t spec0, int64_t speclen) {
   char msg[80];
   int64_t n = speclen;
-  if (*ai >= (args ? args->len : 0)) {
-    if (n > 48) n = 48;
-    memcpy(msg, "Format specifier '", 18);
-    memcpy(msg + 18, fmt->data + spec0, (size_t)n);
-    msg[18 + n] = '\'';
-    msg[19 + n] = 0;
-    ty_throw(ty_illarg(msg));
+  int64_t have = args ? args->len : 0;
+  /* An explicit "N$" names its argument and leaves the running count alone,
+     which is why `%s %1$s` prints the first argument twice. */
+  if (fixed >= 0) {
+    if (fixed >= have) goto missing;
+    return ((void **)args->data)[fixed];
   }
+  if (*ai >= have) goto missing;
   return ((void **)args->data)[(*ai)++];
+missing:
+  if (n > 48) n = 48;
+  memcpy(msg, "Format specifier '", 18);
+  memcpy(msg + 18, fmt->data + spec0, (size_t)n);
+  msg[18 + n] = '\'';
+  msg[19 + n] = 0;
+  ty_throw(ty_illarg(msg));
+  return NULL;
 }
 
 /* ------------------------------------------------------- format assembly */
@@ -2753,7 +2847,7 @@ static void *next_arg(tyarr *args, int64_t *ai, tystr *fmt, int64_t spec0, int64
    conversion is a program error in Java and is reported as one. */
 tystr *ty_str_format(tystr *fmt, tyarr *args) {
   fmtbuf out;
-  int64_t i = 0, ai = 0;
+  int64_t i = 0, ai = 0, fixed = -1;
   if (!fmt) ty_npe();
   fmtb_init(&out);
   while (i < fmt->len) {
@@ -2768,22 +2862,50 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
     }
     spec0 = i;
     i++;
-    f.minus = f.plus = f.space = f.zero = f.comma = f.alt = 0;
+    /* Java's optional "N$" chooses the argument by position rather than in
+       order. It stands before the flags, so it is read first -- but only when
+       a '$' follows, because the same digits are otherwise a width. */
+    fixed = -1;
+    {
+      int64_t save = i, idx = 0;
+      while (i < fmt->len && TY_ASCII_DIGIT(fmt->data[i])) {
+        idx = idx * 10 + (fmt->data[i] - '0');
+        i++;
+      }
+      if (i > save && i < fmt->len && fmt->data[i] == '$') {
+        fixed = idx - 1;
+        i++;
+      } else {
+        i = save;
+      }
+    }
+    f.minus = f.plus = f.space = f.zero = f.comma = f.alt = f.paren = 0;
     f.width = -1;
     for (;;) {
       char fc;
+      int *slot;
+      const char *at;
       if (i >= fmt->len) ty_unimplemented("String.format: conversion is cut short");
       fc = fmt->data[i];
-      if (strchr("-#+ 0,", fc) == NULL) break;
-      switch (fc) {
-        case '-': f.minus = 1; break;
-        case '#': f.alt = 1; break;
-        case '+': f.plus = 1; break;
-        case ' ': f.space = 1; break;
-        case '0': f.zero = 1; break;
-        case ',': f.comma = 1; break;
-        default: break;
+      at = strchr("-#+ 0,(", fc);
+      if (!at) break;
+      switch ((int)(at - "-#+ 0,(")) {
+        case 0: slot = &f.minus; break;
+        case 1: slot = &f.alt; break;
+        case 2: slot = &f.plus; break;
+        case 3: slot = &f.space; break;
+        case 4: slot = &f.zero; break;
+        case 5: slot = &f.comma; break;
+        default: slot = &f.paren; break;
       }
+      /* Java refuses a flag written twice rather than letting the second one
+         stand for the first: "%  s" is a DuplicateFormatFlags, "%-s" is not. */
+      if (*slot) {
+        char msg[48];
+        snprintf(msg, sizeof msg, "Flags = '%c'", fc);
+        ty_throw(ty_illarg(msg));
+      }
+      *slot = 1;
       i++;
     }
     {
@@ -2809,42 +2931,59 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
     if (i >= fmt->len) ty_unimplemented("String.format: conversion is cut short");
     conv = fmt->data[i];
     i++;
-    check_flags(conv, &f);
-    /* Java gives an integer conversion no precision to work with, and says so
-       with the offending number as the message */
-    if (P >= 0 && strchr("doxX", conv) != NULL) {
-      char m[24];
-      snprintf(m, sizeof m, "%d", (int)P);
-      ty_throw(ty_illarg(m));
+    /* Java gives an integer or a character conversion no precision to work
+       with, and says so with the offending number as the message */
+    if (P >= 0 && strchr("doxXcC", conv) != NULL) bad_int("", P);
+    /* %% and %n are the two conversions that are not an argument. Java gives
+       %n no flag, no width and no precision at all, and % only a width. */
+    if (conv == 'n') {
+      if (f.minus || f.alt || f.plus || f.space || f.zero || f.comma || f.paren) bad_flag_set(&f);
+      if (f.width >= 0) bad_int("", f.width);
+      if (P >= 0) bad_int("", P);
+      /* Java's line separator is the platform's; this runtime only runs on
+         the ones whose is a newline */
+      fmtb_ch(&out, '\n');
+      continue;
     }
+    if (conv == '%') {
+      if (f.minus && f.width < 0) bad_width(fmt, spec0, i - spec0);
+      if (f.alt || f.plus || f.space || f.zero || f.comma || f.paren) bad_flag_set(&f);
+      fmt_put(&out, &f, "", 0, "%", 1);
+      continue;
+    }
+    check_flags(conv, &f, fmt, spec0, i - spec0);
 
     switch (conv) {
-      case '%':
-        fmt_put(&out, &f, "", 0, "%", 1);
-        break;
-      case 'n':
-        /* Java's line separator is the platform's; this runtime only runs on
-           the ones whose is a newline */
-        fmtb_ch(&out, '\n');
-        break;
       case 's': case 'S': case 'b': case 'B': case 'h': case 'H': case 'c': case 'C': {
-        void *o = next_arg(args, &ai, fmt, spec0, i - spec0);
+        void *o = next_arg(args, &ai, fixed, fmt, spec0, i - spec0);
         char *heap = NULL;
         const char *body;
         int64_t blen, k;
         if (conv == 'b' || conv == 'B') {
-          body = (box_kind(o) == 1) ? (((tyboolbox *)o)->v ? "true" : "false")
-                                    : (o ? "true" : "false");
-          blen = 4;
+          /* a Boolean prints its value, anything else non-null prints "true",
+             and the word is five letters long when the value is false */
+          const char *t = (box_kind(o) == 1) ? (((tyboolbox *)o)->v ? "true" : "false")
+                                             : (o ? "true" : "false");
+          body = t;
+          blen = (int64_t)strlen(t);
           if (P >= 0 && blen > P) blen = P;
         } else if (conv == 'h' || conv == 'H') {
-          tystr *s = o ? ty_unsigned_string_int(ty_obj_hash(o), 16)
+          /* Java's %h is Integer.toHexString(arg.hashCode()), so it is the
+             object's own hashCode that answers and not the identity the
+             runtime hands out from ty_obj_hash -- a String hashes by its
+             characters, an Integer by its value. The slot is the second of
+             Object's vtable, after toString. */
+          tystr *s = o ? ty_unsigned_string_int(
+                             ((int32_t(*)(void *))((tyobj *)o)->cls->vtable[1])(o), 16)
                        : ty_str_intern("null");
           body = s->data;
           blen = s->len;
           if (P >= 0 && blen > P) blen = P;
         } else if (conv == 'c' || conv == 'C') {
-          tystr *s = ty_str_of_char((uint16_t)char_arg(conv, o));
+          /* a null argument prints as "null" here too, which is why the
+             character is fetched only once there is an argument to fetch it
+             from */
+          tystr *s = o ? ty_str_of_char((uint16_t)char_arg(conv, o)) : ty_str_intern("null");
           body = s->data;
           blen = s->len;
         } else {
@@ -2853,7 +2992,7 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
           blen = s->len;
           if (P >= 0 && blen > P) blen = P;
         }
-        if (conv == 'S' || conv == 'H' || conv == 'C') {
+        if (conv == 'S' || conv == 'H' || conv == 'C' || conv == 'B') {
           heap = (char *)malloc((size_t)(blen > 0 ? blen : 1));
           for (k = 0; k < blen; k++)
             heap[k] = (char)ty_char_upper((unsigned char)body[k]);
@@ -2864,13 +3003,21 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
         break;
       }
       case 'd': case 'o': case 'x': case 'X': {
-        void *o = next_arg(args, &ai, fmt, spec0, i - spec0);
-        int kind = box_kind(o);
-        int64_t v = int_arg(conv, o);
+        void *o = next_arg(args, &ai, fixed, fmt, spec0, i - spec0);
+        int kind;
+        int64_t v;
         char raw[32], grp[80];
         const char *prefix = "";
         int64_t plen = 0, blen;
         int n;
+        /* a null argument is not an integer Java refuses, it is the word
+           "null": the conversion never sees a value to complain about */
+        if (!o) {
+          fmt_null(&out, &f, conv == 'X', -1);
+          break;
+        }
+        kind = box_kind(o);
+        v = int_arg(conv, o);
         if (conv == 'd') {
           uint64_t mag;
           if (v < 0) {
@@ -2895,10 +3042,10 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
           n = radix_digits(m, conv == 'o' ? 8 : 16, conv == 'X', raw);
           if (f.alt) {
             if (conv == 'o') {
-              if (raw[0] != '0') {
-                prefix = "0";
-                plen = 1;
-              }
+              /* Java's %#o always leads with a zero, even when the digits are
+                 already a single zero: %#o of 0 is "00" */
+              prefix = "0";
+              plen = 1;
             } else {
               prefix = conv == 'X' ? "0X" : "0x";
               plen = 2;
@@ -2915,18 +3062,36 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
         break;
       }
       case 'e': case 'E': case 'f': case 'g': case 'G': case 'a': case 'A': {
-        void *o = next_arg(args, &ai, fmt, spec0, i - spec0);
-        double v = float_arg(conv, o);
+        void *o = next_arg(args, &ai, fixed, fmt, spec0, i - spec0);
+        double v;
         int upper = conv == 'E' || conv == 'G' || conv == 'A';
         fmtbuf body, t;
         const char *prefix = "";
         int64_t plen = 0;
+        if (!o) {
+          fmt_null(&out, &f, upper, P);
+          break;
+        }
+        v = float_arg(conv, o);
         fmtb_init(&body);
         if (v != v) {
           /* a NaN takes no sign and no zero padding, whatever the flags say */
           fmtb_add(&body, upper ? "NAN" : "NaN", 3);
           f.zero = 0;
         } else if (isinf(v)) {
+          /* an infinity is signed like any other number -- Java prints
+             "-Infinity" and "+(Infinity)" for the parenthesised negative --
+             but the zero flag still does not fill around it */
+          if (neg_sign(v)) {
+            prefix = "-";
+            plen = 1;
+          } else if (f.plus) {
+            prefix = "+";
+            plen = 1;
+          } else if (f.space) {
+            prefix = " ";
+            plen = 1;
+          }
           fmtb_add(&body, upper ? "INFINITY" : "Infinity", 8);
           f.zero = 0;
         } else {

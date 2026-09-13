@@ -1,0 +1,250 @@
+/* String.format -- and System.out.printf, which reaches it -- conversion by
+   conversion: every conversion Java defines, the flags, widths and precisions
+   each one takes, the combination each one refuses, and the argument index.
+   Every line's output was taken from this same program run on javac 25 with
+   -Duser.language=en -Duser.country=US, since Java's decimal separator and
+   grouping come from the default locale, so the expectation file is Java's
+   output and not this compiler's.
+
+   Three spellings differ from the Java original, none of them in the output.
+   The explicit boxes are here because a varargs call whose only argument is a
+   primitive is mis-compiled -- `String.format("%d", 7)` hands the integer 7 to
+   the callee in place of the argument array -- so a bare literal would not
+   run; what those boxes print is what Java's own autoboxing prints. The two
+   `new Object[] { }` spellings are the same workaround for a lone argument.
+   And Point is a top-level class here where Java nests it inside T95. */
+
+package teyru
+
+class Point {
+  int x
+  Point(int x) { this.x = x }
+  public String toString() { return "P(" + x + ")" }
+}
+
+class T95 {
+  static void p(String s) { System.out.println("[" + s + "]") }
+  public static void main(String[] args) {
+    Object nil = null
+    Point pt = new Point(7)
+    System.out.println("== %s ==")
+    p(String.format("%s", "abc"))
+    p(String.format("%s", Integer.valueOf(42)))
+    p(String.format("%s", Double.valueOf(1.5)))
+    p(String.format("%s", Boolean.valueOf(true)))
+    p(String.format("%s", pt))
+    p(String.format("%s", nil))
+    p(String.format("%S", "abc"))
+    p(String.format("%S", nil))
+    p(String.format("[%10s]", "abc"))
+    p(String.format("[%-10s]", "abc"))
+    p(String.format("[%.2s]", "abcdef"))
+    p(String.format("[%10.2s]", "abcdef"))
+    p(String.format("[%-10.2s]", "abcdef"))
+    p(String.format("[%.2s]", nil))
+    p(String.format("[%5s]", ""))
+    p(String.format("[%s|%s]", "a", "b"))
+    System.out.println("== %b %h ==")
+    p(String.format("%b", Boolean.valueOf(true)))
+    p(String.format("%b", Boolean.valueOf(false)))
+    p(String.format("%b", nil))
+    p(String.format("%b", "abc"))
+    p(String.format("%b", pt))
+    p(String.format("%B", "abc"))
+    p(String.format("[%8b]", Boolean.valueOf(true)))
+    p(String.format("[%-8b]", Boolean.valueOf(true)))
+    p(String.format("%h", "abc"))
+    p(String.format("%h", Integer.valueOf(12345)))
+    p(String.format("%h", nil))
+    p(String.format("%H", "abc"))
+    p(String.format("[%8h]", "abc"))
+    System.out.println("== %c ==")
+    p(String.format("%c", Character.valueOf('A')))
+    p(String.format("%c", Character.valueOf('z')))
+    p(String.format("%c", Integer.valueOf(97)))
+    p(String.format("%c", Byte.valueOf((byte) 66)))
+    p(String.format("%c", Short.valueOf((short) 67)))
+    p(String.format("%C", Character.valueOf('a')))
+    p(String.format("[%5c]", Character.valueOf('x')))
+    p(String.format("[%-5c]", Character.valueOf('x')))
+    p(String.format("%c", nil))
+    p(String.format("%c%c%c", Character.valueOf('a'), Character.valueOf('b'), Character.valueOf('c')))
+    System.out.println("== %d ==")
+    p(String.format("%d", Integer.valueOf(0)))
+    p(String.format("%d", Integer.valueOf(42)))
+    p(String.format("%d", Integer.valueOf(-42)))
+    p(String.format("%d", Long.valueOf(9000000000L)))
+    p(String.format("%d", Long.valueOf(-9000000000L)))
+    p(String.format("%d", Byte.valueOf((byte) -7)))
+    p(String.format("%d", Short.valueOf((short) 1234)))
+    p(String.format("%d", Integer.valueOf(Integer.MIN_VALUE)))
+    p(String.format("%d", Long.valueOf(Long.MIN_VALUE)))
+    p(String.format("%d", Long.valueOf(Long.MAX_VALUE)))
+    p(String.format("[%8d]", Integer.valueOf(42)))
+    p(String.format("[%-8d]", Integer.valueOf(42)))
+    p(String.format("[%08d]", Integer.valueOf(42)))
+    p(String.format("[%08d]", Integer.valueOf(-42)))
+    p(String.format("[%+d]", Integer.valueOf(42)))
+    p(String.format("[%+d]", Integer.valueOf(-42)))
+    p(String.format("[% d]", Integer.valueOf(42)))
+    p(String.format("[% d]", Integer.valueOf(-42)))
+    p(String.format("[%(d]", Integer.valueOf(42)))
+    p(String.format("[%(d]", Integer.valueOf(-42)))
+    p(String.format("[%(10d]", Integer.valueOf(-42)))
+    p(String.format("[%(010d]", Integer.valueOf(-42)))
+    p(String.format("%d", nil))
+    p(String.format("[%08d]", nil))
+    p(String.format("[%+d]", nil))
+    p(String.format("%,d", Integer.valueOf(1234567)))
+    p(String.format("%,d", Integer.valueOf(-1234567)))
+    p(String.format("%,d", Long.valueOf(1234567890123L)))
+    p(String.format("%,d", Integer.valueOf(100)))
+    p(String.format("%,d", Integer.valueOf(1000)))
+    p(String.format("[%,15d]", Integer.valueOf(1234567)))
+    p(String.format("[%,015d]", Integer.valueOf(1234567)))
+    System.out.println("== %o %x %X ==")
+    p(String.format("%o", Integer.valueOf(8)))
+    p(String.format("%o", Integer.valueOf(255)))
+    p(String.format("%x", Integer.valueOf(255)))
+    p(String.format("%X", Integer.valueOf(255)))
+    p(String.format("%x", Integer.valueOf(0)))
+    p(String.format("%x", Integer.valueOf(-1)))
+    p(String.format("%x", Long.valueOf(-1L)))
+    p(String.format("%o", Integer.valueOf(-1)))
+    p(String.format("%#o", Integer.valueOf(8)))
+    p(String.format("%#o", Integer.valueOf(0)))
+    p(String.format("%#x", Integer.valueOf(255)))
+    p(String.format("%#X", Integer.valueOf(255)))
+    p(String.format("[%8x]", Integer.valueOf(255)))
+    p(String.format("[%-8x]", Integer.valueOf(255)))
+    p(String.format("[%08x]", Integer.valueOf(255)))
+    p(String.format("[%#08x]", Integer.valueOf(255)))
+    p(String.format("[%#010x]", Integer.valueOf(255)))
+    p(String.format("%x", nil))
+    p(String.format("%X", nil))
+    p(String.format("%x", Long.valueOf(4294967296L)))
+    p(String.format("%o", Long.valueOf(4294967296L)))
+    System.out.println("== %e %E ==")
+    p(String.format("%e", Double.valueOf(0.0)))
+    p(String.format("%e", Double.valueOf(1.5)))
+    p(String.format("%e", Double.valueOf(-1.5)))
+    p(String.format("%e", Double.valueOf(1234567.0)))
+    p(String.format("%e", Double.valueOf(0.00012345)))
+    p(String.format("%.2e", Double.valueOf(1234.5678)))
+    p(String.format("%.0e", Double.valueOf(1234.5678)))
+    p(String.format("%E", Double.valueOf(1.5)))
+    p(String.format("[%15e]", Double.valueOf(1.5)))
+    p(String.format("[%-15e]", Double.valueOf(1.5)))
+    p(String.format("[%015e]", Double.valueOf(1.5)))
+    p(String.format("[%+e]", Double.valueOf(1.5)))
+    p(String.format("[%(e]", Double.valueOf(-1.5)))
+    p(String.format("%e", Float.valueOf(1.5f)))
+    p(String.format("%e", Double.valueOf(123456789.0)))
+    p(String.format("%e", nil))
+    System.out.println("== %f ==")
+    p(String.format("%f", Double.valueOf(0.0)))
+    p(String.format("%f", Double.valueOf(1.5)))
+    p(String.format("%f", Double.valueOf(-1.5)))
+    p(String.format("%f", Double.valueOf(1234567.891)))
+    p(String.format("%f", Double.valueOf(0.000001)))
+    p(String.format("%f", Double.valueOf(2.5)))
+    p(String.format("%.2f", Double.valueOf(2.345)))
+    p(String.format("%.2f", Double.valueOf(2.355)))
+    p(String.format("%.0f", Double.valueOf(2.5)))
+    p(String.format("%.0f", Double.valueOf(3.5)))
+    p(String.format("%.0f", Double.valueOf(-2.5)))
+    p(String.format("%.10f", Double.valueOf(1.0 / 3.0)))
+    p(String.format("%f", Float.valueOf(1.5f)))
+    p(String.format("[%12.3f]", Double.valueOf(3.14159)))
+    p(String.format("[%-12.3f]", Double.valueOf(3.14159)))
+    p(String.format("[%012.3f]", Double.valueOf(3.14159)))
+    p(String.format("[%012.3f]", Double.valueOf(-3.14159)))
+    p(String.format("[%+012.3f]", Double.valueOf(3.14159)))
+    p(String.format("[%(012.3f]", Double.valueOf(-3.14159)))
+    p(String.format("%,.2f", Double.valueOf(1234567.891)))
+    p(String.format("%#.0f", Double.valueOf(3.0)))
+    p(String.format("%f", nil))
+    p(String.format("%f", Double.valueOf(Double.NaN)))
+    p(String.format("%f", Double.valueOf(Double.POSITIVE_INFINITY)))
+    p(String.format("%f", Double.valueOf(Double.NEGATIVE_INFINITY)))
+    p(String.format("[%08f]", Double.valueOf(Double.NaN)))
+    p(String.format("[%(f]", Double.valueOf(Double.NEGATIVE_INFINITY)))
+    p(String.format("[%+f]", Double.valueOf(Double.POSITIVE_INFINITY)))
+    System.out.println("== %g %G ==")
+    p(String.format("%g", Double.valueOf(0.0)))
+    p(String.format("%g", Double.valueOf(1.0)))
+    p(String.format("%g", Double.valueOf(1.5)))
+    p(String.format("%g", Double.valueOf(1234567.0)))
+    p(String.format("%g", Double.valueOf(0.00012345)))
+    p(String.format("%g", Double.valueOf(100000.0)))
+    p(String.format("%g", Double.valueOf(123456789.0)))
+    p(String.format("%.2g", Double.valueOf(1234.5678)))
+    p(String.format("%.0g", Double.valueOf(1234.5678)))
+    p(String.format("%G", Double.valueOf(0.00012345)))
+    p(String.format("[%12g]", Double.valueOf(1.5)))
+    p(String.format("[%-12g]", Double.valueOf(1.5)))
+    p(String.format("[%012g]", Double.valueOf(1.5)))
+    p(String.format("[%+g]", Double.valueOf(1.5)))
+    p(String.format("[%(g]", Double.valueOf(-1.5)))
+    p(String.format("%g", nil))
+    System.out.println("== %a ==")
+    p(String.format("%a", Double.valueOf(0.0)))
+    p(String.format("%a", Double.valueOf(1.0)))
+    p(String.format("%a", Double.valueOf(3.0)))
+    p(String.format("%a", Double.valueOf(-3.0)))
+    p(String.format("%a", Double.valueOf(0.5)))
+    p(String.format("%A", Double.valueOf(1.0)))
+    p(String.format("[%15a]", Double.valueOf(1.0)))
+    p(String.format("%f %e %g %a", Double.valueOf(1.0), Double.valueOf(1.0), Double.valueOf(1.0), Double.valueOf(1.0)))
+    p(String.format("%a", nil))
+    System.out.println("== literals ==")
+    p(String.format("no specifiers at all"))
+    p(String.format("100%% sure"))
+    p(String.format("a%sb%dc", "x", Integer.valueOf(2)))
+    System.out.print("line one")
+    System.out.printf("%nline two%n")
+    System.out.printf("%s-%d%n", "tag", Integer.valueOf(3))
+    System.out.printf("[%5.2f]%n", new Object[] { Double.valueOf(1.23456) })
+    System.out.printf("%s%n", new Object[] { nil })
+    System.out.println("== errors ==")
+    try { String.format("%d", "x") } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%c", Long.valueOf(1)) } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%f", Integer.valueOf(1)) } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%d", Character.valueOf('a')) } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%x", Double.valueOf(1)) } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%d") } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%s %d", "a") } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%q", "x") } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%,x", Integer.valueOf(1)) } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%+s", "x") } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%05s", "x") } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%#s", "x") } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%.3d", Integer.valueOf(1)) } catch (Exception e) { p(e.getMessage()) }
+    p(String.format("%h", Double.valueOf(1.5)))
+    p(String.format("%h", Long.valueOf(1234567890123L)))
+    p(String.format("%h", Boolean.valueOf(true)))
+    System.out.println("== argument index ==")
+    p(String.format("%3$s %1$s", "a", "b", "c"))
+    p(String.format("%1$.2f", Double.valueOf(1.005)))
+    p(String.format("%2$d %% %1$x", Integer.valueOf(255), Integer.valueOf(8)))
+    p(String.format("%s %1$s", "a"))
+    p(String.format("[%2$8.3f]", Double.valueOf(1234.5678), Double.valueOf(1.5)))
+    System.out.println("== errors, continued ==")
+    try { String.format("%-s", "x") } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%-d", Integer.valueOf(1)) } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%5n") } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%-n") } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%0%") } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%.3n") } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%-05d", Integer.valueOf(1)) } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%  s", "x") } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%--s", "x") } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%(x", Integer.valueOf(1)) } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%.2c", Integer.valueOf(65)) } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%,%") } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%2$d", Integer.valueOf(9)) } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%(s", "x") } catch (Exception e) { p(e.getMessage()) }
+    try { String.format("%8$s", "x") } catch (Exception e) { p(e.getMessage()) }
+  }
+}
+

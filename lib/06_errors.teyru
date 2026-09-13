@@ -21,11 +21,23 @@ class Throwable extends Object {
   public String getMessage() {
     return message
   }
+  /* Java's getLocalizedMessage is getMessage for every throwable that does not
+     reach for a resource bundle, which is all of them here; it exists because
+     a program that catches a Throwable calls it. */
+  public String getLocalizedMessage() {
+    return getMessage()
+  }
+  /* Java's shape: the class name, then ": " and the message when there is one,
+     and the name alone when there is not -- so `throw new IllegalStateException()`
+     reads as "teyru.IllegalStateException". The package is this runtime's rather
+     than java.lang's, which is the one place a Teyru program cannot print what
+     javac would: the class it was thrown from really is teyru.IllegalStateException. */
   public String toString() {
+    String name = getClass().getName()
     if (message == null) {
-      return "Throwable"
+      return name
     }
-    return message
+    return name + ": " + message
   }
 }
 
@@ -93,6 +105,17 @@ class IllegalArgumentException extends RuntimeException {
   public IllegalArgumentException() {
   }
   public IllegalArgumentException(String message) {
+    super(message)
+  }
+}
+
+/* Thrown by the parseXxx methods of the wrappers. The runtime cannot raise it
+   the way it raises the exceptions above (there is no TY_ handle for it in the
+   generated startup), so every throw of one happens in Teyru code. */
+class NumberFormatException extends IllegalArgumentException {
+  public NumberFormatException() {
+  }
+  public NumberFormatException(String message) {
     super(message)
   }
 }
