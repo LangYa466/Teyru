@@ -1,0 +1,69 @@
+/* A local of the enclosing method read from a lambda written inside another
+   lambda. A capture is one hop: the inner closure can only copy the value out
+   of the outer closure's own object, so the outer one has to carry it too.
+   Recording the capture on the innermost lambda alone left the inner one
+   reading a C local of a function it is not compiled into. Expected output is
+   javac 25's for this same program. */
+
+package teyru
+
+interface Fn2<T, R> { R apply(T t) }
+
+class T122 {
+  static <T> void each(List<T> xs, Consumer<? super T> c) {
+    for (T t : xs) { c.accept(t) }
+  }
+  static int twice(Fn2<Integer, Integer> f, int v) { return f.apply(f.apply(v)) }
+
+  public static void main(String[] args) {
+    List<String> xs = new ArrayList<String>()
+    xs.add("a")
+    xs.add("b")
+    int n = 3
+    String tag = "t"
+
+    System.out.println("== a local read from a lambda inside a lambda ==")
+    Consumer<String> outer = s -> {
+      each(xs, t -> System.out.println(s + t + n + tag))
+    }
+    outer.accept("x")
+
+    System.out.println("== the same with no argument to pass through ==")
+    Runnable r = () -> {
+      Runnable inner = () -> System.out.println("inner " + n + tag)
+      inner.run()
+    }
+    r.run()
+
+    System.out.println("== two levels, and the value changes between them ==")
+    int counter = 0
+    Fn2<Integer, Integer> add = v -> v + n
+    System.out.println(twice(add, 10))
+    Consumer<Integer> c1 = v -> {
+      Consumer<Integer> c2 = w -> System.out.println(v + w + counter)
+      c2.accept(100)
+    }
+    c1.accept(1)
+
+    System.out.println("== a mutable local, read after it changed ==")
+    StringBuilder sb = new StringBuilder()
+    sb.append("start")
+    Runnable again = () -> {
+      Runnable note = () -> System.out.println(sb.toString() + "!")
+      note.run()
+    }
+    sb.setLength(0)
+    sb.append("changed")
+    again.run()
+
+    System.out.println("== the outer lambda's own parameter ==")
+    Consumer<String> deep = s -> {
+      Consumer<String> mid = m -> {
+        Runnable leaf = () -> System.out.println(s + "-" + m + "-" + n)
+        leaf.run()
+      }
+      mid.accept("mid")
+    }
+    deep.accept("deep")
+  }
+}

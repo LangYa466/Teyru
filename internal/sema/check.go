@@ -1437,18 +1437,45 @@ func (ctx *methodCtx) noteCapture(v *ast.Var) {
 	if ctx.lambda == nil {
 		return
 	}
-	// variables of the enclosing method are copied into the lambda object;
-	// the lambda's own parameters and locals stay on the C stack
-	if v.Owner == ctx.m {
-		return
-	}
-	for _, c := range ctx.lambda.Captures {
-		if c == v {
+	// A variable of an enclosing method is copied into the lambda object; the
+	// lambda's own parameters and locals stay on the C stack. Every lambda
+	// between this one and the variable's owner carries it, because a capture
+	// is one hop: a lambda written inside another lambda has to hold the value
+	// in its own object before it can copy it into a third. Recording only the
+	// innermost one left the inner closure reading a local of a method it is
+	// not compiled into, and the C name it emitted was the outer method's.
+	for lam := ctx.lambda; lam != nil; lam = lam.Outer {
+		if v.Owner == lambdaMethod(lam) {
 			return
 		}
+		seen := false
+		for _, c := range lam.Captures {
+			if c == v {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			lam.Captures = append(lam.Captures, v)
+		}
 	}
-	ctx.lambda.Captures = append(ctx.lambda.Captures, v)
 	v.Captured = true
+}
+
+// lambdaMethod is the synthesized method a lambda's body is checked in, which
+// is what decides whether a variable belongs to the lambda itself.
+func lambdaMethod(lam *ast.Lambda) *ast.Method {
+	if lam.Class == nil {
+		return nil
+	}
+	for _, ms := range lam.Class.Methods {
+		for _, m := range ms {
+			if m.Lambda == lam {
+				return m
+			}
+		}
+	}
+	return nil
 }
 
 func (ctx *methodCtx) captureOuter(target *ast.Class, v *ast.Var) {
@@ -2574,6 +2601,14 @@ func (ctx *methodCtx) applicable(recv *ast.ClassType, m *ast.Method, args []ast.
 	if m.Varargs && len(args) == len(params) {
 		direct, boxed, total := true, false, 0
 		for i, a := range args {
+			// The array that stands in for the variable arguments is an
+			// ordinary argument here, and it is the only thing that can say
+			// what the method's type variable is: `asList(String[])` settles
+			// T = String, and without this the call was rejected for a type
+			// argument that was sitting in the argument list all along.
+			if len(mbind) > 0 {
+				params[i] = c.inferTypeArg(params[i], a.GetType(), mbind)
+			}
 			cost, ok := ctx.convCost(a.GetType(), params[i])
 			if !ok {
 				direct = false
@@ -2608,7 +2643,7 @@ func (ctx *methodCtx) applicable(recv *ast.ClassType, m *ast.Method, args []ast.
 			// any functional interface will do; the argument is checked once the
 			// overload is known
 			if pt != nil {
-				if i < len(params) {
+				if i < n {
 					params[i] = c.subst(pt, mbind)
 				}
 				s.total += 1
@@ -2617,7 +2652,13 @@ func (ctx *methodCtx) applicable(recv *ast.ClassType, m *ast.Method, args []ast.
 		}
 		if len(mbind) > 0 {
 			pt = c.inferTypeArg(pt, a.GetType(), mbind)
-			if i < len(params) {
+			// Only a fixed parameter may be written back. A variable-arity
+			// element is not a parameter: `asList(w, w)` has one parameter,
+			// `T[]`, and putting the inferred `String[]` into params[0] turned
+			// the next element's type into String -- so a call whose every
+			// argument is an array was rejected for a method that is right
+			// there.
+			if i < n {
 				params[i] = pt
 			}
 		}
