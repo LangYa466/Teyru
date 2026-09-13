@@ -3,11 +3,14 @@ package teyru
 interface List<T> extends Iterable<T> {
   int size()
   T get(int i)
+  T set(int i, T v)
   void add(T v)
   void addAll(List<T> other)
   boolean isEmpty()
   boolean contains(T v)
   int indexOf(T v)
+  boolean remove(T v)
+  void clear()
 }
 
 interface Map<K, V> {
@@ -19,6 +22,7 @@ interface Map<K, V> {
   int size()
   boolean isEmpty()
   List<K> keys()
+  List<V> values()
 }
 
 class ArrayList<T> implements List<T>, Iterable<T> {
@@ -109,6 +113,16 @@ class ArrayList<T> implements List<T>, Iterable<T> {
       }
     }
     return -1
+  }
+
+  // removes the first element equal to v, like Java's List.remove(Object)
+  public boolean remove(T v) {
+    int i = indexOf(v)
+    if (i < 0) {
+      return false
+    }
+    removeAt(i)
+    return true
   }
 
   public void clear() {
@@ -230,6 +244,16 @@ class HashMap<K, V> implements Map<K, V> {
     for (int i = 0 : i < keys.length : i++) {
       if (keys[i] != null) {
         out.add((K) keys[i])
+      }
+    }
+    return out
+  }
+
+  public List<V> values() {
+    ArrayList<V> out = new ArrayList<V>(count > 0 ? count : 1)
+    for (int i = 0 : i < keys.length : i++) {
+      if (keys[i] != null) {
+        out.add((V) values[i])
       }
     }
     return out

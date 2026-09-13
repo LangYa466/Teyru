@@ -1,0 +1,23 @@
+class Main {
+  public static void main(String[] args) {
+    List<String> l = new ArrayList<String>()
+    l.add("a")
+    l.add("b")
+    l.add("a")
+    System.out.println(l + " " + l.size())
+    System.out.println(l.remove("a") + " " + l)
+    System.out.println(l.set(0, "z") + " " + l)
+    l.clear()
+    System.out.println(l.size() + " " + l.isEmpty())
+    Map<String, Integer> m = new HashMap<String, Integer>()
+    m.put("x", 1)
+    m.put("y", 2)
+    List<Integer> vs = m.values()
+    int sum = 0
+    for (Integer v : vs) {
+      sum += v
+    }
+    System.out.println(sum + " " + vs.size())
+    System.out.println(m.remove("x") + " " + m.size())
+  }
+}
