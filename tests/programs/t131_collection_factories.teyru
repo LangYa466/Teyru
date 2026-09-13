@@ -1,0 +1,52 @@
+/* Java's List.of, Set.of, Map.of and Map.ofEntries: immutable, null-hostile,
+   and a duplicate is an error at the call rather than a shorter collection.
+   Expected output is javac 25's.
+
+   One thing written differently: the JDK spells out one overload per arity up
+   to ten for List.of, while one variable-arity method serves every arity here.
+   The observable behaviour is the same. */
+
+package teyru
+
+class T131 {
+  public static void main(String[] args) {
+    System.out.println("== List.of ==")
+    List<String> xs = List.of("a", "b", "c")
+    System.out.println(xs + " size=" + xs.size())
+    System.out.println(List.of())
+    System.out.println(xs.contains("b"))
+    System.out.println(xs.indexOf("c"))
+    System.out.println(List.of(1, 2, 3))
+    try { List.of("a", null) } catch (Exception e) { System.out.println("E1 " + e.getMessage()) }
+    try { xs.add("d") } catch (Exception e) { System.out.println("E2 " + e.getMessage()) }
+    System.out.println("== Set.of ==")
+    Set<Integer> s = Set.of(1, 2, 3)
+    // Java's Set.of has an unspecified iteration order (and a salted one), so
+    // the order is not printed -- everything else about it is.
+    System.out.println("size=" + s.size() + " has2=" + s.contains(2) + " has9=" + s.contains(9))
+    System.out.println(s.contains(2))
+    try { Set.of(1, 1) } catch (Exception e) { System.out.println("E3 " + e.getMessage()) }
+    try { s.remove(1) } catch (Exception e) { System.out.println("E4 " + e.getMessage()) }
+    System.out.println("== Map.of ==")
+    Map<String, Integer> m = Map.of("a", 1, "b", 2)
+    System.out.println("size=" + m.size() + " b=" + m.get("b") + " keys=" + new TreeSet<String>(m.keySet()))
+    System.out.println(Map.of())
+    System.out.println(Map.of("k", 7).get("k"))
+    System.out.println(new TreeMap<String, Integer>(Map.of("k", 7, "l", 8, "m", 9)))
+    try { Map.of("a", 1, "a", 2) } catch (Exception e) { System.out.println("E5 " + e.getMessage()) }
+    try { m.put("z", 1) } catch (Exception e) { System.out.println("E6 " + e.getMessage()) }
+    System.out.println("== Map.ofEntries and Map.entry ==")
+    Map<String, Integer> m2 = Map.ofEntries(Map.entry("x", 9), Map.entry("y", 8))
+    System.out.println(new TreeMap<String, Integer>(m2) + " " + m2.get("x"))
+    System.out.println(Map.entry("k", 7))
+    System.out.println("== the same in Java's own printed order, which is salted ==")
+    System.out.println("Set.of(1,2,3).size() = " + Set.of(1, 2, 3).size())
+    System.out.println("== an immutable view is what unmodifiableMap gives ==")
+    Map<String, Integer> src = new LinkedHashMap<String, Integer>()
+    src.put("p", 1)
+    Map<String, Integer> view = Collections.unmodifiableMap(src)
+    src.put("q", 2)
+    System.out.println(view)
+    try { view.put("r", 3) } catch (Exception e) { System.out.println("E7 " + e.getMessage()) }
+  }
+}

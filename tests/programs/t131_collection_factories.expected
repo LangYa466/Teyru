@@ -1,0 +1,28 @@
+== List.of ==
+[a, b, c] size=3
+[]
+true
+2
+[1, 2, 3]
+E1 null
+E2 null
+== Set.of ==
+size=3 has2=true has9=false
+true
+E3 duplicate element: 1
+E4 null
+== Map.of ==
+size=2 b=2 keys=[a, b]
+{}
+7
+{k=7, l=8, m=9}
+E5 duplicate key: a
+E6 null
+== Map.ofEntries and Map.entry ==
+{x=9, y=8} 9
+k=7
+== the same in Java's own printed order, which is salted ==
+Set.of(1,2,3).size() = 3
+== an immutable view is what unmodifiableMap gives ==
+{p=1, q=2}
+E7 null

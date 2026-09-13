@@ -2537,6 +2537,19 @@ func (ctx *methodCtx) checkInferred(m *ast.Method, s ovScore, args []ast.Expr) {
 			ctx.c.inferTypeArg(s.instArgs[i], act, targs)
 		}
 	}
+	// A call with no arguments and no target says nothing about the method's
+	// type variables, and Java answers Object for one that nothing else
+	// constrains: `List.of()` is a `List<Object>`, not a mistake. (The JDK
+	// spells that one out as its own overload; a variable-arity method reaches
+	// the same place with an empty argument list.)
+	if len(args) == 0 {
+		for _, tv := range m.TypeParams {
+			if targs[tv] == nil && mentionsTypeVar(m, tv) {
+				targs[tv] = ctx.c.objType
+			}
+		}
+		return
+	}
 	missing := false
 	for _, tv := range m.TypeParams {
 		if targs[tv] == nil && mentionsTypeVar(m, tv) {

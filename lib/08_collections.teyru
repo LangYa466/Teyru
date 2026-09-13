@@ -112,6 +112,22 @@ interface List<T> extends Collection<T> {
   List<T> subList(int fromIndex, int toIndex)
   boolean addAll(int index, Collection<? extends T> c)
 
+  /* Java's List.of: an immutable list of the arguments, and null-hostile --
+     a null element is a NullPointerException at the call rather than a list
+     that fails later. The JDK spells out one overload per arity up to ten to
+     avoid building an array; one variable-arity method does the same job here
+     and is what every call ends up at anyway. */
+  static <E> List<E> of(E... elements) {
+    List<E> out = new ArrayList<E>()
+    for (E e : elements) {
+      if (e == null) {
+        throw new NullPointerException()
+      }
+      out.add(e)
+    }
+    return Collections.unmodifiableList(out)
+  }
+
   /* Java's List.sort: copy to an array, sort it, write it back through the
      list iterator. Arrays.sort and Collections.sort both end up here, so the
      library has one merge sort rather than three. TimSort and this agree on
@@ -169,6 +185,22 @@ interface List<T> extends Collection<T> {
 // ---------------------------------------------------------------------- Sets
 
 interface Set<T> extends Collection<T> {
+  /* Java's Set.of rejects duplicates as well as nulls: a set of two equal
+     elements is a mistake at the call, not a set of one. */
+  static <E> Set<E> of(E... elements) {
+    Set<E> out = new LinkedHashSet<E>()
+    for (E e : elements) {
+      if (e == null) {
+        throw new NullPointerException()
+      }
+      if (out.contains(e)) {
+        throw new IllegalArgumentException("duplicate element: " + e)
+      }
+      out.add(e)
+    }
+    return Collections.unmodifiableSet(out)
+  }
+
   boolean equals(Object o)
   int hashCode()
 }
@@ -247,6 +279,63 @@ interface Map<K, V> {
   V remove(Object key)
   void putAll(Map<? extends K, ? extends V> m)
   void clear()
+  /* Java's Map.of takes up to ten key/value pairs as separate arguments, which
+     this language can only spell as fixed arities; ofEntries takes the pairs
+     the way the JDK's own varargs form does. Both are null-hostile and both
+     reject a repeated key, as Java's do. */
+  static <K, V> Map<K, V> of() {
+    return Collections.unmodifiableMap(new LinkedHashMap<K, V>())
+  }
+
+  static <K, V> Map<K, V> of(K k1, V v1) {
+    Map<K, V> out = new LinkedHashMap<K, V>()
+    putNew(out, k1, v1)
+    return Collections.unmodifiableMap(out)
+  }
+
+  static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2) {
+    Map<K, V> out = new LinkedHashMap<K, V>()
+    putNew(out, k1, v1)
+    putNew(out, k2, v2)
+    return Collections.unmodifiableMap(out)
+  }
+
+  static <K, V> Map<K, V> of(K k1, V v1, K k2, V v2, K k3, V v3) {
+    Map<K, V> out = new LinkedHashMap<K, V>()
+    putNew(out, k1, v1)
+    putNew(out, k2, v2)
+    putNew(out, k3, v3)
+    return Collections.unmodifiableMap(out)
+  }
+
+  static <K, V> Map<K, V> ofEntries(Entry<? extends K, ? extends V>... entries) {
+    Map<K, V> out = new LinkedHashMap<K, V>()
+    for (Entry<? extends K, ? extends V> e : entries) {
+      if (e == null || e.getKey() == null || e.getValue() == null) {
+        throw new NullPointerException()
+      }
+      putNew(out, e.getKey(), e.getValue())
+    }
+    return Collections.unmodifiableMap(out)
+  }
+
+  static <K, V> Entry<K, V> entry(K k, V v) {
+    if (k == null || v == null) {
+      throw new NullPointerException()
+    }
+    return new SimpleEntry<K, V>(k, v)
+  }
+
+  private static <K, V> void putNew(Map<K, V> m, K k, V v) {
+    if (k == null || v == null) {
+      throw new NullPointerException()
+    }
+    if (m.containsKey(k)) {
+      throw new IllegalArgumentException("duplicate key: " + k)
+    }
+    m.put(k, v)
+  }
+
   Set<K> keySet()
   /* Java returns Collection<V> here. Teyru's standard library shipped List<V>
      -- it had no Collection interface to return -- and programs are written
@@ -1233,10 +1322,55 @@ class HashMapIterator<K, V> implements ListIterator<Map.Entry<K, V>>, Iterator<M
   }
 
   public void set(Map.Entry<K, V> e) {
-    throw new UnsupportedOperationException("set")
+    throw new UnsupportedOperationException()
   }
 
   public void add(Map.Entry<K, V> e) {
-    throw new UnsupportedOperationException("add")
+    throw new UnsupportedOperationException()
+  }
+}
+
+/* The immutable entry Map.entry returns, which is Java's AbstractMap.SimpleEntry
+   under the name the JDK's own Map.ofEntries uses internally. */
+class SimpleEntry<K, V> implements Map.Entry<K, V> {
+  private K key
+  private V value
+
+  public SimpleEntry(K key, V value) {
+    this.key = key
+    this.value = value
+  }
+
+  public K getKey() {
+    return key
+  }
+
+  public V getValue() {
+    return value
+  }
+
+  public V setValue(V v) {
+    V old = value
+    value = v
+    return old
+  }
+
+  public boolean equals(Object o) {
+    if (o == this) {
+      return true
+    }
+    if (!(o instanceof Map.Entry)) {
+      return false
+    }
+    Map.Entry<K, V> e = (Map.Entry<K, V>) o
+    return Objects.equals(key, e.getKey()) && Objects.equals(value, e.getValue())
+  }
+
+  public int hashCode() {
+    return Objects.hashCode(key) ^ Objects.hashCode(value)
+  }
+
+  public String toString() {
+    return key + "=" + value
   }
 }
