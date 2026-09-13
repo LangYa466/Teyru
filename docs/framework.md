@@ -76,12 +76,14 @@ class Main {
 ### 建構子選擇
 
 Spring 4.3 起的規則：只有一個建構子就用它，否則找標了 `@Autowired` 的，否則用無參
-的那個。兩個都標或都沒有而有多個，是 `TY-TYP-0105`。
+的那個。標了多個 `@Autowired`，或都沒有而有多個又沒有無參建構子時，是
+`TY-TYP-0105`。
 
 ### 生命週期
 
-`refresh()` 會把每個 singleton 都建起來，所以缺相依會在啟動時（而不是第一次請求
-時）報出來。bean 的建立是遞迴的：要 A 就先建它需要的 B。`creating` 旗標擋住環。
+`refresh()` 會把每個 singleton 都建起來，所以建構與注入的失敗會在啟動時（而不是
+第一次請求時）報出來——缺 bean 更早就擋掉了，那是編譯期的 `TY-TYP-0103`。bean 的
+建立是遞迴的：要 A 就先建它需要的 B。`creating` 旗標擋住環。
 
 `@PostConstruct` 由產生的注入器在注入完成後呼叫。`@PreDestroy` 已宣告但**沒有**
 執行——Teyru 沒有行程關閉鉤子，容器也沒有 `close()`。
@@ -121,7 +123,7 @@ class PetController {
 | `@GetMapping`／`@PostMapping`／`@PutMapping`／`@DeleteMapping`／`@PatchMapping` | 路徑與動詞 |
 | `@PathVariable` | 路徑裡 `{name}` 的值，會轉成參數的型別 |
 | `@RequestParam` | 查詢參數，`defaultValue` 可給預設 |
-| `@RequestHeader` | 請求標頭（名稱不分大小寫），`defaultValue` 可給預設 |
+| `@RequestHeader` | 請求標頭（名稱不分大小寫）；`defaultValue` 已宣告但沒有作用，缺標頭時是空字串 |
 | `@RequestBody` | 請求主體；參數是 `String` 就原樣拿到，是類別（或 record）就以 Gson 綁定解析 |
 | `@ResponseBody` | 已宣告；`@RestController` 本來就隱含，所以有沒有都一樣 |
 
@@ -136,8 +138,8 @@ payload 就是這樣接），是類別或 record 時由**編譯器為該型別�
 錯誤，不是第一次請求時的例外。
 
 **回應**：回傳 `HttpResponse` 就完全自己決定；回傳 `String` 是 `text/plain`；回傳
-`void` 是空主體；其他型別以 Gson 綁定序列化成 `application/json`（見
-`docs/json.md`）。
+`void` 是空主體；其他類別（含 record）以 Gson 綁定序列化成 `application/json`（見
+`docs/json.md`）。基本型別沒有映射，跟陣列、`List` 一樣是 `TY-TYP-0111`。
 
 **路由**：`Router.match` 取最特定的符合——字面片段勝過變數片段，所以
 `/pets/mine` 不會被 `/pets/{id}` 吃掉，與註冊順序無關。路徑存在但動詞不對是 405，
@@ -160,7 +162,8 @@ HttpServer server = new HttpServer(port, router, ctx)
    要等第一個處理完。這對「會回應請求的程式」夠用，對「服務一群人」不夠；形狀已經
    是 thread-per-connection 需要的形狀。
 2. **沒有內容協商。** 只看方法的宣告型別，不看 `Accept`。
-3. **回傳陣列或 `List` 還沒有 JSON 映射**（`TY-TYP-0111`），因為綁定尚未支援它們。
+3. **回傳陣列、`List` 或基本型別還沒有 JSON 映射**（`TY-TYP-0111`），因為綁定尚未
+   支援它們。
 4. **只有 `Application.boot` 讀 `--key=value` 形式的命令列參數**寫進屬性；沒有
    `application.properties` 檔案的讀取。
 5. **`@PreDestroy` 不執行**；沒有 `@Conditional`、`@Profile`、`@Import`、

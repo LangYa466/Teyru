@@ -33,9 +33,9 @@ class Native {
 teyru build --native-header native.h program.teyru -o program
 ```
 
-標頭檔會在連結失敗之前就寫出來：這個命令仍然會嘗試連結，所以在你提供實作之前
-它會以 `undefined reference to 'tyn_...'` 結束。看到那些符號就代表標頭檔已經產生，
-接著做第三步即可。
+程式裡有 native 方法又沒給 `--native` 時，這個命令寫完標頭檔就停下來，不會嘗試連結
+（連結必定會以 `undefined reference to 'tyn_...'` 失敗），所以它會成功的結束、只留下
+標頭檔。接著做第三步即可。
 
 `native.h` 只包含你必須實作的東西：
 
@@ -87,8 +87,10 @@ tyn_<類別>_<方法>_<參數型別…>
 
 - 類別與方法名以 `util.Mangle` 轉寫：`.` 與 `$` 變成 `_`。
 - 參數型別是描述子：`I` int、`J` long、`D` double、`F` float、`Z` boolean、
-  `B` byte、`S` short、`C` char、`A` 陣列、`O` 型別變數，其他類別用其簡單名稱
+  `B` byte、`S` short、`C` char、`O` 型別變數，其他類別用其簡單名稱
   （例如 `String`）。
+- 陣列是 `A` **再加元素描述子**：`int[]` 是 `AI`、`int[][]` 是 `AAI`、
+  `String[]` 是 `AString`。
 - 沒有參數就沒有尾綴。多載會自然得到不同的名字，不需要額外規則。
 
 不必自己推導：`--native-header` 產生的就是這個名字。
@@ -138,21 +140,23 @@ int32_t f = me->f_factor;
 | `ty_array_new(int64_t len, int64_t elemsize)` | 建立陣列 |
 | `ty_array_len(tyarr *a)` | 陣列長度 |
 | `ty_alloc(size_t)` | 從 GC 堆積配置（會自動被回收） |
-| `ty_throw(tyobj *e)` | 丟出 Teyru 例外 |
+| `ty_throw(void *e)` | 丟出 Teyru 例外 |
 | `ty_itab(void *obj, int selector)` | 取得介面方法的函式指標 |
 
 ---
 
 ## 5. 回呼：從 C 呼叫 Teyru
 
-`--native-header` 也會輸出介面方法的 selector（數值由編譯器配置，這裡列出的是目前的樣子）：
+`--native-header` 也會輸出介面方法的 selector（數值由編譯器配置，這裡列出的是目前的
+樣子）。名字是 `TY_SEL_<介面>_<方法>_<參數描述子>`，方法沒有參數時就沒有尾綴
+（例如 `TY_SEL_AUTOCLOSEABLE_CLOSE`）：
 
 ```c
-#define TY_SEL_TRANSFORM_TRANSFORM 5
+#define TY_SEL_TRANSFORM_TRANSFORM_I 275
 
 int32_t tyn_Native_apply_Transform_I(void *t, int32_t v) {
   int32_t (*fn)(void *, int32_t) =
-      (int32_t (*)(void *, int32_t))ty_itab(t, TY_SEL_TRANSFORM_TRANSFORM);
+      (int32_t (*)(void *, int32_t))ty_itab(t, TY_SEL_TRANSFORM_TRANSFORM_I);
   return fn(t, v);
 }
 ```

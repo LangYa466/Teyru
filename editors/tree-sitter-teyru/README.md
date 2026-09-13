@@ -18,7 +18,7 @@ grammar.js            the grammar
 src/parser.c          generated parser (checked in, as tree-sitter expects)
 src/grammar.json      generated
 src/node-types.json   generated
-src/tree_sitter/      generated headers
+src/tree_sitter/      tree-sitter's own headers, copied in (MIT, see ../../THIRD-PARTY-NOTICES.md)
 queries/highlights.scm  highlighting, including Teyru's properties and val
 queries/locals.scm      scopes, definitions and references
 queries/indents.scm     what indents, and where
@@ -126,8 +126,8 @@ whole Java-25 surface the compiler implements:
 tree-sitter cannot keep a newline as a token while also skipping whitespace
 (`extras`), so the grammar guesses where a statement ends and uses precedence
 to prefer the reading the compiler's own `parseStatement` prefers.  The guess
-is right for the corpus (every file in `tests/programs/` and `lib/` parses
-with no `ERROR` and no `MISSING` node — 86 files when this was written), but
+is right for the corpus (every file in `tests/programs/` and `lib/` parsed
+with no `ERROR` and no `MISSING` node — 86 files when that was checked), but
 it is a guess, and three shapes show it:
 
 ```teyru
@@ -144,6 +144,10 @@ Outer.this.x  // read as `(Outer.this).x` with `this` a field name;
 The parser never reports an error for these; the tree is simply not the one
 the compiler would build.  A grammar that used a `line_break` token could
 resolve them, at the cost of having to mention the token everywhere.
+
+The corpus has grown since — 185 files at the last count, the standard library
+included — and it has not been re-checked against the parser, so read that 86
+as a snapshot rather than a claim about the current tree.
 
 Other deliberate looseness:
 

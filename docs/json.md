@@ -7,13 +7,14 @@ Teyru 的 JSON 分成兩層：`lib/10_json.teyru` 是 Gson 的**樹狀 API**（�
 
 `JsonElement`、`JsonObject`、`JsonArray`、`JsonPrimitive`、`JsonNull`、
 `JsonParser.parseString`、`Gson`、`GsonBuilder`、`JsonSyntaxException`，
-行為對齊 Gson 2.10.1，包含幾個容易做錯的細節：
+行為對齊 Gson 2.10.0，包含幾個容易做錯的細節：
 
 - `JsonNull` 繼承 `JsonElement` 而不是 `JsonPrimitive`（Gson 2.10 的改動）。
 - 解析後的數字保留原始字面量，所以 `1e5` 印回來還是 `1e5`，不會變成 `100000.0`。
 - 逸出規則照 Gson 的替換表：`"` 與 `\` 會逸出、五個短形式 `\b \t \n \f \r`、
   其餘小於 0x20 的用 `\u00xx`（小寫十六進位）、`/` **不**逸出、非 ASCII 以 UTF-8
-  輸出而不是 `\u` 逸出，只有 U+2028／U+2029 例外。
+  輸出而不是 `\u` 逸出，只有 U+2028／U+2029 例外；`<`、`>`、`&`、`=`、`'` 只在
+  htmlSafe 的寫法（預設的 `new Gson()`）下逸出，`JsonElement.toString()` 不逸出。
 - 空物件與空陣列在 pretty print 時保持一行（`{}`、`[]`）。
 
 與 Gson 的差異（刻意的）：
@@ -21,8 +22,8 @@ Teyru 的 JSON 分成兩層：`lib/10_json.teyru` 是 Gson 的**樹狀 API**（�
 - `JsonParser.parseString` 是嚴格的（RFC 8259）。Gson 寬鬆模式接受的 `{a:1}`、
   `'單引號'`、`01`、`+1`、`.5`、`1.`、`NaN`、`[1,]` 一律拒絕並丟
   `JsonSyntaxException`；空文件也拒絕，尾端多餘資料一律拒絕。
-- `entrySet()` 回傳 `List<JsonMember>`、`keySet()` 回傳 `List<String>`，因為標準
-  程式庫還沒有 `Set`，`Map` 也沒有巢狀 `Entry`。
+- `entrySet()` 回傳 `List<JsonMember>`、`keySet()` 回傳 `List<String>`（Gson 給的是
+  `Set`）；`JsonMember` 的 `getKey`／`getValue` 對應 `Map.Entry`。
 - 數字只到 `long`，沒有 `getAsBigDecimal`／`getAsBigInteger`。
 - 數值存取器丟 `IllegalArgumentException` 而不是 `NumberFormatException`
   （標準程式庫沒有後者；前者是它的父類別，所以 catch 父類別的程式碼不受影響）。
@@ -55,8 +56,8 @@ String out = gson.toJson(p)
 
 - **不需要 cast**：Gson 的 `<T> T fromJson(String, Class<T>)` 在 Teyru 無法表達
   （`Class` 不是泛型），但改寫後的回傳型別就是目標類別本身。
-- **欄位型別沒有映射是編譯錯誤**（`TY-TYP-0110`），而不是執行期從反射轉接器深處
-  拋出的 `IllegalArgumentException`。
+- **欄位型別沒有映射是編譯錯誤**（`TY-TYP-0110`；`List`／`Map` 這類 prelude 類別是
+  `TY-TYP-0108`），而不是執行期從反射轉接器深處拋出的 `IllegalArgumentException`。
 - 綁定是**依呼叫點產生**的：沒有用到就不產生，而且欄位清單是產生當下的（Lombok
   產生的成員也在內）。
 

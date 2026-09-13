@@ -30,8 +30,9 @@
 - 字面值：整數（十進位、`0x`、`0b`、`0` 開頭八進位、`_` 分隔、`L` 後綴）、
   浮點（`f`／`d` 後綴、指數）、`char`、`String`、text block `"""…"""`、
   `true`／`false`／`null`。
-- 跳脫序列：`\n \t \r \b \f \s \0-7 \uXXXX`；`\<換行>` 續行在一般字串與 text block
-  都適用，未知的跳脫字元會去掉反斜線後原樣輸出（`\q` 就是 `q`，不是錯誤）。
+- 跳脫序列：`\n \t \r \b \f \s \0-7 \uXXXX` 與 `\\ \' \"`；`\<換行>` 續行在一般字串
+  與 text block 都適用。這份清單以外的跳脫序列是錯誤，會得到 `TY-SYN-0011`
+  （`\q` 不是 `q`）。
 
 **沒有分號。** 分號不是合法 token，會直接產生 `TY-SYN-0001`；
 字串、字元、註解與 text block 內的分號是資料，不受影響。
@@ -55,7 +56,8 @@
 
 - `return` 後直接換行＝無值回傳；要回傳值，運算式必須從同一行開始，
   或用 `return (` 讓它跨行。
-- `throw` 與需要值的 `yield` 同理。
+- `throw` 同理：運算式沒接在同一行就是 `TY-SYN-0003`。`yield` 也拿不到下一行的值，
+  但它是被當成識別字，訊息因此是 `cannot find symbol yield`。
 - `++`／`--` 不跨行附著：後綴運算子必須與運算元同行。
 - 不能在行末用 `;` 塞多個敘述，請分行。
 - `do { … } while (c)` 之後不加分號。
@@ -160,7 +162,8 @@ record Point(int x, int y) {
   沒有常數但有成員時以冒號開頭。
 - `record` 自動產生私有 final 欄位、accessor、`toString`、`hashCode`、`equals`
   與標準建構子；也可寫精簡建構子（compact constructor）補驗證。
-- `annotation` 型別可以宣告並使用，但沒有執行期反射。
+- annotation 型別（`@interface`）可以宣告並使用，但沒有執行期反射；`annotation`
+  不是關鍵字。
 
 ### 4.2 欄位與方法
 
@@ -220,9 +223,9 @@ class Person {
 | 主題 | 行為 |
 |---|---|
 | 儲存 | 有初始值、有預設 accessor、有 setter，或 accessor 內用到 `field` 時才需要儲存；否則為計算 property，且不能用 `final`／`volatile`／`transient`。 |
-| `field` | 只在该 property 的 accessor 內代表底層儲存；其他地方的 `field` 還是一般識別字。 |
+| `field` | 只在該 property 的 accessor 內代表底層儲存；其他地方的 `field` 還是一般識別字。 |
 | 可見性 | property 的修飾符是 accessor 的預設可見性；底層儲存一律 `private`。 |
-| 存取 | `p.years` 讀取呼叫 getter，`p.years = v` 呼叫 setter，`p.years += 1` 先 getter 再 setter。物件初始化與建構子內的指派直接寫入儲存，不呼叫 setter。 |
+| 存取 | `p.years` 讀取呼叫 getter，`p.years = v` 呼叫 setter，`p.years += 1` 先 getter 再 setter。只有屬性宣告上的初始值直接寫入儲存；建構子與初始化區塊裡的指派跟其他地方一樣會呼叫 setter。 |
 | 命名 | JavaBeans：getter `getX`（`boolean` 可用 `isX`），setter `setX`。也可以直接呼叫 `p.getYears()`。 |
 | 繼承 | accessor 參與覆寫、可視性與泛型代換，與一般方法相同。 |
 | `final` | `final` property 不能有 setter。 |
@@ -242,7 +245,7 @@ for ( : : ) {          // 無窮迴圈
 ```
 
 三段用**兩個頂層冒號**分隔。括號、中括號、大括號內以及三元運算子的 `:`
-不會被當成分隔符，所以 `for (int i = 0 : i < n ? a : b : i++)` 合法。
+不會被當成分隔符，所以 `for (int i = a > b ? 0 : 1 : i < 3 : i++)` 合法。
 
 ### 6.2 增強 for
 
@@ -302,8 +305,9 @@ String kind = switch (obj) {
 
 - `:` 形式保有 Java 的 fall-through；`->` 形式不會。
 - 同一個 switch 不能混用兩種形式。
-- switch 運算式若沒有任何 case 命中且沒有 `default`，執行期會拋出
-  `IllegalStateException`。
+- switch **運算式**必須窮盡：沒有 `default` 又沒有涵蓋所有值時是 `TY-TYP-0096`
+  編譯錯誤（`int`／`String` 選擇子一律要 `default`；列舉選擇子要列完每一個常數），
+  不會產生一個默默算成零值的結果。switch **陳述式**沒有這個要求。
 
 ### 6.5 其他
 
@@ -323,9 +327,12 @@ String kind = switch (obj) {
 - `instanceof` 支援型別 pattern：`if (o instanceof String s) { … }`，以及 record 解構
   pattern：`if (o instanceof Point(int x, int y)) { … }`。
 - **原生型別 pattern**（JEP 507）：`if (o instanceof int i)`、`case byte b ->`。
-  配對條件是**轉換精確**：`Integer(42)` 可以匹配 `int`、`long`、`double`，也可以
-  匹配 `byte`，但 `Integer(300)` 不匹配 `byte`；`16777217` 不匹配 `float`
-  （會失真），`16777216` 則匹配。`boolean` 只和 `Boolean` 配對，`null` 一律不匹配。
+  配對條件是**轉換精確**，規則與 Java 相同，分選擇子的兩種型別：
+  - 選擇子是**參考型別**時，只有它的包裝型別剛好等於該原生型別才匹配：
+    `Integer(42)` 匹配 `int`，但不匹配 `long`、`double`、`byte`。
+  - 選擇子是**原生數值**時，值能精確轉成該型別才匹配：`42` 匹配 `byte`，
+    `16777217` 不匹配 `float`（會失真），`16777216` 則匹配。
+  `boolean` 只和 `Boolean` 配對，`null` 一律不匹配。
   原生型別 pattern 一定要有變數名稱。
 
   ```teyru
@@ -421,7 +428,7 @@ try {
   `IllegalArgumentException`、`IllegalStateException`、`NoSuchElementException`、
   `NegativeArraySizeException`、`ArrayStoreException`、`AssertionError`、
   `UnsupportedOperationException`。
-- 讀取 null 參考的欄位、呼叫 null 參考的方法、對 null 參考賦值都會丟
+- 對 `null` 讀**寫**欄位、呼叫方法、讀寫陣列元素（含取 `length`）都會丟
   `NullPointerException`。
 - `catch` 多型別用 `|`；`finally` 一定會執行（含 catch 內再拋出的情況）。
 - **沒有 checked exception 檢查**：`throws` 會被剖析但不強制。
@@ -482,9 +489,9 @@ for (String n : names) {
 
 ### 名稱怎麼找
 
-簡單名稱照 JLS 6.5.5：先看檔案自己的套件，再看單一型別匯入，再看 on-demand
-匯入，最後才看程式整體的名字（預設套件與前綴）。兩個 `import p.*` 都提供同一個
-名字時是 `TY-TYP-0099`，不會照宣告順序挑一個。
+簡單名稱照 JLS 6.5.5：先看單一型別匯入（它蓋過同名的套件成員），再看檔案自己的
+套件，再看 on-demand 匯入，最後才看程式整體的名字（預設套件與前綴）。兩個
+`import p.*` 都提供同一個名字時是 `TY-TYP-0099`，不會照宣告順序挑一個。
 
 前綴的名字是全域的——這正是 `List`、`String` 不加 import 就能用的原因——但
 **具名套件看不到預設套件**（JLS 7.4.2）。所以使用者在預設套件宣告 `class Node`
@@ -511,10 +518,7 @@ for (String n : names) {
 7. 捕獲的區域變數不要求 effectively final。
 8. 沒有 annotation processor、沒有執行期反射、沒有 JNI。
 9. 泛型與 checked exception 的規則同 Java，但沒有 checked 檢查。
-10. 同名區域類別：Java 把區域類別限縮在它的區塊（JLS 6.3），所以同一個類別的
-    兩個方法可以各宣告一個 `class Local`；Teyru 以簡單名稱透過外圍型別解析，
-    這種寫法會回報 `TY-TYP-0001`。
-11. 型別引數推論比 javac 弱一層，靠目標型別而不是完整的約束求解（沒有 JLS 18）：
+10. 型別引數推論比 javac 弱一層，靠目標型別而不是完整的約束求解（沒有 JLS 18）：
     - lambda 的型別引數會**從主體回推**：目標是 `Fn<String, ? extends R>` 而主體是
       `s -> s.length()` 時 `R` 定為 `Integer`。反過來不行——主體本身是一個需要目標
       型別的泛型呼叫時，兩邊互相依賴，單向代入停在那裡：
@@ -522,13 +526,14 @@ for (String n : names) {
       `Function<String, Stream<String>>` 寫出來。
     - 引數如果只有唯一一個候選方法，會拿該參數的型別當目標——所以巢狀的泛型呼叫
       可以推出來。
-    - **有自由型別變數的泛型呼叫，當它是引數、或是一個鏈式呼叫的接收者時，拿不到
-      目標型別**：`sort(xs, naturalOrder())` 與 `comparing(...).thenComparing(...)`
-      需要寫出型別見證（`Comparator.<String>naturalOrder()`）或先放進一個有宣告型別
-      的變數。javac 對這兩種寫法都可以。
+    - **有自由型別變數的泛型呼叫，當它是鏈式呼叫的接收者時，拿不到目標型別**：
+      `xs.sort(naturalOrder())` 要寫出型別見證（`Comparator.<String>naturalOrder()`）；
+      `comparing(...).thenComparing(...)` 則是連見證都不生效，只能先放進一個有宣告
+      型別的變數（`Comparator<String> c = comparing(...)` 之後 `c.thenComparing(...)`）。
+      javac 對這兩種寫法都可以。
     - 顯式見證屬於它自己的呼叫：`pair(f, Builder.<Integer>make())` 的外層見證不會被
       內層覆蓋。
-12. **沒有捕獲轉換**：`List<? extends Number>` 在這裡就是 `List<Number>`。Java 靠捕獲
+11. **沒有捕獲轉換**：`List<? extends Number>` 在這裡就是 `List<Number>`。Java 靠捕獲
     擋下的寫入（對 `? extends` 的容器 `add`）這裡擋不住；反過來說，Java 靠捕獲才
     能編過的讀取（`list.get(0).doubleValue()`）這裡直接可行。
 
@@ -551,5 +556,5 @@ for (String n : names) {
 - 標準程式庫缺口：`Scanner`（見 §11）；`String.format` 的
   `%t`／`%T`（日期時間轉換）也未實作，遇到會以 `ty_unimplemented` 停止而不是
   印出看起來合理的東西
-- 無法解析的完整限定名稱（例如 `java.util.Arrays.sort(x)`）會回報
-  `cannot find symbol java`——訊息指向鏈的第一段而不是整條路徑
+- 無法解析的完整限定名稱（例如 `com.example.Baz.qux(x)`）會回報
+  `cannot find symbol com`——訊息指向鏈的第一段而不是整條路徑

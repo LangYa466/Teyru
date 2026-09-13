@@ -37,12 +37,16 @@ Teyru 沒有分號。詞法分析器不產生 NEWLINE token，而是在每個 to
 
 ## 型別與符號
 
-- `ast.Type` 有六種：原生、類別（含型別引數）、陣列、型別變數、萬用字元、null／error。
+- `ast.Type` 有七種：原生、類別（含型別引數）、陣列、型別變數、萬用字元、null、error。
 - 泛型在 `sema.erasure` 抹除；執行期只知道類別，不知道型別引數。
-- 多載解析（`pickOverload`）：先算每個候選的轉換成本（完全相同 0、拓寬／上轉 1、
-  boxing 2、unboxing 3、varargs 另計），取總成本最低者。
+- 多載解析（`pickOverload`）走 JLS 的三個階段（嚴格、允許 boxing、可變參數），
+  第一個找得到適用候選的階段就決定，只有同一階段內才比轉換成本（完全相同 0、
+  拓寬／上轉 1、boxing 2、unboxing 3；boxing 之後還要上轉時是 3）。
 - 方法的 vtable 槽位在 `layout()` 決定：由父類複製，覆寫者沿用同一槽位；
-  介面方法另有全域唯一的 selector（`Selector`），供 itable 使用。
+  介面方法另有全域唯一的 selector（`Selector`），供 itable 使用；每個類別的介面表是
+  **稀疏**的，只放它自己實作得出來的 selector，依 selector 排序，`ty_itab` 掃過這幾個
+  項目再往父類別找。（密集表一格一個指標、格數等於整個程式的 selector 總數，一個類別
+  不論實作幾個都要付這筆 `.data`，hello world 就因此背了 792 KB。）
 
 ## 產生 C 的關鍵對應
 
@@ -53,11 +57,11 @@ Teyru 沒有分號。詞法分析器不產生 NEWLINE token，而是在每個 to
 | 虛擬呼叫 | `this->obj.cls->vtable[slot](...)` |
 | 介面呼叫 | `ty_itab(obj, selector)(...)` |
 | `new Foo(...)` | GNU 敘述運算式：配置 → 設 `cls` → 呼叫建構子 |
-| 陣列 | `tyarr { tyobj; len; data; esize; refs }`，元素內嵌 |
+| 陣列 | `tyarr { tyobj; len; data; esize; refs; elemcls }`，元素內嵌 |
 | 字串常數 | 靜態 `tystr`（不經 GC） |
 | `try`/`catch` | `tycatch` + `setjmp`/`longjmp` |
 | property 讀寫 | 降階成 getter／setter 呼叫（`sema.Props` 記錄） |
-| `for (a : b : c)` | `for (init; b; c)` |
+| `for (a : b : c)` | C 的 `while`：`a` 先跑一次，每圈重測 `b`，`c` 放在圈尾，`continue` 跳到圈尾的標籤 |
 | 記錄 `Point(int x,int y)` | struct + 建構子 + `x()`/`y()` + `toString`/`hashCode`/`equals` |
 | enum 常數 | 靜態欄位，於 `<clinit>` 建立並填入 ordinal／name |
 
@@ -71,10 +75,10 @@ Teyru 沒有分號。詞法分析器不產生 NEWLINE token，而是在每個 to
 |---|---|---|
 | 行內配置 | `tyrt.h` 的 `static inline ty_alloc` | 指標碰撞（bump pointer）路徑完全內聯，只有區塊用盡或超過 GC 門檻才呼叫 `ty_alloc_slow` |
 | 行內邊界檢查 | `codegen.boundCheck` | 檢查以敘述運算式內聯在取用點，每個索引都產生一次比較（常數索引也一樣，`sema` 不先摺疊，化簡留給 LLVM） |
-| 常數折疊 | `codegen.foldBinary`、`ident` | 字面值運算、`static final` 常數、字串相加在編譯期算完 |
+| 常數折疊 | `codegen.foldBinary`、`ident` | 字面值運算與字串相加在編譯期算完；`static final` 常數是把值替換進去，外層的算式留給 LLVM |
 | 死 chunk 回收 | `tyrt.c` 的 sweep | 一個 chunk 內若沒有任何存活物件就整塊 `free` 還給系統，之後的回收不再走它；仍在使用的 chunk 則每個區塊都要走過（計數存活一次、標記或釋放一次），所以單次回收的成本與保留的記憶體量成正比，而不是與存活量成正比 |
 | 字串常數 | `codegen.strLit` | 字串字面值是靜態 `tystr`，不經配置、不進 GC |
-| 類別初始化 | `codegen.clinitStmt` | 惰性初始化，但旗標由產生的程式碼自己測；繼承鏈上沒有靜態初始化區塊的類別完全不產生程式碼 |
+| 類別初始化 | `codegen.clinitStmt` | 惰性初始化，但旗標由產生的程式碼自己測；繼承鏈上沒有靜態初始化區塊的類別不會有 `<clinit>` 函式（slot 是 `NULL`），`main` 也不會點名它——點名等於在 `main` 裡取它的位址，而一個位址就足以讓連結期最佳化把整個類別連同它的 vtable、介面表與所有方法保留在執行檔裡 |
 | 逃逸分析 | `codegen.escape.go` | 不離開所在方法的物件放在 C 堆疊上，LLVM 得以提升欄位並刪除物件 |
 | 原生互通 | `codegen.native.go` | `native` 方法的 C 符號與宣告由編譯器產生（`--native-header`） |
 
@@ -107,8 +111,9 @@ chunk 裡（`valid_obj` 會拒絕它的位址），但它的參考欄位就在 C
   下一次配置優先重用；區塊大小字（header 第一個字）的最高位 `TY_FREE_BIT` 表示已釋放，
   free list 的鏈結就放在第二個字。完全空掉的 chunk 直接 `free` 還給系統，所以長時間
   執行的程式不會一直佔住尖峰記憶體，但**頭 chunk 例外**：它承載 bump 指標，永遠保留。
-- 觸發：配置量超過 `ty_gc_threshold`，或頭 chunk 裝不下下一個區塊而 free list 也沒有
-  可用區塊時。門檻初始 4 MB，每次回收後設為存活量的兩倍，最低不低於 4 MB。
+- 觸發：配置量超過 `ty_gc_threshold` 這一個條件。門檻初始 4 MB，每次回收後設為存活量
+  的兩倍，最低不低於 4 MB。chunk 用完**不是**回收的理由——free list 沒有可用的區塊時
+  就直接長一個新 chunk，因為門檻還沒到就回收只是白白重掃一次活著的物件。
 - 已知代價：每次回收都要掃描整個使用中的堆疊，且沒有分代假設；清除階段還要走過每個
   保留 chunk 的每個區塊。
 

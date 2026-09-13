@@ -85,7 +85,9 @@ import example.com.greeting.text   // 點的拼法
 `example.com.greeting.my-util`。診斷算出來的行列位置因此指著磁碟上真正的
 字元，不必先改寫原始碼再解析。
 
-`import static example.com.dep.pkg.Widget` 匯入套件裡的單一成員；沒有尾綴的
+`import static example.com/dep/pkg.Widget.icon` 匯入型別的單一靜態成員（`Widget.*`
+匯入它全部；static 匯入只寫到型別本身是 `TY-TYP-0086`，因為它要的是成員名）。
+`import example.com/dep/pkg.Widget` 匯入那個型別，沒有尾綴的
 `import example.com/dep/pkg` 匯入整個套件。
 
 ### 套件的身分是匯入路徑
@@ -212,7 +214,7 @@ checksum 行——重算不了，刪掉只會把缺的那次抓取藏起來。
 | `TY-IO-0103` | checksum 不符。快取的內容不是 `teyru.mod` 當初寫的那一份。 |
 | `TY-IO-0104` | 同一個目錄裡宣告了兩個不同的套件名。 |
 
-這些代碼沒有列在 `docs/diagnostics.md`，那份文件由別人維護。
+這四個代碼在 `docs/diagnostics.md` 也各有一列，寫著訊息與修法。
 
 ---
 
@@ -231,8 +233,4 @@ checksum 行——重算不了，刪掉只會把缺的那次抓取藏起來。
 
 ## 已知限制
 
-- 剖析器不接受匯入路徑裡的 `/`，靠 `mod.RewriteImportPaths` 在進剖析器前折成
-  點。讓剖析器接受 `/` 就能拿掉這個函式。
-- `mod.RewriteImportPaths` 只處理行首的 `import`；`module` 宣告（JEP 511）與
-  含 `*` 的匯入不折。
 - 沒有 `teyru mod why`、`teyru list`、`teyru get` 的升級語法。

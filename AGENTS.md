@@ -45,7 +45,8 @@ source → lexer → parser → ast → sema → codegen
 
 - `internal/util` 放**前後端共用**的工具，目前有：
   - `name.go`：`Mangle`（C 識別字修飾）、`Capitalize`（JavaBeans 命名）、
-    `Descriptor`（型別單字元描述）、`Signature`（參數列表查詢鍵）。
+    `Descriptor`（型別單字元描述）、`Signature`（參數列表查詢鍵）、
+    `FloatLiteral`（Java 的浮點字面值印刷）。
   - `layout.go`：`SizeOf`、`AlignOf`、`Align`、`FieldLayout`、`IsRef`、`IsPrim`。
 - **禁止在兩個套件各寫一份相同的工具。** 只要一段邏輯同時被 `sema` 與 `codegen`
   需要（型別描述、名稱修飾、C 版面配置…），就必須放進 `internal/util`，

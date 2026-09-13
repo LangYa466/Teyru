@@ -27,15 +27,15 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 |---|---|---|
 | TY-SYN-0001 | `';' is not Teyru syntax; end statements with a newline` | Teyru 沒有分號。刪掉分號，讓敘述以換行結束；`for` 標頭改用冒號分隔。 |
 | TY-SYN-0002 | `unexpected character %q` | 出現不屬於任何 token 的字元（多半是全形標點或貼上的控制字元）。 |
-| TY-SYN-0003 | `expected end of line, found %s`／`throw expression must start on the same line` | 敘述後面還有殘餘 token；或 `throw`／需要值的 `yield` 的運算式被換行切斷。把運算式寫在同一行，或用 `(` 開頭讓它跨行。 |
+| TY-SYN-0003 | `expected end of line, found %s`／`throw expression must start on the same line` | 敘述後面還有殘餘 token；或 `throw` 的運算式被換行切斷。把運算式寫在同一行，或用 `(` 開頭讓它跨行。需要值的 `yield` 沒有這個訊息：換行後它被當成識別字，會得到 `cannot find symbol yield`。 |
 | TY-SYN-0004 | `unterminated block comment` | `/*` 沒有對應的 `*/`。 |
 | TY-SYN-0005 | `invalid unicode escape` | `\uXXXX` 不是四位十六進位。 |
 | TY-SYN-0006 | `unterminated string literal`／`unterminated text block` | 字串在換行前沒有收尾，或 text block 少了結尾的 `"""`。 |
 | TY-SYN-0007 | `text block must start with a line break after """` | `"""` 之後必須立刻換行。 |
 | TY-SYN-0008 | `unterminated character literal`／`character literal does not fit in a char` | 字元常值沒有收尾，或超過 U+FFFF。 |
 | TY-SYN-0009 | `malformed integer literal`／`malformed floating-point literal` | 數字格式錯誤（例如 `0x` 後面沒有數字、`1e` 沒有指數）。 |
-| TY-SYN-0010 | `integer literal out of range` | 整數字面值超出可表示的位元數：十進位 `int` 上限 2^31、`long` 上限 2^63，非十進位 `int` 上限 `0xFFFFFFFF`、`long` 上限 `0xFFFFFFFFFFFFFFFF`（界線值會繞成負數）。需要更大的值請加 `L` 後綴。 |
-| TY-SYN-0011 | `invalid escape sequence \%c` | 字串或字元常值裡有 Teyru 不認識的跳脫序列（例如 `\q`）。合法的有 `\n` `\t` `\r` `\b` `\f` `\0` `\\` `\'` `\"`、八進位 `\nnn` 與 `\uXXXX`。 |
+| TY-SYN-0010 | `integer literal out of range` | 整數字面值超出可表示的位元數：十進位 `int` 上限 2^31-1、`long` 上限 2^63-1，非十進位 `int` 上限 `0xFFFFFFFF`、`long` 上限 `0xFFFFFFFFFFFFFFFF`（界線值會繞成負數）。需要更大的值請加 `L` 後綴。 |
+| TY-SYN-0011 | `invalid escape sequence \%c` | 字串或字元常值裡有 Teyru 不認識的跳脫序列（例如 `\q`）。合法的有 `\n` `\t` `\r` `\b` `\f` `\s` `\0` `\\` `\'` `\"`、八進位 `\nnn` 與 `\uXXXX`。 |
 | TY-SYN-0100 | `expected '%s', found %s` | 少了預期的 token（`)`、`]`、`{`、`}`、`:` 等）。 |
 | TY-SYN-0101 | `expected identifier, found %s` | 需要識別字的位置放了別的東西；常見於把關鍵字當名稱使用。 |
 | TY-SYN-0102 | `unexpected %s at top level` | 檔案最上層只允許 package／import／型別宣告，或直接寫成員（隱式類別形式）。 |
@@ -96,7 +96,7 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 | TY-TYP-0032 | `return value required for %s` | 有回傳值的方法不能空手 `return`。 |
 | TY-TYP-0033 | `cannot return a value from a void method` | void 方法不能回傳值。 |
 | TY-TYP-0034 | `catch type must be a Throwable` | `catch` 的型別必須是 `Throwable` 家族。 |
-| TY-TYP-0035 | `switch selector must be an integral, String or enum type` | switch 的選擇子型別不合法。 |
+| TY-TYP-0035 | `switch selector must be a char, byte, short, int, Character, Byte, Short, Integer, String or enum type, found %s` | switch 的選擇子型別不合法。 |
 | TY-TYP-0036 | `duplicate default label` | 同一個 switch 只能有一個 `default`。 |
 | TY-TYP-0037 | `incompatible pattern type %s for switch on %s` | `case 型別 名` 與選擇子型別無關。 |
 | TY-TYP-0038 | `case label must be a constant expression` | case 標籤必須是編譯期常數。 |
@@ -220,7 +220,7 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 | TY-INT-0002 | `unsupported expression %T` | 語意分析遇到未處理的節點，屬於編譯器內部錯誤（請回報）。 |
 | TY-INT-0004 | `@Singular goes on a builder field, not on the class` | 寫在類別上沒有意義。 |
 | TY-INT-0005 | `@Singular needs a List or Map field, found %s` | `@Singular` 只能用在集合欄位。 |
-| TY-INT-0006 | `@CustomLog needs lombok.config…` | Teyru 不讀設定檔，請改用 `@Log` 或自己宣告欄位。 |
+| TY-INT-0006 | `@CustomLog needs %s in a %s file in the source file's directory or above it`／`@CustomLog cannot pass TYPE: …`／`@CustomLog: cannot resolve the factory class %q named by %s` | `@CustomLog` 要靠 `lombok.config` 的 `lombok.log.custom.declaration` 才知道怎麼建 logger（讀法見 docs/lombok.md）：沒有這個鍵、樣式用了 `TYPE`、或樣式指的類別找不到，都在這裡報。也可以改用 `@Log` 或自己宣告欄位。 |
 | TY-IO-0001 | `cannot read %s: %v` | 來源檔讀不到，檢查路徑與權限。 |
 
 ## 執行期錯誤
@@ -229,9 +229,9 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 
 | 例外 | 觸發時機 |
 |---|---|
-| `NullPointerException` | 對 `null` 拆箱，或呼叫執行期提供的方法（`String` 的方法、`clone()`、介面方法）；對 `null` 讀欄位、索引陣列或做虛擬呼叫則不檢查，會直接 SIGSEGV |
-| `ArrayIndexOutOfBoundsException` | 陣列索引超出 `[0, length)`；對 `null` 陣列取 `length` 也走這個（`index 0 out of bounds for length 0`） |
-| `IndexOutOfBoundsException` | `ArrayList.get`／`set`／`removeAt` 的索引超出 `[0, size)` |
+| `NullPointerException` | 對 `null` 拆箱，或讀寫欄位、呼叫方法（`String` 的方法、`clone()`、介面方法與虛擬呼叫都是）、讀寫陣列元素或取 `length` |
+| `ArrayIndexOutOfBoundsException` | 陣列索引超出 `[0, length)`（讀與寫都是；`null` 陣列先丟 `NullPointerException`） |
+| `IndexOutOfBoundsException` | `ArrayList.get`／`set`／`remove` 的索引超出 `[0, size)` |
 | `NoSuchElementException` | 已經沒有元素卻再呼叫 `Iterator.next()` |
 | `ArithmeticException` | 整數除以零或取餘數為零 |
 | `ClassCastException` | `cast` 或 `instanceof` 失敗的強制轉型 |
