@@ -179,7 +179,7 @@ func (e *Emitter) stmt(s ast.Stmt) {
 	case *ast.Switch:
 		e.switchStmt(v, "")
 	case *ast.Yield:
-		e.line("/* yield handled by switch expression */;\n")
+		e.yieldStmt(v)
 	case *ast.Labeled:
 		// a loop turns the pending labels into its continue and break targets
 		// (chained labels such as `a: b: for (...) {}` all apply to the loop);
@@ -263,8 +263,17 @@ func (e *Emitter) brkLabels(labels []string) {
 }
 
 // leaveFinallys runs the finally actions of every try statement that a jump out
-// of the loop at loopDepth abandons, innermost first. A depth of -1 means the
-// whole method is being left.
+// of the loop at loopDepth abandons, innermost first, and restores the handler
+// chain of every frame it passes. A depth of -1 means the whole method is being
+// left.
+//
+// A frame may have nothing to run: a try with a catch and no finally registers
+// a frame of its own, because leaving it still has to take ty_cur_catch off the
+// frame. Only restoring it where the body falls through — which was the only
+// restore there was — left a return, a break, a continue or a yield out of the
+// body with the chain pointing at a frame of a call that had already returned:
+// the next throw longjmped into freed stack, which crashed or, if the frame was
+// still intact, resumed an older iteration and re-ran its catch forever.
 func (e *Emitter) leaveFinallys(loopDepth int) {
 	if len(e.finallys) == 0 {
 		return
@@ -279,6 +288,9 @@ func (e *Emitter) leaveFinallys(loopDepth int) {
 		// would run the same finally twice
 		e.finallys = saved[:i]
 		e.line("ty_cur_catch = %s.prev;\n", f.name)
+		if f.emit == nil {
+			continue
+		}
 		e.line("{\n")
 		e.indent++
 		f.emit()
@@ -322,6 +334,56 @@ func (e *Emitter) breakTarget() string {
 		return e.loops[n-1]
 	}
 	return ""
+}
+
+// caseDepth returns the position in the loop stack of the case body the
+// statement being emitted sits in, or -1 when it sits in none. The innermost
+// case body is the one whose switch a yield belongs to: a switch nested in a
+// case body pushes an entry of its own above.
+func (e *Emitter) caseDepth() int {
+	for i := len(e.loops) - 1; i >= 0; i-- {
+		if isCaseEnd(e.loops[i]) {
+			return i
+		}
+	}
+	return -1
+}
+
+// yieldStmt lowers a yield inside a case body.
+//
+// Java gives the value to the switch expression the case body belongs to,
+// whatever statement sits between the two — an if, a loop or a try does not
+// change where the value goes — so the switch being emitted is read out of the
+// emitter instead of being looked for among the statements of the body. Only a
+// yield written directly in the body could be found that way, and the rest were
+// turned into a comment: the value was dropped and the control flow fell
+// through into the next case body, which overwrote the result.
+//
+// e.switchCur holds the id of the switch in progress, and carries whether it
+// has a result in its sign: a switch expression stores the id, a switch
+// statement stores it negated because there is no value to hand back.
+func (e *Emitter) yieldStmt(v *ast.Yield) {
+	depth := e.caseDepth()
+	if depth < 0 {
+		// The checker accepts a yield outside a switch expression, so one can
+		// still reach the emitter; jumping to a label that was never emitted
+		// would not compile at all.
+		e.line("/* yield outside of a switch expression */;\n")
+		return
+	}
+	id, result := e.switchCur, e.switchCur >= 0
+	if !result {
+		id = -e.switchCur - 1
+	}
+	if result {
+		// the value is read before any finally action runs, as it is for a
+		// return: the actions are part of leaving, not of computing the value
+		e.line("*_res%d = %s;\n", id, e.expr(v.X))
+	}
+	// a yield abandons every loop, try and catch frame between the yield and
+	// its case body, and their finally actions run before the jump
+	e.leaveFinallys(depth)
+	e.line("goto _end%d;\n", id)
 }
 
 func (e *Emitter) pushLoop(target string) { e.loops = append(e.loops, target) }
@@ -634,7 +696,16 @@ func (e *Emitter) emitTryCore(v *ast.Try, closeFn func()) {
 		e.indent++
 		e.line("if (setjmp(%s.buf) == 0) {\n", c)
 		e.indent++
+		// The catch frame is a handler the body can leave without unwinding at
+		// all, so it is registered like a finally frame: the exits that do not
+		// jump — a return, a break, a continue, a yield — have to take
+		// ty_cur_catch off it before anything else can throw. The frame is
+		// dropped again once the body is emitted: the catch bodies below run
+		// with the chain already restored, exactly as the generated code does
+		// at the top of the else branch.
+		e.finallys = append(e.finallys, finFrame{depth: frame.depth, name: c})
 		e.emitBlockInner(v.Body)
+		e.finallys = e.finallys[:len(e.finallys)-1]
 		e.indent--
 		e.line("} else {\n")
 		e.indent++
@@ -703,6 +774,18 @@ func caseEndLabel(id int) string { return fmt.Sprintf("%s%d", caseEndPrefix, id)
 // isCaseEnd reports whether a loop stack entry is the end of a switch case body
 // rather than a loop.
 func isCaseEnd(t string) bool { return strings.HasPrefix(t, caseEndPrefix) }
+
+// resultSlot declares the pointer a nested yield writes the value of a switch
+// expression through. The yield knows the switch it belongs to but not the
+// temporary its value ends up in, which the caller of switchStmt declares, so
+// the value is reached through a pointer named after the switch id — the same
+// id that names the label the yield jumps to.
+func (e *Emitter) resultSlot(resultTmp string, id int) {
+	if resultTmp == "" {
+		return
+	}
+	e.line("__typeof__(%s)* _res%d = &%s;\n", resultTmp, id, resultTmp)
+}
 
 // hoistPatterns declares the variables bound by `instanceof` patterns that
 // appear in a controlling expression, so the body and the update of a loop can
@@ -1080,11 +1163,20 @@ func (e *Emitter) patternBind(cs *ast.Case, id int) string {
 // clearPatterns drops the substitutions recorded for one controlling expression.
 func (e *Emitter) clearPatterns() { e.patternVars = nil }
 
-// switchNeedsChain reports whether the switch uses patterns or guards, which
-// cannot be expressed as a plain C switch and are lowered as an if/else chain.
+// switchNeedsChain reports whether the switch uses patterns, guards or a null
+// case, which cannot be expressed as a plain C switch and are lowered as an
+// if/else chain.
+//
+// `case null` belongs here with them: the checker routes a reference selector
+// with a null case to a pattern switch, and nothing about a C case label can
+// ask whether the selector is null. Lowered as a constant switch, the label of
+// every constant case collapsed to the integer 0 — the comparison the chain
+// makes is about the value, not about the pointer — so all of them landed on
+// the null case at once (F2: "DDA" where javac prints "ADN"), and two of them
+// emitted the same C case twice, which does not compile at all.
 func switchNeedsChain(s *ast.Switch) bool {
 	for _, cs := range s.Cases {
-		if cs.Pattern != nil || cs.Guard != nil {
+		if cs.Pattern != nil || cs.Guard != nil || cs.Null {
 			return true
 		}
 	}
@@ -1107,12 +1199,22 @@ func (e *Emitter) switchStmt(s *ast.Switch, resultTmp string) {
 	selType := e.switchSel
 	e.switchSel = s.X.GetType()
 	defer func() { e.switchSel = selType }()
+	// a yield in a case body reaches its switch through the emitter, however
+	// deeply the body nests it; see yieldStmt
+	curType := e.switchCur
+	if resultTmp != "" {
+		e.switchCur = id
+	} else {
+		e.switchCur = -id - 1
+	}
+	defer func() { e.switchCur = curType }()
 	if switchNeedsChain(s) {
 		e.switchChain(s, resultTmp, id)
 		return
 	}
 	e.line("{\n")
 	e.indent++
+	e.resultSlot(resultTmp, id)
 	selT := e.ctype(s.X.GetType())
 	switch s.Kind {
 	case ast.SwitchString:
@@ -1192,6 +1294,7 @@ func isDefaultCase(cs *ast.Case) bool {
 func (e *Emitter) switchChain(s *ast.Switch, resultTmp string, id int) {
 	e.line("{\n")
 	e.indent++
+	e.resultSlot(resultTmp, id)
 	selT := e.ctype(s.X.GetType())
 	e.line("%s _s%d = %s;\n", selT, id, e.expr(s.X))
 	e.line("int _k%d = -1;\n", id)
@@ -1293,11 +1396,7 @@ func (e *Emitter) caseCond(s *ast.Switch, cs *ast.Case, id int) string {
 		parts = append(parts, fmt.Sprintf("(_s%d == NULL)", id))
 	}
 	for _, l := range cs.Labels {
-		if s.Kind == ast.SwitchString {
-			parts = append(parts, fmt.Sprintf("ty_str_eq((tystr*)_s%d, (tystr*)%s)", id, e.expr(l)))
-			continue
-		}
-		parts = append(parts, fmt.Sprintf("((int64_t)_s%d == %s)", id, e.constInt(l)))
+		parts = append(parts, e.labelCond(s.X.GetType(), l, id))
 	}
 	primitive := false
 	if cs.Pattern != nil {
@@ -1356,6 +1455,86 @@ func (e *Emitter) caseCond(s *ast.Switch, cs *ast.Case, id int) string {
 	return "(" + cond + " && " + e.expr(cs.Guard) + ")"
 }
 
+// labelCond renders the test of one constant case label against the selector.
+//
+// The comparison follows the selector's static type rather than the switch kind
+// the checker resolved. A `case null` turns a switch on a String or an enum
+// into a pattern switch, and its labels are still String constants or enum
+// constants: compared as plain integers they all came out as 0, so every one of
+// them matched the null case as well, and a switch that also held a type
+// pattern compared a pointer against an ordinal and never matched its constants
+// at all.
+func (e *Emitter) labelCond(sel ast.Type, l ast.Expr, id int) string {
+	switch {
+	case e.isStringSelector(sel):
+		return fmt.Sprintf("ty_str_eq((tystr*)_s%d, (tystr*)%s)", id, e.expr(l))
+	case e.isEnumSelector(sel):
+		// an enum constant is only reachable through its ordinal, the same
+		// value the constant dispatch switches on
+		return fmt.Sprintf("(ty_enum_ordinal((void*)_s%d) == %s)", id, e.constInt(l))
+	}
+	if c, ok := e.boxedLabelCond(sel, l, id); ok {
+		return c
+	}
+	return fmt.Sprintf("((int64_t)_s%d == %s)", id, e.constInt(l))
+}
+
+// boxedLabelCond renders the test of one constant label against a selector that
+// holds a box, and reports whether it applies.
+//
+// A `case null` is also what lets a switch be written on a box at all: the
+// checker rejects a box as a switch selector unless a null case makes it a
+// pattern switch, and the chain that lowers such a switch holds the box, not
+// the value in it. Comparing the box as an integer never matched, so every
+// constant label of such a switch silently answered with the default; Java
+// compares the value the box carries.
+//
+// A null selector carries no value to compare and belongs to the null case, as
+// Java says, so the test asks for the box before it opens it: an unboxing call
+// on null is a NullPointerException, and a case label must not throw it.
+func (e *Emitter) boxedLabelCond(sel ast.Type, l ast.Expr, id int) (string, bool) {
+	ct, ok := e.prog.Erased(sel).(*ast.ClassType)
+	if !ok || ct.Class == nil {
+		return "", false
+	}
+	kind, ok := e.prog.Builtins.Unbox[ct.Class]
+	if !ok {
+		return "", false
+	}
+	fn := "ty_unbox_int"
+	switch kind {
+	case ast.Boolean:
+		fn = "ty_unbox_bool"
+	case ast.Byte:
+		fn = "ty_unbox_byte"
+	case ast.Short:
+		fn = "ty_unbox_short"
+	case ast.Char:
+		fn = "ty_unbox_char"
+	case ast.Long:
+		fn = "ty_unbox_long"
+	case ast.Float:
+		fn = "ty_unbox_float"
+	case ast.Double:
+		fn = "ty_unbox_double"
+	}
+	return fmt.Sprintf("(_s%d != NULL && %s((void*)_s%d) == %s)", id, fn, id, e.constInt(l)), true
+}
+
+// isStringSelector reports whether a selector has the String type, the only
+// reference type whose case labels are compared by value.
+func (e *Emitter) isStringSelector(t ast.Type) bool {
+	ct, ok := e.prog.Erased(t).(*ast.ClassType)
+	return ok && ct.Class == e.prog.Builtins.String
+}
+
+// isEnumSelector reports whether a selector is an enum, whose case labels name
+// its constants.
+func (e *Emitter) isEnumSelector(t ast.Type) bool {
+	ct, ok := e.prog.Erased(t).(*ast.ClassType)
+	return ok && ct.Class != nil && ct.Class.Kind == ast.KindEnum
+}
+
 // classOf renders the class descriptor of a resolved type.
 func (e *Emitter) classOf(t ast.Type) string {
 	if ct, ok := t.(*ast.ClassType); ok {
@@ -1379,6 +1558,12 @@ func (e *Emitter) constInt(l ast.Expr) string {
 }
 
 // switchCaseBody emits one case body; Java colon cases fall through.
+//
+// A yield in the body is left to e.stmt: it is the switch being emitted, not
+// the shape of the body, that gives a yield its value and its end label, so
+// every statement of the body — whatever depth a yield hides at — is emitted
+// the same way. Looking for yields in the body's own statements found only the
+// ones written directly in it.
 func (e *Emitter) switchCaseBody(cs *ast.Case, resultTmp string, id int) {
 	if cs.ArrowX != nil {
 		if resultTmp != "" {
@@ -1390,29 +1575,6 @@ func (e *Emitter) switchCaseBody(cs *ast.Case, resultTmp string, id int) {
 		return
 	}
 	for _, st := range cs.Body {
-		if y, ok := st.(*ast.Yield); ok {
-			if resultTmp != "" {
-				e.line("%s = %s;\n", resultTmp, e.expr(y.X))
-			}
-			e.line("goto _end%d;\n", id)
-			continue
-		}
-		if b, ok := st.(*ast.Block); ok && resultTmp != "" {
-			e.emitYieldBlock(b, resultTmp, id)
-			continue
-		}
-		e.stmt(st)
-	}
-}
-
-// emitYieldBlock handles blocks that yield a value inside a switch expression.
-func (e *Emitter) emitYieldBlock(b *ast.Block, resultTmp string, id int) {
-	for _, st := range b.Stmts {
-		if y, ok := st.(*ast.Yield); ok {
-			e.line("%s = %s;\n", resultTmp, e.expr(y.X))
-			e.line("goto _end%d;\n", id)
-			continue
-		}
 		e.stmt(st)
 	}
 }
