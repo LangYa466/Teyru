@@ -38,7 +38,10 @@ func AlignOf(t ast.Type) int64 {
 	switch v := t.(type) {
 	case *ast.PrimType:
 		switch v.Kind {
-		case ast.Byte, ast.Boolean:
+		// boolean is int32_t in the generated C, so it aligns like an int;
+		// aligning it as one byte would shift every field after it and the
+		// collector would trace the wrong slots
+		case ast.Byte:
 			return 1
 		case ast.Short, ast.Char:
 			return 2
