@@ -1,0 +1,28 @@
+// Constructor delegation: a this(...) call runs the target constructor first,
+// and only the chain that actually consults its own body may be used. javac
+// compiles the same program and prints the same lines.
+class Main {
+  Main() {
+    this(7)
+    System.out.println("first")
+  }
+
+  Main(int n) {
+    System.out.println("n=" + n)
+  }
+
+  Main(int n, int m) {
+    this(n * m)
+  }
+
+  Main(String s, int k) {
+    this()
+    System.out.println("tagged " + s + k)
+  }
+
+  public static void main(String[] args) {
+    Main a = new Main()
+    Main b = new Main(3, 4)
+    Main c = new Main("t", 9)
+  }
+}

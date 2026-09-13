@@ -1050,8 +1050,29 @@ func (c *Checker) lombokBuilderFor(cl *ast.Class, a *ast.Annotation, classAnnos 
 		c.addSynthMethod(cl, fac)
 	}
 	if toBuilder {
-		tb := c.newSynthMethod(cl, "toBuilder", ast.ModPublic, &ast.ClassType{Class: b}, nil, nil,
-			blockOf(returnOf(newObj(b))), "")
+		// toBuilder() hands back a builder seeded from the instance it is
+		// called on: the copy is what makes `p.toBuilder().b(9).build()` keep
+		// the fields it does not touch. Returning a fresh builder instead
+		// silently dropped every value the instance carried.
+		local := "$builder"
+		stmts := []ast.Stmt{&ast.LocalVar{Pos: pos(),
+			Type: &ast.TypeExpr{Pos: pos(), Name: builderName, Resolved: builderType},
+			Vars: []*ast.VarDeclarator{{Pos: pos(), Name: local, Init: newObj(b)}}}}
+		for _, f := range fields {
+			src := c.obtainSourceExpr(f)
+			if f.Singular {
+				// a @Singular collection is copied into the builder's own
+				// collection, not shared with the instance being copied, so a
+				// later add does not reach back into it
+				stmts = append(stmts, ifOf(binop("!=", src, nullLit()),
+					exprStmtOf(callNamed(id(local), singularAllName(f, setterPrefix), src)), nil))
+				continue
+			}
+			stmts = append(stmts, exprStmtOf(callNamed(id(local), setterPrefix+f.Name, src)))
+		}
+		stmts = append(stmts, returnOf(id(local)))
+		tb := c.newSynthMethod(cl, "toBuilder", ast.ModPublic, builderType, nil, nil,
+			blockOf(stmts...), "")
 		tb.Anno = "@Builder"
 		c.addSynthMethod(cl, tb)
 	}
@@ -1088,6 +1109,21 @@ func (c *Checker) obtainExpr(f *ast.Field) ast.Expr {
 	return sel(this, f.Name)
 }
 
+// obtainSourceExpr is how toBuilder reads a field of the instance it copies:
+// the field itself, or the one @Builder.ObtainVia names. Lombok documents the
+// two forms of the annotation as `this.value` and `this.method()`, both of
+// them on the instance being converted into a builder.
+func (c *Checker) obtainSourceExpr(f *ast.Field) ast.Expr {
+	src := &ast.This{ExprBase: ast.ExprBase{Pos: pos()}}
+	switch {
+	case f.ObtainViaMethod != "":
+		return callNamed(src, f.ObtainViaMethod)
+	case f.ObtainViaField != "":
+		return sel(src, f.ObtainViaField)
+	}
+	return sel(src, f.Name)
+}
+
 // singularKind reports how a @Singular field accumulates: it must be a List or
 // a Map the standard library knows how to build.
 func singularKind(t ast.Type) (elem []ast.Type, kind string) {
@@ -1109,6 +1145,26 @@ func singularKind(t ast.Type) (elem []ast.Type, kind string) {
 	return nil, ""
 }
 
+// singularAdderName is the name of the builder method that accumulates a
+// @Singular field one element at a time: addXs by default, the name given to
+// @Singular("name"), or the field name itself for a Map.
+func singularAdderName(f *ast.Field, setterPrefix string) string {
+	adder := f.SingularName
+	if adder == "" {
+		adder = "add" + strings.ToUpper(f.Name[:1]) + f.Name[1:]
+	}
+	if _, kind := singularKind(f.Type); kind == "map" {
+		adder = f.Name
+	}
+	return setterPrefix + adder
+}
+
+// singularAllName is the builder method that takes a whole collection of a
+// @Singular field.
+func singularAllName(f *ast.Field, setterPrefix string) string {
+	return singularAdderName(f, setterPrefix) + "All"
+}
+
 // lombokSingular generates the accumulating builder methods of a @Singular
 // field: one value at a time, a whole collection, and a clear.
 func (c *Checker) lombokSingular(b *ast.Class, builderType *ast.ClassType, f *ast.Field, setterPrefix string) {
@@ -1119,14 +1175,7 @@ func (c *Checker) lombokSingular(b *ast.Class, builderType *ast.ClassType, f *as
 	}
 	this := func() ast.Expr { return &ast.This{ExprBase: ast.ExprBase{Pos: pos(), T: builderType}} }
 	field := func() ast.Expr { return sel(this(), f.Name) }
-	adder := f.SingularName
-	if adder == "" {
-		adder = "add" + strings.ToUpper(f.Name[:1]) + f.Name[1:]
-	}
-	if kind == "map" {
-		adder = f.Name
-	}
-	adder = setterPrefix + adder
+	adder := singularAdderName(f, setterPrefix)
 	clear := "clear" + strings.ToUpper(f.Name[:1]) + f.Name[1:]
 
 	// the collection is created on first use, so an untouched builder passes an
@@ -1166,7 +1215,7 @@ func (c *Checker) lombokSingular(b *ast.Class, builderType *ast.ClassType, f *as
 	if kind == "map" {
 		pushName = "putAll"
 	}
-	all := c.newSynthMethod(b, adder+"All", ast.ModPublic, builderType, []ast.Type{f.Type}, []string{"values"},
+	all := c.newSynthMethod(b, singularAllName(f, setterPrefix), ast.ModPublic, builderType, []ast.Type{f.Type}, []string{"values"},
 		blockOf(
 			lazy,
 			exprStmtOf(callNamed(field(), pushName, id("values"))),
