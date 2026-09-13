@@ -211,7 +211,16 @@ func annoText(a *ast.Annotation, name string) string {
 		return s
 	}
 	for _, arg := range a.Args {
-		if arg.Name != "" && arg.Name != name {
+		// An argument written without a name binds to `value`, which is Java's
+		// rule for annotations. It used to bind to whatever element the caller
+		// asked for, so `@RequestMapping("/pets")` made the path the HTTP verb:
+		// the route answered for the method named `/pets` and every real
+		// request to it came back 405.
+		if arg.Name == "" {
+			if name != "value" {
+				continue
+			}
+		} else if arg.Name != name {
 			continue
 		}
 		if lit, ok := arg.Value.(*ast.Literal); ok && lit.Kind == ast.LitString {

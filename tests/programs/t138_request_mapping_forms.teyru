@@ -1,0 +1,89 @@
+/* The value of a mapping annotation is written both ways in the wild:
+   `@RequestMapping("/pets")` and `@RequestMapping(value = "/pets")`. An
+   argument written without a name binds to `value` -- that is Java's rule for
+   annotations -- and the reader that handled both spellings bound it to
+   whatever element the caller asked for instead. So `@RequestMapping("/pets")`
+   set the *HTTP verb* to "/pets" as well as the path, the route answered for a
+   method nobody sends, and every real request to that path came back 405.
+
+   The same reader supplies `defaultValue`, so `@RequestParam("q")` was also
+   given "/pets"-style defaults it never asked for. Both are here.
+
+   Expected output is this framework's, checked against Spring's behaviour for
+   each form; there is no javac to compare an in-process router against. */
+
+package teyru
+
+import teyru.RestController
+import teyru.RequestMapping
+import teyru.GetMapping
+import teyru.PostMapping
+import teyru.RequestParam
+
+@RestController
+class Ctl {
+  @RequestMapping("/positional")
+  public String positional() {
+    return "positional"
+  }
+
+  @RequestMapping(value = "/named")
+  public String named() {
+    return "named"
+  }
+
+  @RequestMapping(value = "/only-post", method = "POST")
+  public String onlyPost() {
+    return "only-post"
+  }
+
+  @GetMapping("/explicit")
+  public String explicit() {
+    return "explicit"
+  }
+
+  @GetMapping("/param")
+  public String param(@RequestParam("q") String q) {
+    return "q=" + q
+  }
+
+  @GetMapping("/param-default")
+  public String paramDefault(@RequestParam(value = "q", defaultValue = "fallback") String q) {
+    return "q=" + q
+  }
+}
+
+class T138 {
+  public static void main(String[] args) {
+    ApplicationContext ctx = Application.boot(new String[0])
+    Router router = Application.routerFrom(ctx)
+    HttpServer server = new HttpServer(8080, router, ctx)
+    System.out.println("routes=" + router.size())
+
+    System.out.println("== a positional value is the path, and the verb stays open ==")
+    say(server, "GET /positional HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "POST /positional HTTP/1.1\r\nHost: x\r\n\r\n")
+
+    System.out.println("== the named form ==")
+    say(server, "GET /named HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "PUT /named HTTP/1.1\r\nHost: x\r\n\r\n")
+
+    System.out.println("== a named method still restricts the verb ==")
+    say(server, "POST /only-post HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "GET /only-post HTTP/1.1\r\nHost: x\r\n\r\n")
+
+    System.out.println("== @GetMapping is unaffected ==")
+    say(server, "GET /explicit HTTP/1.1\r\nHost: x\r\n\r\n")
+
+    System.out.println("== a positional @RequestParam is a name, not a default ==")
+    say(server, "GET /param?q=given HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "GET /param HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "GET /param-default HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "GET /param-default?q=given HTTP/1.1\r\nHost: x\r\n\r\n")
+  }
+
+  static void say(HttpServer server, String raw) {
+    HttpResponse res = server.handle(HttpParser.parse(raw))
+    System.out.println(res.status + " " + res.body)
+  }
+}

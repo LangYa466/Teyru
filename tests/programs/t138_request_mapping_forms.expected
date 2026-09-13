@@ -1,0 +1,17 @@
+routes=6
+== a positional value is the path, and the verb stays open ==
+200 positional
+200 positional
+== the named form ==
+200 named
+200 named
+== a named method still restricts the verb ==
+200 only-post
+405 method not allowed: GET
+== @GetMapping is unaffected ==
+200 explicit
+== a positional @RequestParam is a name, not a default ==
+200 q=given
+200 q=
+200 q=fallback
+200 q=given
