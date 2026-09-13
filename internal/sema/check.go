@@ -1475,9 +1475,15 @@ func (ctx *methodCtx) convertWith(e ast.Expr, target, src ast.Type) ast.Expr {
 	if _, ok := src.(ast.NullType); ok && ast.IsRef(target) {
 		return e
 	}
-	if isPrimType(src) && ast.IsRef(target) {
-		// boxing
+	if sp, isPrim := src.(*ast.PrimType); isPrim && ast.IsRef(target) {
+		// boxing, and boxing followed by a widening reference conversion: both
+		// are a Conv node, which code generation lowers to the box call plus a
+		// cast to the target
 		if _, ok := c.unboxed(target); ok {
+			return &ast.Conv{ExprBase: ast.ExprBase{Pos: e.GetPos(), T: target}, X: e}
+		}
+		if box := c.b.Boxes[sp.Kind]; box != nil &&
+			c.isSubtype(&ast.ClassType{Class: box}, target) {
 			return &ast.Conv{ExprBase: ast.ExprBase{Pos: e.GetPos(), T: target}, X: e}
 		}
 	}
@@ -1529,11 +1535,16 @@ func (ctx *methodCtx) convertTo(e ast.Expr, target ast.Type) {
 		ctx.errf(e.GetPos(), "TY-TYP-0051", "incompatible types: %s cannot be converted to %s", src, target)
 		return
 	}
-	if isPrimType(src) && ast.IsRef(target) {
+	if sp, ok := src.(*ast.PrimType); ok && ast.IsRef(target) {
 		if _, ok := c.unboxed(target); ok {
 			return
 		}
-		if ct, ok := target.(*ast.ClassType); ok && ct.Class.Special == "Object" {
+		// boxing followed by a widening reference conversion (JLS 5.3): an int
+		// fits a Number parameter, because it boxes to Integer and Integer is a
+		// Number. The Object case is the same rule with Object at the top, and
+		// is covered by the subtype test.
+		if box := c.b.Boxes[sp.Kind]; box != nil &&
+			c.isSubtype(&ast.ClassType{Class: box}, target) {
 			return
 		}
 		ctx.errf(e.GetPos(), "TY-TYP-0051", "incompatible types: %s cannot be converted to %s", src, target)
@@ -2631,8 +2642,11 @@ func (c *Checker) assignableTo(t, target ast.Type) bool {
 		if _, ok2 := c.unboxed(target); ok2 {
 			return true
 		}
-		if ct, ok2 := target.(*ast.ClassType); ok2 {
-			return ct.Class.Special == "Object"
+		// Boxing followed by a widening reference conversion (JLS 5.3): an int
+		// fits a Number parameter, because it boxes to Integer and Integer is a
+		// Number. The Object case is the same rule with Object at the top.
+		if box := c.b.Boxes[p.Kind]; box != nil {
+			return c.isSubtype(&ast.ClassType{Class: box}, target)
 		}
 		return false
 	}
@@ -2750,7 +2764,14 @@ func (ctx *methodCtx) convCost(src, target ast.Type) (int, bool) {
 		if _, ok2 := c.unboxed(target); ok2 {
 			return 2, true
 		}
-		if ct, ok2 := target.(*ast.ClassType); ok2 && ct.Class.Special == "Object" {
+		// Boxing followed by a widening reference conversion (JLS 5.3): an int
+		// argument fits a Number parameter, because it boxes to Integer and
+		// Integer is a Number. Without this step `new Box(1)` could not find
+		// `Box(Number)` -- and an overload set with both `Box(Character)` and
+		// `Box(Number)` could only ever match the box class itself, so calls
+		// fell to whichever overload happened to be declared first.
+		if box := c.b.Boxes[sp.Kind]; box != nil &&
+			c.isSubtype(&ast.ClassType{Class: box}, target) {
 			return 3, true
 		}
 		return 0, false
