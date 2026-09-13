@@ -1,0 +1,46 @@
+/* `(x)` at the end of a statement, with the next statement starting on the next
+   line. A cast and a parenthesised expression are the same tokens until the
+   token after the `)` is read, and the parser has no symbol table to ask
+   whether `x` names a type -- so `a = (b)` followed by another statement was
+   read as the cast `(b) <statement>`, and the program did not compile. The
+   semicolon-free rule settles it: an expression ends at the newline, so nothing
+   on the next line can be a cast's operand. Expected output is javac 25's. */
+
+package teyru
+
+class T124 {
+  static String pick(Object o) { return (String) o }
+  static int two(int a, int b) { return a + b }
+
+  public static void main(String[] args) {
+    System.out.println("== a parenthesised name ends a statement ==")
+    int a = 1
+    int b = 2
+    a = (b)
+    System.out.println(a)
+    int c = (a & b)
+    System.out.println(c)
+    int d = (a | b)
+    System.out.println(d)
+    String s = ("x")
+    System.out.println(s)
+    System.out.println("== and the casts still work ==")
+    Object o = "hello"
+    System.out.println(((String) o).length())
+    int w = 5
+    int mask = 3
+    int m = (int) (w & mask)
+    System.out.println(m)
+    System.out.println((int) (w))
+    System.out.println((long) w + 1L)
+    System.out.println((double) (w))
+    System.out.println("== a cast may still span lines inside parentheses ==")
+    System.out.println(two((int) (1),
+      (int) (2)))
+    System.out.println(pick(
+      (Object) o))
+    System.out.println("== and inside an array index ==")
+    int[] arr = new int[]{7, 8, 9}
+    System.out.println(arr[(int) (w) - 4])
+  }
+}
