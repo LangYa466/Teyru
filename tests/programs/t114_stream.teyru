@@ -8,10 +8,6 @@
      - a collector whose type argument cannot be read off an argument carries
        a type witness -- `Collectors.<String>toList()`, where javac reads the
        same type off the assignment;
-     - three chains hoist their last call into a named variable, because a
-       lambda argument loses its parameter type when a sibling argument is an
-       inline generic call (the compiler says `cannot find method length() in
-       Object`);
      - the flatMap lambda returns an inferred generic call of its own, which is
        the one shape that still wants `Function<String, Stream<String>>`
        written down.
@@ -110,7 +106,8 @@ class T114 {
     words.add("three")
     words.add("four five six")
     // The lambda's return type is itself an inferred generic call -- the one
-    // shape that still needs the type written down.
+    // shape that still needs the type written down. The twin writes the same
+    // lambda inline, where javac infers its way through in one step.
     Function<String, Stream<String>> splitter = w -> Stream.of(w.split(" "))
     System.out.println("flatMap: " + words.stream().flatMap(splitter).collect(Collectors.<String>toList()))
     System.out.println("flatMap-count: " + words.stream().flatMap(splitter).count())
@@ -217,8 +214,7 @@ class T114 {
       System.out.println("  " + k + " -> " + byLength.get(k))
     }
 
-    Collector<String, LongAccumulator, Long> countOf = Collectors.<String>counting()
-    Map<Integer, Long> counted = names.stream().collect(Collectors.<String, Integer, LongAccumulator, Long>groupingBy(s -> Integer.valueOf(s.length()), countOf))
+    Map<Integer, Long> counted = names.stream().collect(Collectors.<String, Integer, LongAccumulator, Long>groupingBy(s -> Integer.valueOf(s.length()), Collectors.<String>counting()))
     List<Integer> countedKeys = sortedKeys(counted.keySet())
     System.out.println("groupingBy-counting:")
     for (Integer k : countedKeys) {
@@ -228,10 +224,7 @@ class T114 {
     // groupingBy with a map factory and a second groupingBy inside it: a
     // TreeMap of TreeMaps. The type arguments are spelled out because none of
     // them can be read off the arguments.
-    Collector<String, List<String>, List<String>> nameList = Collectors.<String>toList()
-    Collector<String, Map<Integer, List<String>>, TreeMap<Integer, List<String>>> byFirstChar = Collectors.<String, Integer, List<String>, List<String>, TreeMap<Integer, List<String>>>groupingBy(s -> Integer.valueOf(s.charAt(0)), () -> new TreeMap<Integer, List<String>>(), nameList)
-    Collector<String, Map<Integer, Map<Integer, List<String>>>, TreeMap<Integer, Map<Integer, List<String>>>> byNameLength = Collectors.<String, Integer, Map<Integer, List<String>>, Map<Integer, List<String>>, TreeMap<Integer, Map<Integer, List<String>>>>groupingBy(s -> Integer.valueOf(s.length()), () -> new TreeMap<Integer, Map<Integer, List<String>>>(), byFirstChar)
-    Map<Integer, Map<Integer, List<String>>> inTreeMap = names.stream().collect(byNameLength)
+    Map<Integer, Map<Integer, List<String>>> inTreeMap = names.stream().collect(Collectors.<String, Integer, Map<Integer, List<String>>, Map<Integer, List<String>>, TreeMap<Integer, Map<Integer, List<String>>>>groupingBy(s -> Integer.valueOf(s.length()), () -> new TreeMap<Integer, Map<Integer, List<String>>>(), Collectors.<String, Integer, List<String>, List<String>, TreeMap<Integer, List<String>>>groupingBy(s -> Integer.valueOf(s.charAt(0)), () -> new TreeMap<Integer, List<String>>(), Collectors.<String>toList())))
     System.out.println("groupingBy-treemap:")
     for (Integer k : inTreeMap.keySet()) {
       System.out.println("  " + k)
@@ -244,18 +237,16 @@ class T114 {
     // --------------------------------------------------------- partitioningBy
     Map<Boolean, List<String>> parts = names.stream().collect(Collectors.<String>partitioningBy(s -> s.startsWith("a")))
     System.out.println("partitioningBy: false=" + parts.get(Boolean.FALSE) + " true=" + parts.get(Boolean.TRUE))
-    Map<Boolean, Long> partCount = names.stream().collect(Collectors.<String, LongAccumulator, Long>partitioningBy(s -> s.length() == 3, countOf))
+    Map<Boolean, Long> partCount = names.stream().collect(Collectors.<String, LongAccumulator, Long>partitioningBy(s -> s.length() == 3, Collectors.<String>counting()))
     System.out.println("partitioningBy-count: false=" + partCount.get(Boolean.FALSE) + " true=" + partCount.get(Boolean.TRUE))
     // Both keys are present even when one side is empty.
     Map<Boolean, List<String>> allTrue = names.stream().collect(Collectors.<String>partitioningBy(s -> s.length() >= 3))
     System.out.println("partitioningBy-all: false=" + allTrue.get(Boolean.FALSE) + " true.size=" + allTrue.get(Boolean.TRUE).size())
 
     // ---------------------------------------------------------------- mapping
-    Collector<Integer, List<Integer>, List<Integer>> intList = Collectors.<Integer>toList()
-    List<Integer> mapped = names.stream().collect(Collectors.<String, Integer, List<Integer>, List<Integer>>mapping(s -> Integer.valueOf(s.length()), intList))
+    List<Integer> mapped = names.stream().collect(Collectors.<String, Integer, List<Integer>, List<Integer>>mapping(s -> Integer.valueOf(s.length()), Collectors.<Integer>toList()))
     System.out.println("mapping: " + mapped)
-    Collector<String, List<Integer>, List<Integer>> firstChar = Collectors.<String, Integer, List<Integer>, List<Integer>>mapping(s -> Integer.valueOf(s.charAt(0)), intList)
-    Map<Integer, List<Integer>> mappedGroups = names.stream().collect(Collectors.<String, Integer, List<Integer>, List<Integer>>groupingBy(s -> Integer.valueOf(s.length()), firstChar))
+    Map<Integer, List<Integer>> mappedGroups = names.stream().collect(Collectors.<String, Integer, List<Integer>, List<Integer>>groupingBy(s -> Integer.valueOf(s.length()), Collectors.<String, Integer, List<Integer>, List<Integer>>mapping(s -> Integer.valueOf(s.charAt(0)), Collectors.<Integer>toList())))
     List<Integer> mappedGroupKeys = sortedKeys(mappedGroups.keySet())
     System.out.println("mapping-groups:")
     for (Integer k : mappedGroupKeys) {

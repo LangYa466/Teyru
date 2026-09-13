@@ -7,7 +7,7 @@
 //
 // The output is tests/programs/t114_stream.expected, byte for byte.
 // (The class is named S; javac wants the file named after it. The Teyru file
-// is this program with the three spelling differences its header lists.)
+// is this program with the spelling differences its header lists.)
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -33,7 +33,6 @@ import java.util.stream.DoubleStream;
 import java.util.stream.IntStream;
 import java.util.stream.LongStream;
 import java.util.stream.Stream;
-import java.util.function.Function;
 import java.util.stream.StreamSupport;
 
 class S {
@@ -128,9 +127,8 @@ class S {
     words.add("one two");
     words.add("three");
     words.add("four five six");
-    Function<String, Stream<String>> splitter = w -> Stream.of(w.split(" "));
-    System.out.println("flatMap: " + words.stream().flatMap(splitter).collect(Collectors.<String>toList()));
-    System.out.println("flatMap-count: " + words.stream().flatMap(splitter).count());
+    System.out.println("flatMap: " + words.stream().flatMap(w -> Stream.of(w.split(" "))).collect(Collectors.<String>toList()));
+    System.out.println("flatMap-count: " + words.stream().flatMap(w -> Stream.of(w.split(" "))).count());
 
     // ------------------------------------------------------------------ reduce
     List<Integer> nums = new ArrayList<Integer>();
@@ -228,20 +226,18 @@ class S {
       System.out.println("  " + k + " -> " + byLength.get(k));
     }
 
-    var countOf = Collectors.<String>counting();
-    Map<Integer, Long> counted = names.stream().collect(Collectors.groupingBy(s -> s.length(), countOf));
+    Map<Integer, Long> counted = names.stream().collect(Collectors.groupingBy(s -> s.length(), Collectors.counting()));
     List<Integer> countedKeys = sortedKeys(counted.keySet());
     System.out.println("groupingBy-counting:");
     for (Integer k : countedKeys) {
       System.out.println("  " + k + " -> " + counted.get(k));
     }
 
-    var nameList = Collectors.<String>toList();
-    var byFirstChar = Collectors.groupingBy(s -> Integer.valueOf(s.charAt(0)), TreeMap::new, nameList);
-    var byNameLength = Collectors.groupingBy(s -> s.length(), TreeMap::new, byFirstChar);
-    Map<Integer, TreeMap<Integer, List<String>>> inTreeMap = names.stream().collect(byNameLength);
+    Map<Integer, Map<Integer, List<String>>> inTreeMap = names.stream().collect(
+        Collectors.groupingBy(s -> s.length(), TreeMap::new,
+            Collectors.groupingBy(s -> Integer.valueOf(s.charAt(0)), TreeMap::new, Collectors.<String>toList())));
     System.out.println("groupingBy-treemap:");
-    for (Map.Entry<Integer, TreeMap<Integer, List<String>>> e : inTreeMap.entrySet()) {
+    for (Map.Entry<Integer, Map<Integer, List<String>>> e : inTreeMap.entrySet()) {
       System.out.println("  " + e.getKey());
       for (Map.Entry<Integer, List<String>> inner : e.getValue().entrySet()) {
         System.out.println("    " + inner.getKey() + " -> " + inner.getValue());
@@ -251,7 +247,7 @@ class S {
     // --------------------------------------------------------- partitioningBy
     Map<Boolean, List<String>> parts = names.stream().collect(Collectors.partitioningBy(s -> s.startsWith("a")));
     System.out.println("partitioningBy: false=" + parts.get(Boolean.FALSE) + " true=" + parts.get(Boolean.TRUE));
-    Map<Boolean, Long> partCount = names.stream().collect(Collectors.partitioningBy(s -> s.length() == 3, countOf));
+    Map<Boolean, Long> partCount = names.stream().collect(Collectors.partitioningBy(s -> s.length() == 3, Collectors.counting()));
     System.out.println("partitioningBy-count: false=" + partCount.get(Boolean.FALSE) + " true=" + partCount.get(Boolean.TRUE));
     // Both keys are present even when one side is empty.
     Map<Boolean, List<String>> allTrue = names.stream().collect(Collectors.partitioningBy(s -> s.length() >= 3));
