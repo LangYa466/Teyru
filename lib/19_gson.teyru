@@ -1,0 +1,115 @@
+package teyru
+
+// The annotations Gson's binding reads, and the runtime side of the binding.
+//
+// Gson binds an object to JSON by reflection, at the moment toJson/fromJson is
+// called. Teyru has no reflection, so the binding is resolved by the compiler
+// instead: when a program writes `gson.fromJson(s, Pet.class)` or
+// `gson.toJson(pet)`, the compiler knows the class and generates a reader and a
+// writer for it, then rewrites the call to use them. A Java file that binds a
+// class changes only in the cast it does not need -- see docs/json.md.
+//
+// What that buys is the same as the container's: a field whose type has no
+// mapping is a compile error rather than a runtime IllegalArgumentException
+// from deep inside a reflective adapter.
+
+// @SerializedName renames a field in the JSON, as Gson's does.
+//
+// Gson's `alternate` is not declared: an annotation element with an array
+// default is not something this language's annotation syntax has, and an
+// element without a default would have to be written at every use.
+@interface SerializedName {
+  String value()
+}
+
+// @Expose marks the fields a GsonBuilder with excludeFieldsWithoutExposeAnnotation
+// will bind. Without that builder setting it has no effect, as in Gson.
+@interface Expose {
+  boolean serialize() default true
+  boolean deserialize() default true
+}
+
+// @Since and @Until gate a field on the version set with setVersion.
+@interface Since {
+  double value()
+}
+
+@interface Until {
+  double value()
+}
+
+// @JsonAdapter names a class that does the binding for the annotated type or
+// field. The compiler calls its read/write through the same generated code, so
+// a hand-written adapter and a generated one are used the same way.
+@interface JsonAdapter {
+  String value()
+}
+
+// ---------------------------------------------------------------- adapters
+
+// JsonReader2 reads one value of a type from a JsonElement. The compiler
+// generates one per bound class; the name is a spelling of "reader" that cannot
+// collide with a JsonReader the program declares itself.
+interface JsonReader2 {
+  Object read(JsonElement e)
+}
+
+// JsonWriter2 writes one value of a type as a JsonElement.
+interface JsonWriter2 {
+  JsonElement write(Object v)
+}
+
+// JsonBinding is the table the compiler fills: one reader and one writer per
+// class it generated them for. A call whose type the compiler could not see --
+// `toJson(someObject)` where the static type is Object -- falls back to this
+// table at runtime, keyed by the object's own class, which is the one case
+// where Gson's reflection has no compile-time equivalent.
+class JsonBinding {
+  private static Map<String, JsonReader2> readers = new HashMap<String, JsonReader2>()
+  private static Map<String, JsonWriter2> writers = new HashMap<String, JsonWriter2>()
+
+  public static void bind(String typeName, JsonReader2 reader, JsonWriter2 writer) {
+    readers.put(typeName, reader)
+    writers.put(typeName, writer)
+  }
+
+  public static JsonReader2 reader(Class type) {
+    if (type == null) {
+      return null
+    }
+    return readers.get(type.getName())
+  }
+
+  public static JsonWriter2 writer(Class type) {
+    if (type == null) {
+      return null
+    }
+    return writers.get(type.getName())
+  }
+
+  public static int bound() {
+    return writers.size()
+  }
+
+  // readFrom is fromJson for a type the compiler could not see: an object's own
+  // class answers, which is what reflection would have done.
+  public static Object readFrom(String json, Class type) {
+    JsonReader2 r = reader(type)
+    if (r == null) {
+      throw new JsonParseException("no JSON binding for " + type.getName())
+    }
+    return r.read(JsonParser.parseString(json))
+  }
+
+  // writeTo is toJson for a type the compiler could not see.
+  public static JsonElement writeTo(Object v) {
+    if (v == null) {
+      return JsonNull.INSTANCE
+    }
+    JsonWriter2 w = writer(v.getClass())
+    if (w == null) {
+      throw new JsonParseException("no JSON binding for " + v.getClass().getName())
+    }
+    return w.write(v)
+  }
+}

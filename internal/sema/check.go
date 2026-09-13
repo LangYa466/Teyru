@@ -2848,6 +2848,12 @@ func (ctx *methodCtx) checkCall(v *ast.Call, want ast.Type) {
 	if v.Recv != nil {
 		ctx.checkExpr(v.Recv, nil)
 		rt = v.Recv.GetType()
+		// A Gson binding call carries its own type in a class literal, so the
+		// compiler can resolve it here and rewrite the call before it is
+		// resolved as an ordinary method call.
+		if ctx.tryJsonCall(v, rt, want) {
+			return
+		}
 	}
 	for _, a := range v.Args {
 		if a.GetType() == nil && !isLambdaLike(a) {

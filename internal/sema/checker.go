@@ -59,16 +59,19 @@ type Checker struct {
 	fwSpecs []*beanSpec
 	// fwRoutes is the mappings the controllers declare, registered by the same
 	// generated setup that registers the beans.
-	fwRoutes   []routeSpec
-	selector   int
-	todo       []func()
-	Props      map[ast.Expr]ast.Expr
-	Direct     map[ast.Expr]bool // varargs calls that pass the array itself
-	program    *Program
-	objType    *ast.ClassType
-	strType    *ast.ClassType
-	arrCls     *ast.Class
-	extensions map[*ast.Class][]*ast.Class
+	fwRoutes []routeSpec
+	// jsonAdapters holds the JSON binding generated for each class that a Gson
+	// call binds, keyed by class so it is generated once.
+	jsonAdapters map[*ast.Class]*jsonAdapterPair
+	selector     int
+	todo         []func()
+	Props        map[ast.Expr]ast.Expr
+	Direct       map[ast.Expr]bool // varargs calls that pass the array itself
+	program      *Program
+	objType      *ast.ClassType
+	strType      *ast.ClassType
+	arrCls       *ast.Class
+	extensions   map[*ast.Class][]*ast.Class
 }
 
 // Check analyses the prelude plus user files.
