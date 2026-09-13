@@ -483,6 +483,36 @@ func (ctx *methodCtx) checkBlock(b *ast.Block, scoped bool) {
 	}
 }
 
+// hasEffect reports whether an expression may stand alone as a statement,
+// following JLS 14.8: an assignment, an increment or decrement, a method call,
+// or an object creation. A parenthesised call is still a call, which is the one
+// nesting Java allows.
+func hasEffect(e ast.Expr) bool {
+	switch v := e.(type) {
+	case *ast.Call, *ast.New, *ast.NewArray, *ast.Assign:
+		return true
+	case *ast.Unary:
+		// an increment or a decrement is a statement; the other prefix and
+		// postfix operators are not
+		return strings.Contains(v.Op, "++") || strings.Contains(v.Op, "--")
+	}
+	return false
+}
+
+// describeExpr names an expression the way a reader wrote it, for the message
+// that says it does nothing.
+func describeExpr(e ast.Expr) string {
+	switch e.(type) {
+	case *ast.Unary, *ast.Binary:
+		return "a value"
+	case *ast.Select:
+		return "a field read"
+	case *ast.Literal:
+		return "a literal"
+	}
+	return "reading a variable"
+}
+
 func (ctx *methodCtx) checkStmt(s ast.Stmt) {
 	c := ctx.c
 	switch v := s.(type) {
@@ -524,6 +554,19 @@ func (ctx *methodCtx) checkStmt(s ast.Stmt) {
 		}
 	case *ast.ExprStmt:
 		ctx.checkExpr(v.X, nil)
+		// Java allows only the forms whose evaluation does something: an
+		// assignment, an increment or decrement, a method call, an object
+		// creation (JLS 14.8). Anything else is a statement with no effect,
+		// and rejecting it is what turns a real trap into a diagnostic -- this
+		// language ends an expression at the newline, so
+		//     long x = 100L + a
+		//              + b
+		// is two statements, and the second one used to be a silent unary plus
+		// that quietly left x one term short.
+		if !hasEffect(v.X) {
+			ctx.errf(v.X.GetPos(), "TY-TYP-0114",
+				"not a statement: %s has no effect", describeExpr(v.X))
+		}
 	case *ast.If:
 		ctx.checkCond(v.Cond)
 		ctx.checkStmt(v.Then)
@@ -742,6 +785,17 @@ func (ctx *methodCtx) checkTry(v *ast.Try) {
 			for _, vd := range lv.Vars {
 				if vd.Sym != nil {
 					vd.Sym.Final = true
+				}
+				// Java requires the resource's type to be a subtype of
+				// AutoCloseable, and this is where that stops being a
+				// formality: the implicit close is an interface call, so a
+				// class that merely happens to have a close() method compiles
+				// into a dispatch the object has no entry for -- a runtime
+				// failure with nothing in the source to point at.
+				if vd.Sym != nil && vd.Sym.Type != nil && !ast.IsError(vd.Sym.Type) &&
+					!c.isSubtype(vd.Sym.Type, &ast.ClassType{Class: c.b.AutoCloseable}) {
+					ctx.errf(vd.Pos, "TY-TYP-0113",
+						"resource type %s is not a subtype of AutoCloseable", vd.Sym.Type)
 				}
 			}
 		}
@@ -2409,13 +2463,30 @@ type ovScore struct {
 // varargs call whose elements all match exactly used to tie with a fixed-arity
 // method and win or lose on declaration order alone.
 func (ctx *methodCtx) pickOverload(recv *ast.ClassType, cands []*ast.Method, args []ast.Expr, want ast.Type) (*ast.Method, ovScore) {
-	// Check arguments once with no target to obtain their types. Lambdas and
-	// method references need a target type, so they are checked after the
-	// overload is chosen, in bindArgs.
-	for _, a := range args {
-		if a.GetType() == nil && !isLambdaLike(a) {
-			ctx.checkExpr(a, nil)
+	// Check arguments once to obtain their types. Lambdas and method references
+	// need a target type, so they are checked after the overload is chosen, in
+	// bindArgs.
+	//
+	// A nested generic call needs one too, for the same reason: `id(chained())`
+	// where chained() has a type variable of its own leaves it open when the
+	// argument is checked with no target, and an open variable is a hole the
+	// inner call is then rejected for. When the name has a single candidate
+	// there is nothing to choose and its parameter types are the target; an
+	// overloaded name keeps checking with no target, because that target is
+	// what the overload is being chosen for.
+	var only *ast.Method
+	if len(cands) == 1 {
+		only = cands[0]
+	}
+	for i, a := range args {
+		if a.GetType() != nil || isLambdaLike(a) {
+			continue
 		}
+		var want ast.Type
+		if only != nil && i < len(only.Params) && !only.Varargs {
+			want = only.Params[i]
+		}
+		ctx.checkExpr(a, want)
 	}
 	best := ovScore{total: 1 << 30}
 	for phase := phaseStrict; phase <= phaseVarargs; phase++ {
@@ -2476,7 +2547,18 @@ func (ctx *methodCtx) checkInferred(m *ast.Method, s ovScore, args []ast.Expr) {
 	if !missing {
 		return
 	}
+	// The call site is what a reader has to look at, and it is not where the
+	// method was declared: this used to point at the method's own header, so a
+	// failure inside a library call sent the reader to the library instead of
+	// to their own line. An argument is on the call's line; failing that, the
+	// declaration is all there is.
 	pos := m.Pos
+	for _, a := range args {
+		if a.GetPos().File != nil {
+			pos = a.GetPos()
+			break
+		}
+	}
 	for _, a := range args {
 		if isLambdaLike(a) && a.GetType() == nil {
 			pos = a.GetPos()
@@ -2758,7 +2840,13 @@ func (c *Checker) inferTypeArg(param, arg ast.Type, bind map[*ast.TypeVar]ast.Ty
 				if util.IsPrim(arg) {
 					bind[p.Var] = c.boxed(arg)
 				} else {
-					bind[p.Var] = c.erasure(arg)
+					// The whole type, not its erasure: a bound that keeps its
+					// arguments is what lets the argument list refine it later
+					// (`collect` sees `Set<T>` from the target first, and the
+					// collector it is given says which Set it really is).
+					// Erasing here threw that away and left the outer call with
+					// a variable nothing could settle.
+					bind[p.Var] = arg
 				}
 			}
 			return bind[p.Var]
@@ -2795,13 +2883,25 @@ func (c *Checker) inferTypeArg(param, arg ast.Type, bind map[*ast.TypeVar]ast.Ty
 		}
 		return param
 	case *ast.WildcardType:
-		// The free variable is the wildcard's bound: `Fn<? super String,
-		// ? extends R>` against `Fn<String, Integer>` settles R = Integer.
-		// `? super B` constrains the argument to be a supertype of B and says
-		// nothing about a variable of its own, so there is nothing to bind.
-		if p.Bound == nil || p.Super {
+		if p.Bound == nil {
 			return param
 		}
+		if p.Super {
+			// `? super T` names nothing of its own to bind, but T may already
+			// have a value -- from the receiver, or from an explicit witness --
+			// and the containment check has to see it. `Function<? super T, U>`
+			// with T = String must accept a Function<String, Integer>; left as
+			// written, the check asks whether `String` is a subtype of the bare
+			// variable T, which is false for every argument, so the call was
+			// rejected even with the witness spelled out.
+			nb := c.subst(p.Bound, bind)
+			if nb == p.Bound {
+				return param
+			}
+			return &ast.WildcardType{Bound: nb, Super: true}
+		}
+		// The free variable is the wildcard's bound: `Fn<? super String,
+		// ? extends R>` against `Fn<String, Integer>` settles R = Integer.
 		return c.inferTypeArg(p.Bound, arg, bind)
 	}
 	return param
@@ -3748,6 +3848,15 @@ func (ctx *methodCtx) checkLambda(lam *ast.Lambda, want ast.Type) {
 			// a void compatible body is a statement expression (JLS 15.27.2)
 			lctx.checkExpr(b, nil)
 			lam.ExprStmt = true
+		} else if _, open := m.Result.(*ast.TypeVarType); open {
+			// The target's result type may still be an open variable:
+			// `Comparator<String> c = comparing(s -> s)` against
+			// `Comparator<T> comparing(Fn<? super T, ? extends U> key)` has U
+			// unsettled when the body is checked, and checking a String against
+			// a bare `U` rejects it for not being one. The body's own type is
+			// what settles U, so it is checked with no target and the caller
+			// reads the answer back.
+			lctx.checkExpr(b, nil)
 		} else {
 			lctx.checkExpr(b, m.Result)
 			lctx.convertTo(b, m.Result)

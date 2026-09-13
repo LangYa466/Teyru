@@ -170,6 +170,12 @@ func TestDiagnostics(t *testing.T) {
 		{"circularBeans", "import teyru.Service\nimport teyru.Autowired\n\n@Service\nclass A {\n  @Autowired B b\n}\n@Service\nclass B {\n  @Autowired A a\n}\nclass Main {\n  public static void main(String[] args) {\n  }\n}\n", "TY-TYP-0107"},
 		{"ambiguousBeans", "import teyru.Service\nimport teyru.Component\nimport teyru.Autowired\n\ninterface G { String g() }\n@Component class G1 implements G { public String g() { return \"1\" } }\n@Component class G2 implements G { public String g() { return \"2\" } }\n@Service class S { @Autowired G g }\nclass Main {\n  public static void main(String[] args) {\n  }\n}\n", "TY-TYP-0104"},
 		{"lambdaThisInStatic", "import java.util.function.Supplier\n\nclass Main {\n  int n() { return 3 }\n  public static void main(String[] args) {\n    Supplier<Integer> s = () -> n() + 1\n    System.out.println(s.get())\n  }\n}\n", "TY-TYP-0098"},
+		// An expression continued on the next line is a new statement, so this
+		// is what keeps the second line from being a silent unary plus.
+		{"noEffectStatement", "class Main {\n  public static void main(String[] args) {\n    int a = 1\n    int b = 2\n    long x = 100L + a\n             + b\n    System.out.println(x)\n  }\n}\n", "TY-TYP-0114"},
+		// The implicit close is an interface call, so a class that merely has a
+		// close() method would dispatch into nothing at run time.
+		{"resourceNotCloseable", "class P {\n  public void close() { }\n}\nclass Main {\n  public static void main(String[] args) {\n    try (P p = new P()) { System.out.println(\"in\") }\n  }\n}\n", "TY-TYP-0113"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

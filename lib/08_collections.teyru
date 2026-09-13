@@ -53,6 +53,18 @@ interface Collection<T> extends Iterable<T> {
   int hashCode()
   String toString()
 
+  /* Java's two entry points to a stream. `parallelStream` returns a sequential
+     stream here, which is what `parallel()` does on one: this language has no
+     threads for a stream to be parallel over, and a program that asks for one
+     still gets every element in the same order. */
+  default Stream<T> stream() {
+    return Streams.of(this)
+  }
+
+  default Stream<T> parallelStream() {
+    return Streams.of(this)
+  }
+
   default void forEach(Consumer<T> action) {
     for (T e : this) {
       action.accept(e)

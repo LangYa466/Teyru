@@ -2170,6 +2170,47 @@ static void fmtb_init(fmtbuf *b) {
   b->len = 0;
   b->buf = (char *)malloc((size_t)b->cap);
 }
+
+/* The scratch buffers one String.format is holding while it runs.
+
+   Java reports a bad format by throwing, and a throw here is a longjmp to
+   whatever handler surrounds the call: every buffer between the loop and that
+   handler becomes unreachable at once, so freeing them at the normal exits is
+   not enough -- a program that catches a formatting error in a loop would leak
+   the format under test every time. These buffers are malloc'd on purpose (the
+   collector is no place for a scratch buffer a nested allocation could
+   collect), so the throw helpers free them on the way out instead.
+
+   The runtime has no threads and the format helpers below are one call deep,
+   so a plain list is enough; it is emptied whenever a format ends, normally or
+   not. */
+#define FMT_LIVE_MAX 8
+static fmtbuf *fmt_live[FMT_LIVE_MAX];
+static int fmt_live_n;
+
+static void fmt_hold(fmtbuf *b) {
+  if (fmt_live_n < FMT_LIVE_MAX) fmt_live[fmt_live_n++] = b;
+}
+static void fmt_drop(fmtbuf *b) {
+  int i;
+  for (i = 0; i < fmt_live_n; i++) {
+    if (fmt_live[i] == b) {
+      fmt_live[i] = fmt_live[--fmt_live_n];
+      return;
+    }
+  }
+}
+/* The buffers below the current format belong to a format that is still
+   running -- `%s` on an object whose toString calls String.format again puts
+   two on the list at once -- so a throw frees down to the innermost one and no
+   further. */
+static int fmt_base;
+
+static void fmt_abandon(void) {
+  while (fmt_live_n > fmt_base) {
+    free(fmt_live[--fmt_live_n]->buf);
+  }
+}
 static void fmtb_need(fmtbuf *b, int64_t extra) {
   if (b->len + extra <= b->cap) return;
   while (b->len + extra > b->cap) b->cap *= 2;
@@ -2547,6 +2588,7 @@ static void bad_arg(char conv, void *o) {
   } else {
     snprintf(msg, sizeof msg, "%c != %s", conv, name);
   }
+  fmt_abandon();
   ty_throw(ty_illarg(msg));
 }
 /* Java's flag check: a combination the conversion gives no meaning to is an
@@ -2570,6 +2612,7 @@ static void bad_flags(char conv, const fmtflags *f) {
   char msg[80], fl[8];
   flag_str(fl, f);
   snprintf(msg, sizeof msg, "Conversion = %c, Flags = %s", conv, fl);
+  fmt_abandon();
   ty_throw(ty_illarg(msg));
 }
 /* A flag combination that contradicts itself, and a flag on a conversion that
@@ -2578,6 +2621,7 @@ static void bad_flag_set(const fmtflags *f) {
   char msg[80], fl[8];
   flag_str(fl, f);
   snprintf(msg, sizeof msg, "Flags = '%s'", fl);
+  fmt_abandon();
   ty_throw(ty_illarg(msg));
 }
 /* A '-' with no width has nothing to justify against, and Java quotes the
@@ -2588,11 +2632,13 @@ static void bad_width(tystr *fmt, int64_t spec0, int64_t speclen) {
   if (n > 76) n = 76;
   memcpy(msg, fmt->data + spec0, (size_t)n);
   msg[n] = 0;
+  fmt_abandon();
   ty_throw(ty_illarg(msg));
 }
 static void bad_int(const char *prefix, int64_t v) {
   char msg[32];
   snprintf(msg, sizeof msg, "%s%d", prefix, (int)v);
+  fmt_abandon();
   ty_throw(ty_illarg(msg));
 }
 static void check_flags(char conv, const fmtflags *f, tystr *fmt, int64_t spec0, int64_t speclen) {
@@ -2690,6 +2736,7 @@ missing:
   memcpy(msg + 18, fmt->data + spec0, (size_t)n);
   msg[18 + n] = '\'';
   msg[19 + n] = 0;
+  fmt_abandon();
   ty_throw(ty_illarg(msg));
   return NULL;
 }
@@ -2710,7 +2757,8 @@ static void *pick_arg(tyarr *args, int64_t *ai, int64_t fixed, void **last, int 
       memcpy(msg + 18, fmt->data + spec0, (size_t)n);
       msg[18 + n] = '\'';
       msg[19 + n] = 0;
-      ty_throw(ty_illarg(msg));
+      fmt_abandon();
+  ty_throw(ty_illarg(msg));
     }
     return *last;
   }
@@ -2733,7 +2781,10 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
   void *last = NULL;
   int have_last = 0, relative = 0;
   if (!fmt) ty_npe();
+  int outer_base = fmt_base;
+  fmt_base = fmt_live_n;
   fmtb_init(&out);
+  fmt_hold(&out);
   while (i < fmt->len) {
     fmtflags f;
     char conv, c = fmt->data[i];
@@ -2964,6 +3015,7 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
         }
         v = float_arg(conv, o);
         fmtb_init(&body);
+        fmt_hold(&body);
         if (v != v) {
           /* a NaN takes no sign and no zero padding, whatever the flags say */
           fmtb_add(&body, upper ? "NAN" : "NaN", 3);
@@ -2996,6 +3048,7 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
             plen = 1;
           }
           fmtb_init(&t);
+          fmt_hold(&t);
           if (conv == 'a' || conv == 'A') {
             fmt_hex_body(&t, v, P, upper);
           } else if (conv == 'e' || conv == 'E') {
@@ -3007,9 +3060,11 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
           }
           move_number(&body, &t, &f);
           free(t.buf);
+          fmt_drop(&t);
         }
         fmt_put(&out, &f, prefix, plen, body.buf, body.len);
         free(body.buf);
+        fmt_drop(&body);
         break;
       }
       case 't': case 'T':
@@ -3018,6 +3073,7 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
       default: {
         char msg[64];
         snprintf(msg, sizeof msg, "Conversion = '%c'", conv);
+        fmt_abandon();
         ty_throw(ty_illarg(msg));
       }
     }
@@ -3025,6 +3081,8 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
   {
     tystr *r = ty_str_new(out.buf, out.len);
     free(out.buf);
+    fmt_drop(&out);
+    fmt_base = outer_base;
     return r;
   }
 }
