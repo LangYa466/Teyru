@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/LangYa466/Teyru/internal/ast"
 )
@@ -109,8 +110,41 @@ func (e *Emitter) emitEnumInit(cl *ast.Class) {
 		e.line("%s->obj.cls = &cls_%s;\n", g, mangle(cls.Full))
 		e.line("((tyEnumBase*)%s)->ordinal = %d;\n", g, f.EnumOrd)
 		e.line("((tyEnumBase*)%s)->name = ty_str_intern(%s);\n", g, e.cstr(ec.Name))
-		if len(ec.Args) > 0 || ec.Body != nil {
-			e.line("/* enum constant arguments are evaluated in the enum constructor */\n")
+		// The constant's arguments go to the enum's own constructor -- the one
+		// declared after the `:`. Nothing called it, so `P(1)` dropped the 1
+		// and `P.v()` answered 0 where javac answers 1. A constant with a body
+		// is a subclass, and its synthesized constructor is a no-argument one
+		// that forwards to the enum's with nothing, so it is the enum's
+		// constructor that is called here for both shapes: the fields of a
+		// subclass start where the superclass's do, which is the same cast the
+		// rest of the backend makes.
+		// A constant with a body is a subclass, so its own constructor is the
+		// one to call; it forwards the arguments to the enum's.
+		ctor := enumCtor(cls, len(ec.Args))
+		if ctor == nil {
+			ctor = enumCtor(cl, len(ec.Args))
+		}
+		if ctor != nil {
+			args := make([]string, 0, len(ec.Args)+1)
+			args = append(args, "("+cname(cls)+"*)"+g)
+			for i, a := range ec.Args {
+				var want ast.Type
+				if i < len(ctor.Params) {
+					want = ctor.Params[i]
+				}
+				args = append(args, e.coerce(e.expr(a), a.GetType(), want))
+			}
+			e.line("%s(%s);\n", e.cfunc(ctor), strings.Join(args, ", "))
 		}
 	}
+}
+
+// enumCtor picks the constructor an enum constant with n arguments calls.
+func enumCtor(cl *ast.Class, n int) *ast.Method {
+	for _, c := range cl.Ctors {
+		if len(c.Params) == n {
+			return c
+		}
+	}
+	return nil
 }

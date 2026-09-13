@@ -316,7 +316,50 @@ func (c *Checker) resolveMembers(cl *ast.Class) {
 			fs.Mods |= ast.ModStatic
 		}
 	}
+	if cd.Kind == ast.KindEnum {
+		c.enumBodyCtors(cl)
+	}
 	c.checkNativeSymbols(cl)
+}
+
+// enumBodyCtors gives every enum constant that declares a body the constructor
+// Java gives it: the enum's own signature, forwarded to the enum's constructor.
+//
+// A constant's body is a subclass, and it is declared while the constants are
+// being walked -- before the enum's own constructors have been resolved from
+// the members after the `:` -- so it was handed the ordinary synthesized
+// no-argument constructor. That one then chained to a constructor that has
+// parameters and passed none of them, which is not C that compiles:
+//
+//	enum Op { ADD(1) { ... } : Op(int code) { ... } }
+//
+// The test programs had no enum with both a body and constructor arguments,
+// which is why nothing caught it.
+func (c *Checker) enumBodyCtors(cl *ast.Class) {
+	if len(cl.Ctors) == 0 {
+		return
+	}
+	target := cl.Ctors[0]
+	for _, sub := range cl.Subclasses {
+		if !sub.Anon {
+			continue
+		}
+		var kept []*ast.Method
+		for _, k := range sub.Ctors {
+			if k.SynthKind != "default-ctor" {
+				kept = append(kept, k)
+			}
+		}
+		sub.Ctors = kept
+		if len(kept) > 0 {
+			continue
+		}
+		c.addCtor(sub, &ast.Method{
+			Name: "<init>", IsCtor: true, Mods: ast.ModPrivate,
+			Result: ast.TVoid, Pos: target.Pos, SynthKind: "anon-ctor", Forward: target,
+			Params: target.Params, ParamNames: target.ParamNames,
+		})
+	}
 }
 
 // checkNativeSymbols rejects two native methods of one class that would have to

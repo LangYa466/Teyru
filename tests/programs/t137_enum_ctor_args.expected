@@ -1,0 +1,13 @@
+== a constant with no arguments ==
+RED 0 RED
+GREEN 1 GREEN
+GREEN
+== arguments reach the constructor ==
+SMALL 1 small(1)
+LARGE 9 large(9)
+10
+large(9)
+== and a constant with a body ==
+ADD code=1 apply=13
+MUL code=2 apply=42
+3
