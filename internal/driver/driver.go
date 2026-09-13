@@ -151,6 +151,15 @@ func Compile(paths []string, opts Options) (*Result, error) {
 		if err := writeNativeHeader(opts.NativeHeader, codegen.NativeDecls(prog), codegen.InterfaceSelectors(prog)); err != nil {
 			return nil, err
 		}
+		// A program with native methods cannot link until they are implemented,
+		// so `--native-header` with no `--native` source stops here: the caller
+		// asked for the prototypes to write an implementation against, and
+		// continuing would fail the build with an undefined symbol for a
+		// function nobody has written yet. Given an implementation, the same
+		// invocation builds it as well, which is what a one-shot build wants.
+		if len(opts.Native) == 0 && len(codegen.NativeDecls(prog)) > 0 {
+			return &Result{Diags: diags}, nil
+		}
 	}
 	csrc := codegen.Emit(prog)
 
@@ -497,7 +506,11 @@ func writeNativeHeader(path string, decls []codegen.NativeDecl, sels []codegen.S
 		b.WriteString("   back into Teyru with\n")
 		b.WriteString("     ((int32_t (*)(void *, int32_t)) ty_itab(obj, SEL))(obj, arg) */\n\n")
 		for _, s := range sels {
-			fmt.Fprintf(&b, "#define TY_SEL_%s_%s %d\n", mangleForHeader(s.Iface), mangleForHeader(s.Method), s.Selector)
+			name := "TY_SEL_" + mangleForHeader(s.Iface) + "_" + mangleForHeader(s.Method)
+			if s.Params != "" {
+				name += "_" + mangleForHeader(s.Params)
+			}
+			fmt.Fprintf(&b, "#define %s %d\n", name, s.Selector)
 		}
 		b.WriteString("\n")
 	}

@@ -45,7 +45,8 @@ flags:
   --no-lto      disable link-time optimisation
   --native <f>  C source implementing the program's native methods (repeatable)
   --link <arg>  extra argument for the link step, such as -lm or a .a path
-  --native-header <p>  write the C prototypes of every native method to <p>
+  --native-header <p>  write the C prototypes of every native method to <p>;
+                       stops there unless --native is also given
   -v            verbose
 `
 
