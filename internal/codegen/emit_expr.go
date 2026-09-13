@@ -1629,12 +1629,18 @@ func (e *Emitter) emitLambdaMethod(cl *ast.Class, m *ast.Method) {
 	// (JLS 15.27.2), so the class in scope is the one the body was written in,
 	// not the closure class: a bare field name and an enclosing-class reference
 	// have to resolve the way they do in that class.
-	prevLambda, prevClass := e.curLambda, e.curClass
+	prevLambda, prevClass, prevRet := e.curLambda, e.curClass, e.retType
 	e.curLambda = lam
+	// A return inside a block-bodied lambda returns from the lambda, so the
+	// copy it has to match is the functional method's result -- not whatever
+	// method the lambda happens to be written in. Without this the emitted
+	// `return` coerced to the enclosing method's type and a lambda answering
+	// Object returned a C_teyru_HttpResponse*, which does not compile.
+	e.retType = m.Result
 	if enc := e.enclosureOf(lam); enc != nil {
 		e.curClass = enc
 	}
-	defer func() { e.curLambda, e.curClass = prevLambda, prevClass }()
+	defer func() { e.curLambda, e.curClass, e.retType = prevLambda, prevClass, prevRet }()
 	for v, f := range cl.CapFields {
 		e.locals[v] = "this->cap_" + mangle(f.Name)
 	}
