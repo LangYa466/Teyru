@@ -21,6 +21,12 @@ type nativeFn struct {
 	// runtime builds a Class object from a tyclass this header-less C file
 	// cannot name.
 	classHint string
+	// proto is the C prototype of fn, repeated as an `extern` at every call
+	// site. A table that carries its own declaration needs nothing added to
+	// tyrt.h, which is what lets a feature (networking, say) ship its native
+	// methods in a file of its own. An entry with no proto relies on the
+	// prototype tyrt.h already declares.
+	proto string
 }
 
 // streamTwin is the stream-aware twin of a PrintStream print helper: the same
@@ -83,6 +89,24 @@ func (e *Emitter) psTwin(m *ast.Method, nf nativeFn) *streamTwin {
 // specialNew maps classes whose allocation is owned by the runtime.
 var specialNew = map[string]string{
 	"StringBuilder": "ty_sb_new",
++}
+
+// extraNative holds the tables other files contribute, so a feature can add
+// its own native methods without editing the core table: every entry here is
+// merged into nativeTable at startup. A duplicate key is a programming error
+// rather than a silent override, since two features claiming one Teyru method
+// would otherwise pick a winner by file order.
+var extraNative []map[string]nativeFn
+
+func init() {
+	for _, t := range extraNative {
+		for k, v := range t {
+			if _, dup := nativeTable[k]; dup {
+				panic("native method declared twice: " + k)
+			}
+			nativeTable[k] = v
+		}
+	}
 }
 
 var nativeTable = map[string]nativeFn{
@@ -348,6 +372,9 @@ func (e *Emitter) nativeCall(m *ast.Method, recv string, args []ast.Expr) string
 		}
 		parts = append(parts, vals...)
 		call = nf.fn + "(" + strings.Join(parts, ", ") + ")"
+		if nf.proto != "" {
+			call = "({ extern " + nf.proto + "; " + call + "; })"
+		}
 	}
 	if e.isRef(m.Result) {
 		return "(" + e.ctype(m.Result) + ")" + call
