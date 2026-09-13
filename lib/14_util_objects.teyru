@@ -1,0 +1,356 @@
+package teyru
+
+/* java.util.Objects, java.util.Optional, java.util.StringJoiner, and the one
+ * functional interface this package needs and java.util.function is missing.
+ *
+ * Objects is the class the rest of this library is written against: the
+ * equality and hashing the containers use is java.util.Objects.equals and
+ * java.util.Objects.hashCode, which is what makes "a type used as a HashMap
+ * key" mean the same thing here as in the JDK.
+ */
+
+/* java.util.function.BiConsumer, which lib/09_functional.teyru does not
+   declare and which Map.forEach and Map.replaceAll are declared over. It is
+   declared here rather than there because lib/09 is another file's to edit,
+   and the two-argument consumer is the only member of that package java.util
+   itself needs. */
+interface BiConsumer<T, U> {
+  void accept(T t, U u)
+}
+
+class Objects {
+  private Objects() {
+  }
+
+  public static boolean equals(Object a, Object b) {
+    return a == b || (a != null && a.equals(b))
+  }
+
+  public static int hashCode(Object o) {
+    return o != null ? o.hashCode() : 0
+  }
+
+  public static int hash(Object... values) {
+    return Arrays.hashCode(values)
+  }
+
+  public static String toString(Object o) {
+    return String.valueOf(o)
+  }
+
+  public static String toString(Object o, String nullDefault) {
+    return o != null ? o.toString() : nullDefault
+  }
+
+  public static <T> int compare(T a, T b, Comparator<T> c) {
+    return a == b ? 0 : c.compare(a, b)
+  }
+
+  public static <T> T requireNonNull(T obj) {
+    if (obj == null) {
+      throw new NullPointerException()
+    }
+    return obj
+  }
+
+  public static <T> T requireNonNull(T obj, String message) {
+    if (obj == null) {
+      throw new NullPointerException(message)
+    }
+    return obj
+  }
+
+  public static boolean isNull(Object obj) {
+    return obj == null
+  }
+
+  public static boolean nonNull(Object obj) {
+    return obj != null
+  }
+
+  public static <T> T requireNonNullElse(T obj, T defaultObj) {
+    if (obj != null) {
+      return obj
+    }
+    if (defaultObj == null) {
+      throw new NullPointerException("defaultObj")
+    }
+    return defaultObj
+  }
+
+  public static <T> T requireNonNullElseGet(T obj, Supplier<T> supplier) {
+    if (obj != null) {
+      return obj
+    }
+    return requireNonNull(supplier.get(), "supplier.get()")
+  }
+
+  /* Java's deepEquals has one arity and reaches Arrays.deepEquals0, which
+     switches on the array's runtime element type. Teyru's arrays all share the
+     class teyru.Array (docs/language.md §13), so a primitive array that
+     arrives here as an Object cannot be told from an object array -- and
+     reading a primitive array through an Object[] reference reads the wrong
+     bytes. The primitive overloads below are therefore not decoration: they
+     are what lets the compiler pick the right comparison at the call site.
+     A primitive array that reaches the two-Object overload through an Object
+     reference is Java-compatible only when it is an object array. */
+  public static boolean deepEquals(Object a, Object b) {
+    if (a == b) {
+      return true
+    }
+    if (a == null || b == null) {
+      return false
+    }
+    if (a instanceof Object[] && b instanceof Object[]) {
+      return Arrays.deepEquals((Object[]) a, (Object[]) b)
+    }
+    return a.equals(b)
+  }
+
+  public static boolean deepEquals(int[] a, int[] b) {
+    return Arrays.equals(a, b)
+  }
+
+  public static boolean deepEquals(long[] a, long[] b) {
+    return Arrays.equals(a, b)
+  }
+
+  public static boolean deepEquals(double[] a, double[] b) {
+    return Arrays.equals(a, b)
+  }
+
+  public static boolean deepEquals(float[] a, float[] b) {
+    return Arrays.equals(a, b)
+  }
+
+  public static boolean deepEquals(char[] a, char[] b) {
+    return Arrays.equals(a, b)
+  }
+
+  public static boolean deepEquals(short[] a, short[] b) {
+    return Arrays.equals(a, b)
+  }
+
+  public static boolean deepEquals(byte[] a, byte[] b) {
+    return Arrays.equals(a, b)
+  }
+
+  public static boolean deepEquals(boolean[] a, boolean[] b) {
+    return Arrays.equals(a, b)
+  }
+
+  public static boolean deepEquals(Object[] a, Object[] b) {
+    return Arrays.deepEquals(a, b)
+  }
+}
+
+/* Optional is a container for one nullable value, with Java's contract: `of`
+   refuses null, `get` on an empty optional throws NoSuchElementException, and
+   every other method asks isPresent first.
+ *
+ * map/flatMap take Java's signatures, but Teyru does not infer a generic
+ * method's type arguments from a lambda's body (docs/language.md §13), so a
+ * call needs the witness: `o.<Integer>map(x -> x.length())`. That is the
+ * dialect, not a design choice here. */
+class Optional<T> {
+  private static final Optional<Object> EMPTY = new Optional<Object>(null)
+
+  private final T value
+
+  private Optional(T value) {
+    this.value = value
+  }
+
+  public static <T> Optional<T> empty() {
+    return (Optional<T>) EMPTY
+  }
+
+  public static <T> Optional<T> of(T value) {
+    return new Optional<T>(requireNonNull(value))
+  }
+
+  public static <T> Optional<T> ofNullable(T value) {
+    return value == null ? Optional.<T>empty() : new Optional<T>(value)
+  }
+
+  private static <T> T requireNonNull(T v) {
+    if (v == null) {
+      throw new NullPointerException()
+    }
+    return v
+  }
+
+  public T get() {
+    if (value == null) {
+      throw new NoSuchElementException("no value present")
+    }
+    return value
+  }
+
+  public boolean isPresent() {
+    return value != null
+  }
+
+  public boolean isEmpty() {
+    return value == null
+  }
+
+  public void ifPresent(Consumer<T> action) {
+    if (value != null) {
+      action.accept(value)
+    }
+  }
+
+  public void ifPresentOrElse(Consumer<T> action, Runnable emptyAction) {
+    if (value != null) {
+      action.accept(value)
+    } else {
+      emptyAction.run()
+    }
+  }
+
+  public Optional<T> filter(Predicate<T> predicate) {
+    if (value == null) {
+      return this
+    }
+    return predicate.test(value) ? this : Optional.<T>empty()
+  }
+
+  public <U> Optional<U> map(Function<T, U> mapper) {
+    if (value == null) {
+      return Optional.<U>empty()
+    }
+    return Optional.<U>ofNullable(mapper.apply(value))
+  }
+
+  public <U> Optional<U> flatMap(Function<T, Optional<U>> mapper) {
+    if (value == null) {
+      return Optional.<U>empty()
+    }
+    return (Optional<U>) requireNonNull(mapper.apply(value))
+  }
+
+  public Optional<T> or(Supplier<Optional<T>> supplier) {
+    if (value != null) {
+      return this
+    }
+    return (Optional<T>) requireNonNull(supplier.get())
+  }
+
+  public T orElse(T other) {
+    return value != null ? value : other
+  }
+
+  public T orElseGet(Supplier<T> supplier) {
+    return value != null ? value : supplier.get()
+  }
+
+  public T orElseThrow() {
+    if (value == null) {
+      throw new NoSuchElementException("no value present")
+    }
+    return value
+  }
+
+  public <X extends Throwable> T orElseThrow(Supplier<X> supplier) {
+    if (value != null) {
+      return value
+    }
+    throw supplier.get()
+  }
+
+  public boolean equals(Object o) {
+    if (o == this) {
+      return true
+    }
+    if (!(o instanceof Optional)) {
+      return false
+    }
+    Optional<Object> other = (Optional<Object>) o
+    return Objects.equals(value, other.orElse(null))
+  }
+
+  public int hashCode() {
+    return Objects.hashCode(value)
+  }
+
+  public String toString() {
+    return value != null ? "Optional[" + value + "]" : "Optional.empty"
+  }
+}
+
+/* StringJoiner. Java takes CharSequence everywhere; Teyru has String, and
+   String is the only CharSequence the standard library has, so the signatures
+   say String. */
+class StringJoiner {
+  private final String delimiter
+  private final String prefix
+  private final String suffix
+  private final StringBuilder sb = new StringBuilder()
+  private String emptyValue
+  private boolean started
+
+  public StringJoiner(String delimiter) {
+    this(delimiter, "", "")
+  }
+
+  public StringJoiner(String delimiter, String prefix, String suffix) {
+    if (delimiter == null) {
+      throw new NullPointerException("delimiter")
+    }
+    if (prefix == null) {
+      throw new NullPointerException("prefix")
+    }
+    if (suffix == null) {
+      throw new NullPointerException("suffix")
+    }
+    this.delimiter = delimiter
+    this.prefix = prefix
+    this.suffix = suffix
+    emptyValue = prefix + suffix
+  }
+
+  public StringJoiner setEmptyValue(String value) {
+    if (value == null) {
+      throw new NullPointerException("emptyValue")
+    }
+    emptyValue = value
+    return this
+  }
+
+  public StringJoiner add(String element) {
+    prepare()
+    sb.append(element)
+    return this
+  }
+
+  public StringJoiner merge(StringJoiner other) {
+    if (other.started) {
+      prepare()
+      // the other joiner's own prefix and suffix are dropped: only its
+      // elements join this one, which is Java's documented behaviour
+      sb.append(other.sb.toString())
+    }
+    return this
+  }
+
+  private void prepare() {
+    if (started) {
+      sb.append(delimiter)
+    }
+    started = true
+  }
+
+  public int length() {
+    // not "the number of characters added": Java measures the string this
+    // would produce, delimiter and affixes included
+    return toString().length()
+  }
+
+  public String toString() {
+    if (!started) {
+      return emptyValue
+    }
+    return prefix + sb.toString() + suffix
+  }
+}
