@@ -19,7 +19,6 @@ type methodCtx struct {
 	scopes          []map[string]*ast.Var
 	loops           int
 	sw              *ast.Switch
-	try             int
 	lambda          *ast.Lambda
 	staticImports   []*ast.Field
 	staticMethods   map[string][]*ast.Method
@@ -547,7 +546,6 @@ func (ctx *methodCtx) checkTry(v *ast.Try) {
 	c := ctx.c
 	ctx.push()
 	defer ctx.pop()
-	ctx.try++
 	for _, r := range v.Resources {
 		ctx.checkStmt(r)
 		if lv, ok := r.(*ast.LocalVar); ok {
@@ -578,7 +576,6 @@ func (ctx *methodCtx) checkTry(v *ast.Try) {
 	if v.Finally != nil {
 		ctx.checkBlock(v.Finally, true)
 	}
-	ctx.try--
 }
 
 func (ctx *methodCtx) checkSwitch(s *ast.Switch, expr bool) {
@@ -1058,11 +1055,6 @@ func (ctx *methodCtx) captureOuter(target *ast.Class, v *ast.Var) {
 			break
 		}
 	}
-}
-
-// convert inserts an implicit conversion when needed.
-func (ctx *methodCtx) convert(e ast.Expr, target ast.Type) ast.Expr {
-	return ctx.convertWith(e, target, e.GetType())
 }
 
 func (ctx *methodCtx) convertWith(e ast.Expr, target, src ast.Type) ast.Expr {
@@ -1883,14 +1875,6 @@ func findClass(scope, target *ast.Class) *ast.Class {
 	return found
 }
 
-// isInstanceContext reports whether the current class has an enclosing instance of target.
-func (c *Checker) isInstanceContext(ctx *methodCtx, target *ast.Class) bool {
-	if ctx.inStatic() {
-		return false
-	}
-	return findEnclosing(ctx.cl, target) != nil
-}
-
 // resolveCtor picks a constructor and checks arguments.
 func (c *Checker) resolveCtor(ctx *methodCtx, ct *ast.ClassType, v *ast.New, cl *ast.Class) *ast.Method {
 	if cl.IsInterface() {
@@ -1934,7 +1918,6 @@ func argTypes(args []ast.Expr) string {
 type ovScore struct {
 	total    int
 	varargs  int
-	convs    []int
 	method   *ast.Method
 	instArgs []ast.Type
 	targs    map[*ast.TypeVar]ast.Type // inferred method type arguments
@@ -2075,7 +2058,6 @@ func (ctx *methodCtx) applicable(recv *ast.ClassType, m *ast.Method, args []ast.
 					params[i] = c.subst(pt, mbind)
 				}
 				s.total += 1
-				s.convs = append(s.convs, 1)
 				continue
 			}
 		}
@@ -2093,7 +2075,6 @@ func (ctx *methodCtx) applicable(recv *ast.ClassType, m *ast.Method, args []ast.
 			return ovScore{}, false
 		}
 		s.total += cost
-		s.convs = append(s.convs, cost)
 	}
 	if m.Varargs {
 		s.varargs = -1
@@ -2407,6 +2388,9 @@ func (ctx *methodCtx) checkQualifiedSuper(v *ast.Call) {
 		return
 	}
 	ctx.bindArgs(m, sc, v.Args, recv)
+	if sc.directVarargs {
+		ctx.c.Direct[v] = true
+	}
 	v.Method = m
 	v.SetType(m.Result)
 }
@@ -2456,14 +2440,13 @@ func (ctx *methodCtx) checkUnqualifiedCall(v *ast.Call, want ast.Type) {
 		v.SetType(ctx.c.subst(m.Result, s.targs))
 		return
 	}
-	// implicit this receiver also covers superclass methods
-	if m := ctx.findInChain(v.Name, v.Args); m != nil {
-		return
-	}
 	// static imports
 	for _, m := range ctx.staticMethods[v.Name] {
 		if s, ok := ctx.applicable(recv, m, v.Args); ok {
 			ctx.bindArgs(m, s, v.Args, nil)
+			if s.directVarargs {
+				ctx.c.Direct[v] = true
+			}
 			v.Method = m
 			v.Static = true
 			v.SetType(ctx.c.subst(m.Result, s.targs))
@@ -2475,6 +2458,9 @@ func (ctx *methodCtx) checkUnqualifiedCall(v *ast.Call, want ast.Type) {
 		orecv := &ast.ClassType{Class: cl, Args: typeVarArgs(cl)}
 		if m, s := ctx.pickOverload(orecv, ctx.methodsOf(cl, v.Name), v.Args); m != nil {
 			ctx.bindArgs(m, s, v.Args, orecv)
+			if s.directVarargs {
+				ctx.c.Direct[v] = true
+			}
 			v.Method = m
 			v.Static = m.IsStatic()
 			v.Recv = &ast.This{ExprBase: ast.ExprBase{Pos: v.Pos, T: orecv}, Qual: cl.Full, Var: ctx.thisVar(cl)}
@@ -2510,19 +2496,6 @@ func (ctx *methodCtx) thisVar(cl *ast.Class) *ast.Var {
 	return nil
 }
 
-func (ctx *methodCtx) findInChain(name string, args []ast.Expr) *ast.Method {
-	for cl := ctx.cl; cl != nil; cl = cl.Outer {
-		recv := &ast.ClassType{Class: cl, Args: typeVarArgs(cl)}
-		if m, s := ctx.pickOverload(recv, ctx.methodsOf(cl, name), args); m != nil {
-			// unreachable: handled by caller
-			_ = m
-			_ = s
-			return nil
-		}
-	}
-	return nil
-}
-
 func (ctx *methodCtx) methodsOf(cl *ast.Class, name string) []*ast.Method {
 	var out []*ast.Method
 	for k := cl; k != nil; {
@@ -2547,6 +2520,9 @@ func (ctx *methodCtx) checkMethodCall(v *ast.Call, rt ast.Type, want ast.Type) {
 				ctx.errf(v.Pos, "TY-TYP-0077", "non-static method %s cannot be referenced from a type name", v.Name)
 			}
 			ctx.bindArgs(m, s, v.Args, &ast.ClassType{Class: cl})
+			if s.directVarargs {
+				ctx.c.Direct[v] = true
+			}
 			v.Method = m
 			v.Static = true
 			v.SetType(ctx.c.subst(m.Result, s.targs))
@@ -2603,7 +2579,6 @@ func (ctx *methodCtx) checkMethodCall(v *ast.Call, rt ast.Type, want ast.Type) {
 	if !v.Static && !ctx.accessibleInstance(m, rt) {
 		ctx.errf(v.Pos, "TY-TYP-0079", "%s has %s access in %s", m.Name, visName(m.Mods), m.Owner.Name)
 	}
-	ctx.rewritePropCall(v, m)
 }
 
 // tryExtensionMethod rewrites `a.foo(b)` into `Extensions.foo(a, b)` for
@@ -2652,8 +2627,6 @@ func visName(m ast.Mods) string {
 	}
 	return "package"
 }
-
-func (ctx *methodCtx) rewritePropCall(v *ast.Call, m *ast.Method) {}
 
 // recvClass unwraps a type into a receiver class type (boxing primitives).
 func (ctx *methodCtx) recvClass(t ast.Type) *ast.ClassType {
@@ -2782,16 +2755,12 @@ func (ctx *methodCtx) checkSelect(v *ast.Select, want ast.Type) {
 		return
 	}
 	// array length
-	if arr, ok := xt.(*ast.ArrayType); ok {
+	if _, ok := xt.(*ast.ArrayType); ok {
 		if v.Name == "length" {
 			v.Ref = "length"
 			v.SetType(ast.TInt)
 			return
 		}
-		if obj := ctx.objField(v, xt, v.Name); obj != nil {
-			return
-		}
-		_ = arr
 		ctx.errf(v.Pos, "TY-TYP-0080", "cannot find symbol %s on array", v.Name)
 		v.SetType(ast.ErrorType{})
 		return
@@ -2902,11 +2871,6 @@ func (ctx *methodCtx) typeOfName(v *ast.Select) *ast.Class {
 	v.Ref = cl
 	v.SetType(&ast.ClassType{Class: cl})
 	return cl
-}
-
-func (ctx *methodCtx) objField(v *ast.Select, arr ast.Type, name string) ast.Expr {
-	// Object methods are handled in checkMethodCall; arrays only expose `length`.
-	return nil
 }
 
 // ---------------------------------------------------------------- lambdas
@@ -3118,7 +3082,9 @@ func (ctx *methodCtx) checkMethodRef(mr *ast.MethodRef, want ast.Type) {
 		if m, _ := ctx.matchRefParams(rt, all, params); m != nil && !m.IsStatic() {
 			target = m
 		}
-		if target == nil {
+		// an unbound reference takes its receiver from the first parameter, so it
+		// only exists when the functional interface has at least one parameter
+		if target == nil && len(params) > 0 {
 			// unbound: first parameter is the receiver
 			if m, _ := ctx.matchRefParams(rt, all, params[1:]); m != nil && !m.IsStatic() {
 				target = m

@@ -189,15 +189,6 @@ func hasAnno(annos []*ast.Annotation, names ...string) *ast.Annotation {
 	return nil
 }
 
-// lombokTargets are the fields an annotation applies to: the annotated field,
-// or every instance field of the annotated class.
-type lombokTargets struct {
-	fields  []*ast.Field
-	forAll  bool
-	anno    *ast.Annotation
-	ownerCl *ast.Class
-}
-
 // accessorsOptions holds @Accessors settings, which also drive @Getter/@Setter.
 type accessorsOptions struct {
 	chain  bool
@@ -510,9 +501,6 @@ func (c *Checker) lombokMembers(cl *ast.Class, accessors accessorsOptions, class
 // ---------------------------------------------------------------- getters
 
 func (c *Checker) lombokGetter(cl *ast.Class, fields []*ast.Field, a *ast.Annotation, o accessorsOptions) {
-	if _, none := annoAccess(a); !none && a.Value() != nil && len(a.Value().Value.(*ast.Ident).Name) == 0 {
-		return
-	}
 	mods, ok := annoAccess(a)
 	if !ok && a.Value() != nil {
 		// AccessLevel.NONE
@@ -525,15 +513,18 @@ func (c *Checker) lombokGetter(cl *ast.Class, fields []*ast.Field, a *ast.Annota
 	}
 	lazy := annoBool(a, "lazy", false)
 	for _, f := range fields {
+		// copy per field: a static field must not make the accessors of the
+		// instance fields that follow it static as well
+		fmods := mods
 		if f.Mods.Has(ast.ModStatic) {
-			mods |= ast.ModStatic
+			fmods |= ast.ModStatic
 		}
 		name := getterName(f, o)
 		if lazy {
-			c.lombokLazyGetter(cl, f, mods, name)
+			c.lombokLazyGetter(cl, f, fmods, name)
 			continue
 		}
-		m := c.newSynthMethod(cl, name, mods, f.Type, nil, nil,
+		m := c.newSynthMethod(cl, name, fmods, f.Type, nil, nil,
 			blockOf(returnOf(thisField(f))), "@Getter")
 		m.Anno = "@Getter"
 		m.Prop = f
@@ -1655,14 +1646,4 @@ func (c *Checker) applyLombokToProgram() {
 			}
 		}
 	}
-}
-
-// sortedFieldNames is used by deterministic field iteration.
-func sortedFieldNames(fields []*ast.Field) []string {
-	out := make([]string, 0, len(fields))
-	for _, f := range fields {
-		out = append(out, f.Name)
-	}
-	sort.Strings(out)
-	return out
 }
