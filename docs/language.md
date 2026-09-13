@@ -517,7 +517,10 @@ for (String n : names) {
     這種寫法會回報 `TY-TYP-0001`。
 11. 型別引數推論比 javac 弱一層，靠目標型別而不是完整的約束求解（沒有 JLS 18）：
     - lambda 的型別引數會**從主體回推**：目標是 `Fn<String, ? extends R>` 而主體是
-      `s -> s.length()` 時 `R` 定為 `Integer`。
+      `s -> s.length()` 時 `R` 定為 `Integer`。反過來不行——主體本身是一個需要目標
+      型別的泛型呼叫時，兩邊互相依賴，單向代入停在那裡：
+      `words.stream().flatMap(w -> Stream.of(w.split(" ")))` 要先把
+      `Function<String, Stream<String>>` 寫出來。
     - 引數如果只有唯一一個候選方法，會拿該參數的型別當目標——所以巢狀的泛型呼叫
       可以推出來。
     - **有自由型別變數的泛型呼叫，當它是引數、或是一個鏈式呼叫的接收者時，拿不到
