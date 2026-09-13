@@ -475,7 +475,7 @@ for (String n : names) {
 | `java.net` | `lib/15` | `ServerSocket`、`Socket`、`SocketInputStream`／`SocketOutputStream`；同步阻塞的 POSIX socket，逾時以 `SocketTimeoutException` 回報 |
 | `java.util.stream` | `lib/22` | `Stream`／`IntStream`／`LongStream`／`DoubleStream`、`Collectors`（26 個工廠）、`Collector`、`Spliterator`／`Spliterators`、`StreamSupport`、統計與 `OptionalInt` 家族；中間操作建管線、終端操作才拉，`Collection.stream()` 是入口 |
 | `java.math` | `lib/23` | `BigInteger`（base-2^30 limb、符號與大小）、`BigDecimal`（unscaled value 與 scale）、`MathContext`、`RoundingMode`；演算法照 JDK 翻譯，因為小數位數、除法留下的 scale、進位方式都是可觀察的 |
-| `java.text` | `lib/24` | `NumberFormat`／`DecimalFormat`／`DecimalFormatSymbols`、`DateFormat`／`SimpleDateFormat`、`DateTimeFormatter`、`MessageFormat` |
+| `java.text` | `lib/24` | `NumberFormat`／`DecimalFormat`／`DecimalFormatSymbols`（完整 pattern 語言）、`DateFormat`／`SimpleDateFormat`（四種 style 與 parse）、`DateTimeFormatter`、`MessageFormat`、`ChoiceFormat`、`ParseException`／`ParsePosition`。**沒有 `Locale`**（只做 ROOT／en-US），**沒有 `java.util.Date`**（`format`／`parse` 走 `Instant`），`format` 沒有 `FieldPosition` 多載 |
 | `java.util` 其餘 | `lib/25` | `Properties`、`Random`（逐位元組照 java.util.Random）、`UUID`、`BitSet`、`StringTokenizer`、`Enumeration`、`ArrayOps`（陣列的範圍形式） |
 | `com.google.gson` | `lib/10`、`lib/19` | Gson 的樹狀 API，以及由編譯器產生的物件綁定（見 [docs/json.md](json.md)） |
 | 框架 | `lib/17`、`lib/18` | Spring 形狀的容器與 web 層（見 [docs/framework.md](framework.md)） |

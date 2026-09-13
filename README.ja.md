@@ -311,7 +311,7 @@ JEP 378 テキストブロック、JEP 361 switch 式、JEP 286 `var`。
 | `java.net` | `ServerSocket`、`Socket` とそのストリーム |
 | `java.util.stream` | `Stream`／`IntStream`／`LongStream`／`DoubleStream`、`Collectors`、`Collector`、`Spliterator`。遅延評価で、入口は `Collection.stream()` |
 | `java.math` | `BigInteger`、`BigDecimal`、`MathContext`、`RoundingMode` |
-| `java.text` | `NumberFormat`／`DecimalFormat`、`DateFormat`／`SimpleDateFormat`、`DateTimeFormatter`、`MessageFormat` |
+| `java.text` | `NumberFormat`／`DecimalFormat`（パターン言語一式）、`DateFormat`／`SimpleDateFormat`、`DateTimeFormatter`、`MessageFormat`。ROOT／en-US のみ、`format` は `Instant` |
 | `com.google.gson` | Gson のツリー API と、コンパイラが生成するオブジェクト束縛（[docs/json.md](docs/json.md)） |
 | フレームワーク | Spring の形をしたコンテナと web 層（[docs/framework.md](docs/framework.md)） |
 

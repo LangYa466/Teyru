@@ -301,7 +301,7 @@ JEP 395 record、JEP 394 `instanceof` 模式、JEP 409 sealed 类（`sealed`／`
 | `java.net` | `ServerSocket`、`Socket` 及其输入输出流 |
 | `java.util.stream` | `Stream`／`IntStream`／`LongStream`／`DoubleStream`、`Collectors`、`Collector`、`Spliterator`；惰性求值，入口是 `Collection.stream()` |
 | `java.math` | `BigInteger`、`BigDecimal`、`MathContext`、`RoundingMode` |
-| `java.text` | `NumberFormat`／`DecimalFormat`、`DateFormat`／`SimpleDateFormat`、`DateTimeFormatter`、`MessageFormat` |
+| `java.text` | `NumberFormat`／`DecimalFormat`（完整 pattern 语言）、`DateFormat`／`SimpleDateFormat`、`DateTimeFormatter`、`MessageFormat`；只做 ROOT／en-US，`format` 用 `Instant` |
 | `com.google.gson` | Gson 的树状 API，以及由编译器生成的对象绑定（[docs/json.md](docs/json.md)） |
 | 框架 | Spring 形状的容器与 web 层（[docs/framework.md](docs/framework.md)） |
 
