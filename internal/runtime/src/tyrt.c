@@ -448,11 +448,22 @@ int32_t ty_str_hash(tystr *s) {
   return h;
 }
 
+/* The identity hash of an object, which is what Object.hashCode means for a
+   class that does not override it. The generated Object.hashCode wrapper calls
+   this function, and that wrapper is what a non-overriding class has in its
+   vtable slot, so this must NOT dispatch: doing so would call itself.
+
+   An overriding class is reached by dispatching at the call site instead, which
+   the emitter does for any receiver whose static type has subclasses. The
+   address is stable because the collector never moves objects. */
 int32_t ty_obj_hash(void *o) {
   if (!o) return 0;
-  return ((int32_t (*)(void *))((tyobj *)o)->cls->vtable[1])(o);
+  uintptr_t p = (uintptr_t)o;
+  return (int32_t)((p >> 4) ^ (p >> 32) ^ (p >> 20));
 }
 
+/* Object.equals for a class that does not override it. Same reasoning as above:
+   identity, and the call site dispatches when an override may exist. */
 int32_t ty_obj_eq(void *a, void *b) { return a == b; }
 
 tystr *ty_str_of_long(int64_t v) {

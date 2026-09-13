@@ -323,6 +323,25 @@ func (e *Emitter) outerFieldAccess(f *ast.Field) string {
 	return "((" + cname(f.Owner) + "*)" + e.outerAccess(f.Owner) + ")->f_" + mangle(f.Name)
 }
 
+// nativeIsFinal reports whether the runtime helper a native method maps to is
+// the implementation that will actually run.
+//
+// Object.toString, hashCode and equals are native, but they are also the three
+// methods a class is most likely to override. Calling the runtime helper
+// directly for a receiver whose static type is Object would skip the override,
+// so an overridable method of a class that has subclasses is dispatched through
+// the vtable instead, and the vtable slot holds the runtime wrapper.
+func (e *Emitter) nativeIsFinal(m *ast.Method) bool {
+	if m == nil {
+		return true
+	}
+	if m.IsStatic() || m.Mods.Has(ast.ModFinal) || m.Mods.Has(ast.ModPrivate) {
+		return true
+	}
+	// a receiver typed as a class with no subclasses cannot dispatch anywhere else
+	return m.Owner == nil || len(m.Owner.Subclasses) == 0
+}
+
 // clinitCall initializes a class before its static state is touched, matching
 // Java's lazy class initialization. The initialized flag is tested inline, so
 // the common case is a load and a branch instead of a call, and a class whose
@@ -898,7 +917,7 @@ func (e *Emitter) callExpr(v *ast.Call) string {
 			recv = e.expr(v.Recv)
 		}
 	}
-	if _, ok := nativeTable[nativeKey(m)]; ok {
+	if _, ok := nativeTable[nativeKey(m)]; ok && e.nativeIsFinal(m) {
 		return e.nativeCall(m, recv, v.Args)
 	}
 	name := e.cfunc(m)
