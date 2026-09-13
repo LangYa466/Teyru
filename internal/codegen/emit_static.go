@@ -27,11 +27,16 @@ func (e *Emitter) emitStaticFields(cl *ast.Class) {
 // reads *(void**)address to find the object: one extra level of indirection
 // would make it mark the address of the global instead of what the global
 // points at, and an object reachable only from a static would be collected.
+//
+// Only reference-typed fields are registered. A primitive static holds no
+// pointer, and the collector reads a whole pointer word from every address it
+// is handed: registering an int32 global made it read four bytes of whatever
+// global followed (found by running the test programs under AddressSanitizer).
 func (e *Emitter) clinitRefs() string {
 	var b []byte
 	for _, cl := range e.prog.Classes {
 		for _, f := range cl.Fields {
-			if f.Mods.Has(ast.ModStatic) {
+			if f.Mods.Has(ast.ModStatic) && e.isRef(f.Type) {
 				b = append(b, []byte("\tty_gc_register_static((void*)&"+staticName(cl, f)+");\n")...)
 			}
 		}
