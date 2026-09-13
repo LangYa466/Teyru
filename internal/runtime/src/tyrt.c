@@ -34,6 +34,13 @@ typedef struct tychunk {
   struct tychunk *next;
   size_t used, cap;
   char *mem;
+  /* One bit per TY_ALIGN bytes of `mem`, set for every address that is the
+     start of a block. Rebuilt at the beginning of each collection from the size
+     words, and consulted by the root scan: a conservative stack word can point
+     anywhere inside a live object, and following such an interior word as if it
+     were an object traces a garbage class pointer -- and writes the mark bit
+     into a live object's payload. */
+  uint8_t *starts;
 } tychunk;
 
 static tychunk *chunks = NULL;
@@ -57,6 +64,12 @@ void *ty_roots[TY_SHADOW_MAX];
 int64_t ty_sp = 0;
 
 #define TY_MARK_BIT 1u
+/* The high bit of the size word marks a block that is on a free list. The
+   collector must not read the mark word of a free block -- that word holds the
+   free list link -- and a stale pointer into a freed block must not be mistaken
+   for an object, so the bit is checked before anything else. */
+#define TY_FREE_BIT (1ull << 63)
+#define TY_SIZE_MASK (~TY_FREE_BIT)
 
 static inline uint64_t *hdr_of(void *obj) { return (uint64_t *)((char *)obj - TY_HDR); }
 
@@ -68,22 +81,54 @@ void ty_gc_register_static(void *p) {
   roots_static[nroots_static++] = p;
 }
 
-static int in_heap(char *p) {
-  for (tychunk *c = chunks; c; c = c->next) {
-    if (p >= c->mem && p < c->mem + c->used) return 1;
-  }
-  return 0;
+/* The inlined fast path in tyrt.h bumps ty_bump and nothing else, so the head
+   chunk's `used` watermark trails behind it. Every reader of `used` has to see
+   the true watermark first: the slow allocator would otherwise hand out memory
+   the fast path already handed out (two live objects in one block), and
+   valid_obj/the sweep walk would stop below the watermark and leave live
+   objects above it untraced. */
+static void sync_head_used(void) {
+  if (chunks && ty_bump >= chunks->mem && ty_bump <= chunks->mem + chunks->cap)
+    chunks->used = (size_t)(ty_bump - chunks->mem);
 }
 
 static int valid_obj(char *p) {
   if (((uintptr_t)p) & (TY_ALIGN - 1)) return 0;
   for (tychunk *c = chunks; c; c = c->next) {
-    if (p >= c->mem && p + TY_HDR <= c->mem + c->used) {
-      uint64_t sz = *(uint64_t *)(p - TY_HDR);
-      if (sz >= TY_HDR && ((uintptr_t)(p - TY_HDR)) % TY_ALIGN == 0) return 1;
-    }
+    if (p < c->mem || p + TY_HDR > c->mem + c->used) continue;
+    /* The map is indexed by block header, and `p` is a payload, so step back a
+       header first. A p that lies below the chunk's first payload wraps the
+       index and is rejected by the bound below. */
+    size_t i = (size_t)(p - TY_HDR - c->mem) / TY_ALIGN;
+    if (i >= c->cap / TY_ALIGN) continue;
+    if (!(c->starts[i >> 3] & (uint8_t)(1u << (i & 7)))) return 0; /* interior word */
+    uint64_t sz = *(uint64_t *)(p - TY_HDR);
+    if (sz & TY_FREE_BIT) return 0; /* freed: the payload is a free list link */
+    return sz >= TY_HDR;
   }
   return 0;
+}
+
+#define TY_START_BYTES(cap) (((cap) / TY_ALIGN + 7) / 8)
+
+static void mark_block_start(tychunk *c, char *p) {
+  size_t i = (size_t)(p - c->mem) / TY_ALIGN;
+  if (i < c->cap / TY_ALIGN) c->starts[i >> 3] |= (uint8_t)(1u << (i & 7));
+}
+
+/* Rebuilds the block-start map by walking every chunk's size words. The walk
+   uses the same rule as the sweep, so the two passes agree on where blocks
+   begin. */
+static void build_block_starts(void) {
+  for (tychunk *c = chunks; c; c = c->next) {
+    memset(c->starts, 0, TY_START_BYTES(c->cap));
+    for (char *p = c->mem; p < c->mem + c->used;) {
+      int64_t sz = (int64_t)(*(uint64_t *)p & TY_SIZE_MASK);
+      if (sz < (int64_t)TY_HDR) break;
+      mark_block_start(c, p);
+      p += sz;
+    }
+  }
 }
 
 static void *mark_stack[1 << 20];
@@ -119,6 +164,8 @@ static void trace_object(void *obj) {
 
 void ty_gc(void) {
   if (gc_disabled) return;
+  sync_head_used();
+  build_block_starts();
   mark_sp = 0;
   /* roots: shadow stack */
   for (int64_t i = 0; i < ty_sp; i++) mark_value(ty_roots[i]);
@@ -157,23 +204,29 @@ void ty_gc(void) {
     tychunk *c = *pp;
     int64_t live = 0;
     for (char *p = c->mem; p < c->mem + c->used;) {
-      uint64_t sz = *(uint64_t *)p;
-      if (*(uint64_t *)(p + 8) & TY_MARK_BIT) live += (int64_t)sz;
+      uint64_t raw = *(uint64_t *)p;
+      int64_t sz = (int64_t)(raw & TY_SIZE_MASK);
+      if (sz < (int64_t)TY_HDR) break; /* never walk off a damaged chunk */
+      if (!(raw & TY_FREE_BIT) && (*(uint64_t *)(p + 8) & TY_MARK_BIT)) live += sz;
       p += sz;
     }
     if (live == 0 && c != chunks) {
       *pp = c->next;
       free(c->mem);
+      free(c->starts);
       free(c);
       continue;
     }
     for (char *p = c->mem; p < c->mem + c->used;) {
-      uint64_t sz = *(uint64_t *)p;
-      uint64_t *h = (uint64_t *)(p + 8);
-      if (*h & TY_MARK_BIT) {
-        *h &= ~(uint64_t)TY_MARK_BIT;
+      uint64_t raw = *(uint64_t *)p;
+      int64_t sz = (int64_t)(raw & TY_SIZE_MASK);
+      if (sz < (int64_t)TY_HDR) break;
+      if (raw & TY_FREE_BIT) {
+        /* already on a free list: leave the link word alone */
+      } else if (*(uint64_t *)(p + 8) & TY_MARK_BIT) {
+        *(uint64_t *)(p + 8) &= ~(uint64_t)TY_MARK_BIT;
       } else {
-        ty_free_block(p + TY_HDR, sz);
+        ty_free_block(p + TY_HDR, (size_t)sz);
       }
       p += sz;
     }
@@ -201,6 +254,9 @@ static int size_class(size_t sz) {
 void ty_free_block(void *payload, size_t total) {
   int k = size_class(total);
   void *p = (char *)payload - TY_HDR;
+  /* the free list link lives in the second header word, so the block is marked
+     free first: the collector reads that bit before the link */
+  *(uint64_t *)p = (uint64_t)total | TY_FREE_BIT;
   if (k >= 0) {
     *(void **)((char *)p + 8) = freelist[k];
     freelist[k] = p;
@@ -222,9 +278,16 @@ static void *alloc_slow(size_t total) {
     void **pp = &bigfree;
     while (*pp) {
       void *p = *pp;
-      uint64_t sz = *(uint64_t *)p;
+      uint64_t sz = *(uint64_t *)p & TY_SIZE_MASK;
       if (sz >= total) {
         *pp = *(void **)((char *)p + 8);
+        /* The caller rewrites this block's size word to `total`. A larger block
+           reused for a smaller request has to give its tail back here, or the
+           tail becomes a hole the chunk walk reads as a payload-sized header --
+           it would then free an interior address and the next allocation could
+           land inside a live object. Both sizes are 16-aligned, so the tail is
+           never smaller than a header. */
+        if (sz > total) ty_free_block((char *)p + total + TY_HDR, (size_t)(sz - total));
         return p;
       }
       pp = (void **)((char *)p + 8);
@@ -234,6 +297,7 @@ static void *alloc_slow(size_t total) {
 }
 
 void *ty_alloc_slow(size_t total) {
+  sync_head_used();
   if (ty_alloc_since > ty_gc_threshold) ty_gc();
   void *p = alloc_slow(total);
   if (p) {
@@ -259,6 +323,7 @@ void *ty_alloc_slow(size_t total) {
     size_t cap = total > TY_CHUNK ? ((total + TY_CHUNK - 1) & ~(size_t)(TY_CHUNK - 1)) : TY_CHUNK;
     c = (tychunk *)malloc(sizeof(tychunk));
     c->mem = (char *)malloc(cap);
+    c->starts = (uint8_t *)calloc(TY_START_BYTES(cap), 1);
     c->cap = cap;
     c->used = 0;
     c->next = chunks;
