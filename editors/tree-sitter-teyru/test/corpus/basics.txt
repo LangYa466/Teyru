@@ -1,0 +1,128 @@
+==================
+package, imports and a class
+==================
+
+package demo.app
+
+import java.util.List
+import static java.lang.Math.max
+import module java.base
+
+class Holder {
+  int x = 1
+}
+
+---
+
+(source_file
+  (package_declaration
+    (scoped_identifier
+      (identifier)
+      (identifier)))
+  (import_declaration
+    (import_name
+      (identifier)
+      (identifier)
+      (identifier)))
+  (import_declaration
+    (import_name
+      (identifier)
+      (identifier)
+      (identifier)
+      (identifier)))
+  (import_declaration
+    (import_name
+      (identifier)
+      (identifier)))
+  (class_declaration
+    (identifier)
+    (class_body
+      (field_declaration
+        (primitive_type)
+        (variable_declarator
+          (identifier)
+          (decimal_integer_literal))))))
+
+==================
+comments
+==================
+
+class C {
+  // a line comment
+  /* a block comment
+     over two lines */
+  int x = 1 // trailing
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (line_comment)
+      (block_comment)
+      (field_declaration
+        (primitive_type)
+        (variable_declarator
+          (identifier)
+          (decimal_integer_literal)))
+      (line_comment))))
+
+==================
+type declarations at file level
+==================
+
+class A {
+  int a
+}
+
+interface B {
+  void b()
+}
+
+enum E {
+  X, Y
+}
+
+record R(int r) {
+}
+
+@interface Marker {
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (field_declaration
+        (primitive_type)
+        (variable_declarator
+          (identifier)))))
+  (interface_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters))))
+  (enum_declaration
+    (identifier)
+    (enum_body
+      (enum_constant_list
+        (enum_constant
+          (identifier))
+        (enum_constant
+          (identifier)))))
+  (record_declaration
+    (identifier)
+    (formal_parameters
+      (formal_parameter
+        (primitive_type)
+        (identifier)))
+    (record_body))
+  (annotation_type_declaration
+    (identifier)
+    (annotation_type_body)))

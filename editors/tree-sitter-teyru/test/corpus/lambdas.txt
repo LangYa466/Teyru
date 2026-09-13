@@ -1,0 +1,163 @@
+==================
+lambdas with and without a parameter list
+==================
+
+class C {
+  void f() {
+    Fn<Integer, Integer> twice = (v) -> v * 2
+    Runnable r = () -> {
+      System.out.println("run")
+    }
+    Fn<Integer, Integer> one = v -> v
+    System.out.println(twice.apply(21) + one.apply(1))
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters)
+        (block
+          (local_variable_declaration
+            (generic_type
+              (scoped_identifier
+                (identifier))
+              (type_arguments
+                (scoped_identifier
+                  (identifier))
+                (scoped_identifier
+                  (identifier))))
+            (variable_declarator
+              (identifier)
+              (lambda_expression
+                (inferred_parameters
+                  (identifier))
+                (binary_expression
+                  (identifier)
+                  (decimal_integer_literal)))))
+          (local_variable_declaration
+            (scoped_identifier
+              (identifier))
+            (variable_declarator
+              (identifier)
+              (lambda_expression
+                (formal_parameters)
+                (block
+                  (expression_statement
+                    (method_invocation
+                      (field_access
+                        (identifier)
+                        (identifier))
+                      (identifier)
+                      (argument_list
+                        (string_literal))))))))
+          (local_variable_declaration
+            (generic_type
+              (scoped_identifier
+                (identifier))
+              (type_arguments
+                (scoped_identifier
+                  (identifier))
+                (scoped_identifier
+                  (identifier))))
+            (variable_declarator
+              (identifier)
+              (lambda_expression
+                (identifier)
+                (identifier))))
+          (expression_statement
+            (method_invocation
+              (field_access
+                (identifier)
+                (identifier))
+              (identifier)
+              (argument_list
+                (binary_expression
+                  (method_invocation
+                    (identifier)
+                    (identifier)
+                    (argument_list
+                      (decimal_integer_literal)))
+                  (method_invocation
+                    (identifier)
+                    (identifier)
+                    (argument_list
+                      (decimal_integer_literal))))))))))))
+
+==================
+method references of every shape
+==================
+
+class C {
+  void f() {
+    Maker<Rect> m = Rect::new
+    Fn<String, Integer> ref = String::length
+    Runnable r = this::run
+    Fn<Integer, Integer> one = v -> v
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters)
+        (block
+          (local_variable_declaration
+            (generic_type
+              (scoped_identifier
+                (identifier))
+              (type_arguments
+                (scoped_identifier
+                  (identifier))))
+            (variable_declarator
+              (identifier)
+              (method_reference
+                (identifier))))
+          (local_variable_declaration
+            (generic_type
+              (scoped_identifier
+                (identifier))
+              (type_arguments
+                (scoped_identifier
+                  (identifier))
+                (scoped_identifier
+                  (identifier))))
+            (variable_declarator
+              (identifier)
+              (method_reference
+                (identifier)
+                (identifier))))
+          (local_variable_declaration
+            (scoped_identifier
+              (identifier))
+            (variable_declarator
+              (identifier)
+              (method_reference
+                (this_expression)
+                (identifier))))
+          (local_variable_declaration
+            (generic_type
+              (scoped_identifier
+                (identifier))
+              (type_arguments
+                (scoped_identifier
+                  (identifier))
+                (scoped_identifier
+                  (identifier))))
+            (variable_declarator
+              (identifier)
+              (lambda_expression
+                (identifier)
+                (identifier)))))))))

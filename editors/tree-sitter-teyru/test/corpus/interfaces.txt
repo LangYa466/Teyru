@@ -1,0 +1,175 @@
+==================
+an interface with an abstract and a default method
+==================
+
+interface Shape {
+  double area()
+
+  default String kind() {
+    return "shape"
+  }
+}
+
+---
+
+(source_file
+  (interface_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters))
+      (method_declaration
+        (modifiers)
+        (scoped_identifier
+          (identifier))
+        (identifier)
+        (formal_parameters)
+        (block
+          (return_statement
+            (string_literal)))))))
+
+==================
+a static method and a constant in an interface
+==================
+
+interface Shape {
+  int SIDES = 4
+
+  static Shape unit() {
+    return new Square(1)
+  }
+}
+
+---
+
+(source_file
+  (interface_declaration
+    (identifier)
+    (class_body
+      (field_declaration
+        (primitive_type)
+        (variable_declarator
+          (identifier)
+          (decimal_integer_literal)))
+      (method_declaration
+        (modifiers)
+        (scoped_identifier
+          (identifier))
+        (identifier)
+        (formal_parameters)
+        (block
+          (return_statement
+            (object_creation_expression
+              (scoped_identifier
+                (identifier))
+              (argument_list
+                (decimal_integer_literal)))))))))
+
+==================
+an interface extends several interfaces
+==================
+
+interface Named {
+  String name()
+}
+
+interface Aged {
+  int age()
+}
+
+interface Person extends Named, Aged {
+}
+
+---
+
+(source_file
+  (interface_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (scoped_identifier
+          (identifier))
+        (identifier)
+        (formal_parameters))))
+  (interface_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters))))
+  (interface_declaration
+    (identifier)
+    (extends_interfaces
+      (scoped_identifier
+        (identifier))
+      (scoped_identifier
+        (identifier)))
+    (class_body)))
+
+==================
+a class implements several interfaces
+==================
+
+class C implements Named, Aged, Comparable<C> {
+  public String name() {
+    return "c"
+  }
+
+  public int age() {
+    return 1
+  }
+
+  public int compareTo(C other) {
+    return 0
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (super_interfaces
+      (scoped_identifier
+        (identifier))
+      (scoped_identifier
+        (identifier))
+      (generic_type
+        (scoped_identifier
+          (identifier))
+        (type_arguments
+          (scoped_identifier
+            (identifier)))))
+    (class_body
+      (method_declaration
+        (modifiers)
+        (scoped_identifier
+          (identifier))
+        (identifier)
+        (formal_parameters)
+        (block
+          (return_statement
+            (string_literal))))
+      (method_declaration
+        (modifiers)
+        (primitive_type)
+        (identifier)
+        (formal_parameters)
+        (block
+          (return_statement
+            (decimal_integer_literal))))
+      (method_declaration
+        (modifiers)
+        (primitive_type)
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (scoped_identifier
+              (identifier))
+            (identifier)))
+        (block
+          (return_statement
+            (decimal_integer_literal)))))))

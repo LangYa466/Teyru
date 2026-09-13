@@ -1,0 +1,334 @@
+==================
+a constructor, and construction through it
+==================
+
+class Point {
+  private int x
+
+  public Point(int x) {
+    this.x = x
+  }
+
+  public Point() {
+    this(0)
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (field_declaration
+        (modifiers)
+        (primitive_type)
+        (variable_declarator
+          (identifier)))
+      (constructor_declaration
+        (modifiers)
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (primitive_type)
+            (identifier)))
+        (block
+          (expression_statement
+            (assignment_expression
+              (field_access
+                (this_expression)
+                (identifier))
+              (identifier)))))
+      (constructor_declaration
+        (modifiers)
+        (identifier)
+        (formal_parameters)
+        (block
+          (expression_statement
+            (constructor_invocation
+              (argument_list
+                (decimal_integer_literal)))))))))
+
+==================
+static and instance initializers
+==================
+
+class C {
+  static {
+    System.out.println("static init")
+  }
+
+  {
+    System.out.println("instance init")
+  }
+
+  public static void main(String[] args) {
+    System.out.println("main")
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (static_initializer
+        (block
+          (expression_statement
+            (method_invocation
+              (field_access
+                (identifier)
+                (identifier))
+              (identifier)
+              (argument_list
+                (string_literal))))))
+      (instance_initializer
+        (block
+          (expression_statement
+            (method_invocation
+              (field_access
+                (identifier)
+                (identifier))
+              (identifier)
+              (argument_list
+                (string_literal))))))
+      (method_declaration
+        (modifiers)
+        (primitive_type)
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (array_type
+              (scoped_identifier
+                (identifier)))
+            (identifier)))
+        (block
+          (expression_statement
+            (method_invocation
+              (field_access
+                (identifier)
+                (identifier))
+              (identifier)
+              (argument_list
+                (string_literal)))))))))
+
+==================
+a local class and an anonymous class
+==================
+
+class C {
+  void f() {
+    class Local {
+      int v = 1
+    }
+    Local l = new Local()
+    Runnable r = new Runnable() {
+      public void run() {
+        System.out.println(l.v)
+      }
+    }
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters)
+        (block
+          (class_declaration
+            (identifier)
+            (class_body
+              (field_declaration
+                (primitive_type)
+                (variable_declarator
+                  (identifier)
+                  (decimal_integer_literal)))))
+          (local_variable_declaration
+            (scoped_identifier
+              (identifier))
+            (variable_declarator
+              (identifier)
+              (object_creation_expression
+                (scoped_identifier
+                  (identifier))
+                (argument_list))))
+          (local_variable_declaration
+            (scoped_identifier
+              (identifier))
+            (variable_declarator
+              (identifier)
+              (object_creation_expression
+                (scoped_identifier
+                  (identifier))
+                (argument_list)
+                (class_body
+                  (method_declaration
+                    (modifiers)
+                    (primitive_type)
+                    (identifier)
+                    (formal_parameters)
+                    (block
+                      (expression_statement
+                        (method_invocation
+                          (field_access
+                            (identifier)
+                            (identifier))
+                          (identifier)
+                          (argument_list
+                            (field_access
+                              (identifier)
+                              (identifier))))))))))))))))
+
+==================
+an inner class, an outer.this and an outer.new
+==================
+
+class Outer {
+  int v = 1
+
+  class Inner {
+    int get() {
+      return Outer.this.v
+    }
+  }
+
+  Inner make() {
+    return new Outer().new Inner()
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (field_declaration
+        (primitive_type)
+        (variable_declarator
+          (identifier)
+          (decimal_integer_literal)))
+      (class_declaration
+        (identifier)
+        (class_body
+          (method_declaration
+            (primitive_type)
+            (identifier)
+            (formal_parameters)
+            (block
+              (return_statement
+                (field_access
+                  (field_access
+                    (identifier)
+                    (identifier))
+                  (identifier)))))))
+      (method_declaration
+        (scoped_identifier
+          (identifier))
+        (identifier)
+        (formal_parameters)
+        (block
+          (return_statement
+            (inner_class_creation
+              (object_creation_expression
+                (scoped_identifier
+                  (identifier))
+                (argument_list))
+              (identifier)
+              (argument_list))))))))
+
+==================
+varargs in a method and `Main::sum` as a value
+==================
+
+class Main {
+  static int sum(int... xs) {
+    int total = 0
+    for (int x : xs) {
+      total += x
+    }
+    return total
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (modifiers)
+        (primitive_type)
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (primitive_type)
+            (identifier)))
+        (block
+          (local_variable_declaration
+            (primitive_type)
+            (variable_declarator
+              (identifier)
+              (decimal_integer_literal)))
+          (enhanced_for_statement
+            (primitive_type)
+            (identifier)
+            (identifier)
+            (block
+              (expression_statement
+                (assignment_expression
+                  (identifier)
+                  (identifier)))))
+          (return_statement
+            (identifier)))))))
+
+==================
+a method and a constructor that throw
+==================
+
+class C {
+  C() throws Exception
+
+  void f() throws java.io.IOException, RuntimeException {
+    throw new RuntimeException("x")
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (constructor_declaration
+        (identifier)
+        (formal_parameters)
+        (throws_clause
+          (scoped_identifier
+            (identifier))))
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters)
+        (throws_clause
+          (scoped_identifier
+            (identifier)
+            (identifier)
+            (identifier))
+          (scoped_identifier
+            (identifier)))
+        (block
+          (throw_statement
+            (object_creation_expression
+              (scoped_identifier
+                (identifier))
+              (argument_list
+                (string_literal)))))))))

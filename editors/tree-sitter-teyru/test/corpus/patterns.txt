@@ -1,0 +1,302 @@
+==================
+a type pattern, with and without a guard
+==================
+
+class C {
+  String f(Object o) {
+    return switch (o) {
+      case Circle c when c.r > 10 -> "big"
+      case Circle c -> "small"
+      default -> "?"
+    }
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (scoped_identifier
+          (identifier))
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (scoped_identifier
+              (identifier))
+            (identifier)))
+        (block
+          (return_statement
+            (switch_construct
+              (parenthesized_expression
+                (identifier))
+              (switch_block
+                (switch_rule
+                  (switch_label
+                    (switch_case_label
+                      (type_pattern
+                        (scoped_identifier
+                          (identifier))
+                        (identifier)))
+                    (guard
+                      (binary_expression
+                        (field_access
+                          (identifier)
+                          (identifier))
+                        (decimal_integer_literal))))
+                  (string_literal))
+                (switch_rule
+                  (switch_label
+                    (switch_case_label
+                      (type_pattern
+                        (scoped_identifier
+                          (identifier))
+                        (identifier))))
+                  (string_literal))
+                (switch_rule
+                  (switch_label)
+                  (string_literal))))))))))
+
+==================
+primitive type patterns and unnamed variables
+==================
+
+class C {
+  String f(Object o) {
+    return switch (o) {
+      case int i -> "int " + i
+      case String _ -> "string"
+      default -> "?"
+    }
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (scoped_identifier
+          (identifier))
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (scoped_identifier
+              (identifier))
+            (identifier)))
+        (block
+          (return_statement
+            (switch_construct
+              (parenthesized_expression
+                (identifier))
+              (switch_block
+                (switch_rule
+                  (switch_label
+                    (switch_case_label
+                      (type_pattern
+                        (primitive_type)
+                        (identifier))))
+                  (binary_expression
+                    (string_literal)
+                    (identifier)))
+                (switch_rule
+                  (switch_label
+                    (switch_case_label
+                      (type_pattern
+                        (scoped_identifier
+                          (identifier))
+                        (identifier))))
+                  (string_literal))
+                (switch_rule
+                  (switch_label)
+                  (string_literal))))))))))
+
+==================
+a record pattern matches its components
+==================
+
+class C {
+  String f(Object o) {
+    return switch (o) {
+      case Point(int x, int y) -> "point " + x + "," + y
+      case Dot() -> "dot"
+      default -> "?"
+    }
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (scoped_identifier
+          (identifier))
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (scoped_identifier
+              (identifier))
+            (identifier)))
+        (block
+          (return_statement
+            (switch_construct
+              (parenthesized_expression
+                (identifier))
+              (switch_block
+                (switch_rule
+                  (switch_label
+                    (switch_case_label
+                      (record_pattern
+                        (identifier)
+                        (record_pattern_body
+                          (pattern
+                            (type_pattern
+                              (primitive_type)
+                              (identifier)))
+                          (pattern
+                            (type_pattern
+                              (primitive_type)
+                              (identifier)))))))
+                  (binary_expression
+                    (binary_expression
+                      (binary_expression
+                        (string_literal)
+                        (identifier))
+                      (string_literal))
+                    (identifier)))
+                (switch_rule
+                  (switch_label
+                    (switch_case_label
+                      (record_pattern
+                        (identifier)
+                        (record_pattern_body))))
+                  (string_literal))
+                (switch_rule
+                  (switch_label)
+                  (string_literal))))))))))
+
+==================
+nested record patterns
+==================
+
+class C {
+  String f(Object o) {
+    return switch (o) {
+      case Line(Point(int x1, int y1), Point to) -> "line " + x1 + "->" + to
+      default -> "?"
+    }
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (scoped_identifier
+          (identifier))
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (scoped_identifier
+              (identifier))
+            (identifier)))
+        (block
+          (return_statement
+            (switch_construct
+              (parenthesized_expression
+                (identifier))
+              (switch_block
+                (switch_rule
+                  (switch_label
+                    (switch_case_label
+                      (record_pattern
+                        (identifier)
+                        (record_pattern_body
+                          (pattern
+                            (record_pattern
+                              (identifier)
+                              (record_pattern_body
+                                (pattern
+                                  (type_pattern
+                                    (primitive_type)
+                                    (identifier)))
+                                (pattern
+                                  (type_pattern
+                                    (primitive_type)
+                                    (identifier))))))
+                          (pattern
+                            (type_pattern
+                              (scoped_identifier
+                                (identifier))
+                              (identifier)))))))
+                  (binary_expression
+                    (binary_expression
+                      (binary_expression
+                        (string_literal)
+                        (identifier))
+                      (string_literal))
+                    (identifier)))
+                (switch_rule
+                  (switch_label)
+                  (string_literal))))))))))
+
+==================
+a record pattern in an instanceof
+==================
+
+class C {
+  int f(Object o) {
+    if (o instanceof Point(int x, int y)) {
+      return x + y
+    }
+    return 0
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (scoped_identifier
+              (identifier))
+            (identifier)))
+        (block
+          (if_statement
+            (parenthesized_expression
+              (instanceof_expression
+                (identifier)
+                (record_pattern
+                  (identifier)
+                  (record_pattern_body
+                    (pattern
+                      (type_pattern
+                        (primitive_type)
+                        (identifier)))
+                    (pattern
+                      (type_pattern
+                        (primitive_type)
+                        (identifier)))))))
+            (block
+              (return_statement
+                (binary_expression
+                  (identifier)
+                  (identifier)))))
+          (return_statement
+            (decimal_integer_literal)))))))
