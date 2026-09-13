@@ -317,25 +317,42 @@ func (e *Emitter) emitClassMeta(cl *ast.Class) {
 	}
 	fmt.Fprintf(&e.data, "static void* vt_%s[%d] = {%s};\n", mangle(cl.Full), len(vt), strings.Join(vt, ", "))
 	// interface table
+	//
+	// Sparse, sorted by selector, and holding only what the class actually
+	// implements. It used to be one slot per selector the whole program
+	// declares -- one pointer per slot -- so a class paid 4.4 KB of .data no
+	// matter how many of them it answered for. Every class the program
+	// mentions carries one of these, so a hello world pinned 180 of them,
+	// 792 KB, for methods it could not reach. ty_itab scans the few entries
+	// a class really has instead of indexing into the whole set.
 	sel := e.prog.Selectors
-	if sel == 0 {
-		sel = 1
-	}
-	imap := make([]string, sel)
-	for i := range imap {
-		imap[i] = "NULL"
-	}
+	sels := make([]int, 0, len(cl.Ifaces))
+	impls := map[int]string{}
 	for _, iface := range e.prog.AllInterfaces(cl) {
 		for _, m := range e.prog.InterfaceMethods(iface) {
 			if m.Selector < 0 || m.Selector >= sel {
 				continue
 			}
 			if impl := e.prog.Implements(cl, m); impl != nil {
-				imap[m.Selector] = "(void*)" + e.cfunc(impl)
+				// later interfaces overwrite earlier ones, as they did when the
+				// entry was written into a slot the whole table shared
+				if _, seen := impls[m.Selector]; !seen {
+					sels = append(sels, m.Selector)
+				}
+				impls[m.Selector] = "(void*)" + e.cfunc(impl)
 			}
 		}
 	}
-	fmt.Fprintf(&e.data, "static tymap imap_%s[%d] = {%s};\n", mangle(cl.Full), sel, joinIMap(imap, sel))
+	sort.Ints(sels)
+	imapName, imapLen := "NULL", 0
+	if len(sels) > 0 {
+		parts := make([]string, len(sels))
+		for i, s := range sels {
+			parts[i] = fmt.Sprintf("{%d, %s}", s, impls[s])
+		}
+		imapName, imapLen = "imap_"+mangle(cl.Full), len(sels)
+		fmt.Fprintf(&e.data, "static tymap %s[%d] = {%s};\n", imapName, imapLen, strings.Join(parts, ", "))
+	}
 	// ifaces list
 	var ifs []string
 	for _, i := range cl.Ifaces {
@@ -364,22 +381,11 @@ func (e *Emitter) emitClassMeta(cl *ast.Class) {
 	if cl.ClInit != nil {
 		clinit = "(void*)" + e.cfunc(cl.ClInit)
 	}
-	fmt.Fprintf(&e.data, "static tyclass cls_%s = {%q, %d, %d, %s, %d, if_%s, %d, vt_%s, %s, %d, %d, imap_%s, 0, NULL, %d, refs_%s};\n",
+	fmt.Fprintf(&e.data, "static tyclass cls_%s = {%q, %d, %d, %s, %d, if_%s, %d, vt_%s, %s, %d, %d, %s, 0, NULL, %d, refs_%s};\n",
 		mangle(cl.Full), cl.Full, cl.ID, flags, sup, len(cl.Ifaces), mangle(cl.Full),
-		len(cl.VTable), mangle(cl.Full), clinit, int(off), sel, mangle(cl.Full), len(offs), mangle(cl.Full))
+		len(cl.VTable), mangle(cl.Full), clinit, int(off), imapLen, imapName, len(offs), mangle(cl.Full))
 	if cl.Outer != nil && cl.Inner {
 	}
-}
-
-func joinIMap(entries []string, n int) string {
-	if n == 0 {
-		return "0"
-	}
-	parts := make([]string, n)
-	for i := 0; i < n; i++ {
-		parts[i] = fmt.Sprintf("{%d, %s}", i, entries[i])
-	}
-	return strings.Join(parts, ", ")
 }
 
 func boxStruct(cl *ast.Class) string {
@@ -726,9 +732,20 @@ func (e *Emitter) entry() string {
 		}
 	}
 	b.WriteString("  ty_clinit(&cls_" + mangle(e.prog.Builtins.Object.Full) + ");\n")
+	// Only the classes that actually have a static initializer are named here.
+	// ty_clinit on a class whose whole hierarchy has none is a no-op, but
+	// naming it takes the class's address in main, and that single reference
+	// keeps the class -- its vtable, its interface table, its methods, and
+	// everything it in turn mentions -- alive through link-time optimisation.
+	// Taking one address per class pinned the entire standard library into
+	// every executable: a hello world built from the same sources was 1.8 MB
+	// with 1.4 MB of it interface tables no program could ever reach.
+	//
+	// The lazy guards the call sites already carry (clinitCall, clinitStmt)
+	// are what actually runs an initializer, in Java's on-first-use order.
 	seenInit := map[string]bool{}
 	for _, cl := range e.prog.Classes {
-		if cl.Builtin || seenInit[cname(cl)] {
+		if cl.Builtin || seenInit[cname(cl)] || !needsClinit(cl, map[*ast.Class]bool{}) {
 			continue
 		}
 		seenInit[cname(cl)] = true

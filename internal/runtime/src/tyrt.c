@@ -574,11 +574,21 @@ void *ty_checkcast(void *o, tyclass *c) {
 void *ty_itab(void *p, int32_t sel) {
   tyobj *o = (tyobj *)p;
   if (!o) ty_npe();
+  /* The interface maps are sparse: one entry per selector the class answers
+     for, sorted by selector, so a class pays for what it implements instead of
+     for every selector the program declares. The old dense tables were 4.4 KB
+     of .data each and every class carried one, which put 792 KB of interface
+     tables into a hello world. A scan over a handful of cache-resident entries
+     costs less than the cache miss the dense table took. The class's own map
+     first, then its superclasses', for interfaces a superclass implements. */
   tyclass *c = o->cls;
-  if (sel < c->isel && c->imap[sel].fn) return c->imap[sel].fn;
-  /* search superclasses' maps (interfaces implemented by supers) */
-  for (tyclass *k = c->super; k; k = k->super) {
-    if (sel < k->isel && k->imap[sel].fn) return k->imap[sel].fn;
+  for (tyclass *k = c; k; k = k->super) {
+    for (int32_t i = 0; i < k->isel; i++) {
+      if (k->imap[i].sel == sel) {
+        if (k->imap[i].fn) return k->imap[i].fn;
+        break; /* no implementation here; the superclasses may have one */
+      }
+    }
   }
   /* no implementation: fail as a catchable error rather than calling NULL */
   ty_throw((tyobj *)ty_make_ex(TY_UNSUP, "no implementation for this interface method"));
