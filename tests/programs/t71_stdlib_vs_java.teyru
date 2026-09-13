@@ -1,0 +1,28 @@
+class Main {
+  public static void main(String[] args) {
+    String s = "Hello, World"
+    System.out.println(s.length() + " " + s.charAt(4) + " " + s.indexOf("World"))
+    System.out.println(s.substring(7) + "|" + s.substring(0, 5))
+    System.out.println(s.toUpperCase() + " " + s.toLowerCase())
+    System.out.println(s.startsWith("Hell") + " " + s.endsWith("ld") + " " + s.contains("o, W"))
+    System.out.println(s.replace('l', 'L'))
+    System.out.println("  pad  ".trim() + "|" + s.compareTo("Hello, World!"))
+    System.out.println(s.concat("!") + " " + "".isEmpty() + " " + "abc".equals("abc"))
+    String[] parts = "a,b,,c".split(",")
+    System.out.println(parts.length + " " + parts[0] + parts[2] + "[" + parts[2] + "]")
+    StringBuilder sb = new StringBuilder()
+    sb.append("n=")
+    sb.append(42)
+    sb.append(' ')
+    sb.append(true)
+    sb.append(1.5)
+    System.out.println(sb + " " + sb.length())
+    System.out.println(Math.abs(-7) + " " + Math.max(3, 9) + " " + Math.min(3, 9))
+    System.out.println(Math.round(2.5) + " " + Math.round(-2.5) + " " + (int) Math.floor(2.9))
+    System.out.println(Integer.parseInt("42") + 1 + " " + String.valueOf(7) + String.valueOf('x'))
+    System.out.println(Long.parseLong("9007199254740993") + " " + Double.parseDouble("2.5"))
+    System.out.println(Integer.valueOf(5).intValue() + " " + Character.isDigit('7') + " " + Character.isLetter('7'))
+    Object o = 3
+    System.out.println(o + " " + ((Integer) o).intValue() + " " + (o instanceof Integer))
+  }
+}
