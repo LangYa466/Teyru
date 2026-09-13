@@ -166,6 +166,9 @@ func TestDiagnostics(t *testing.T) {
 		{"doubleSwitch", "class Main {\n  public static void main(String[] args) {\n    double d = 0.5\n    switch (d) {\n      case 1.5 -> System.out.println(\"x\")\n      default -> System.out.println(\"y\")\n    }\n  }\n}\n", "TY-TYP-0035"},
 		{"notExhaustive", "class Main {\n  public static void main(String[] args) {\n    int n = 7\n    String s = switch (n) {\n      case 1 -> \"one\"\n      case 2 -> \"two\"\n    }\n    System.out.println(s)\n  }\n}\n", "TY-TYP-0096"},
 		{"longSelector", "class Main {\n  public static void main(String[] args) {\n    long v = 1\n    switch (v) {\n      case 1 -> System.out.println(\"one\")\n      default -> System.out.println(\"other\")\n    }\n  }\n}\n", "TY-TYP-0035"},
+		{"missingBean", "import teyru.Service\nimport teyru.Autowired\n\ninterface Repo { String ping() }\n\n@Service\nclass Svc {\n  @Autowired Repo repo\n}\nclass Main {\n  public static void main(String[] args) {\n  }\n}\n", "TY-TYP-0103"},
+		{"circularBeans", "import teyru.Service\nimport teyru.Autowired\n\n@Service\nclass A {\n  @Autowired B b\n}\n@Service\nclass B {\n  @Autowired A a\n}\nclass Main {\n  public static void main(String[] args) {\n  }\n}\n", "TY-TYP-0107"},
+		{"ambiguousBeans", "import teyru.Service\nimport teyru.Component\nimport teyru.Autowired\n\ninterface G { String g() }\n@Component class G1 implements G { public String g() { return \"1\" } }\n@Component class G2 implements G { public String g() { return \"2\" } }\n@Service class S { @Autowired G g }\nclass Main {\n  public static void main(String[] args) {\n  }\n}\n", "TY-TYP-0104"},
 		{"lambdaThisInStatic", "import java.util.function.Supplier\n\nclass Main {\n  int n() { return 3 }\n  public static void main(String[] args) {\n    Supplier<Integer> s = () -> n() + 1\n    System.out.println(s.get())\n  }\n}\n", "TY-TYP-0098"},
 	}
 	for _, tc := range cases {

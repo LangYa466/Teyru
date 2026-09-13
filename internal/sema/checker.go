@@ -51,7 +51,15 @@ type Checker struct {
 	byPkg map[string]map[string]*ast.Class
 	// ambiguous remembers the on-demand import collisions already reported, so
 	// that a name looked up many times is reported once
-	ambiguous  map[string]bool
+	ambiguous map[string]bool
+	// frameworkDone guards the container pass against running twice
+	frameworkDone bool
+	// fwSpecs is the bean list the container pass found, for resolving an
+	// injection while the registry is being generated.
+	fwSpecs []*beanSpec
+	// fwRoutes is the mappings the controllers declare, registered by the same
+	// generated setup that registers the beans.
+	fwRoutes   []routeSpec
 	selector   int
 	todo       []func()
 	Props      map[ast.Expr]ast.Expr
@@ -91,6 +99,9 @@ func Check(files []*ast.File, diags *source.Diagnostics) *Program {
 		c.resolveImports(env0, f)
 	}
 	c.applyLombokToProgram()
+	// the container pass runs after Lombok: a member Lombok generated is then
+	// already there to be injected into, and its annotations are readable
+	c.applyFramework()
 	for _, cl := range append([]*ast.Class(nil), c.classes...) {
 		c.layout(cl)
 	}
