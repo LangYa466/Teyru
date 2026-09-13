@@ -1,0 +1,7 @@
+circle 2.0
+square 3.0
+blob 0.0
+blob 3.0
+circle 1.0, dot, ring 2.0
+shape object
+statement done 25.0

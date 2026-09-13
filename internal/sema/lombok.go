@@ -249,25 +249,25 @@ func (c *Checker) applyLombok(cl *ast.Class) {
 
 	// ---- class-level generators
 	if a := hasAnno(classAnnos, "Getter"); a != nil {
-		c.lombokGetter(cl, c.instanceAndStaticFields(cl), a, accessors)
+		c.lombokGetter(cl, c.instanceAndStaticFields(cl), onSiteOf(a, classAnnos), accessors)
 	}
 	if a := hasAnno(classAnnos, "Setter"); a != nil {
-		c.lombokSetter(cl, c.instanceAndStaticFields(cl), a, accessors)
+		c.lombokSetter(cl, c.instanceAndStaticFields(cl), onSiteOf(a, classAnnos), accessors)
 	}
 	if a := hasAnno(classAnnos, "ToString"); a != nil {
-		c.lombokToString(cl, a)
+		c.lombokToString(cl, onSiteOf(a, classAnnos))
 	}
 	if a := hasAnno(classAnnos, "EqualsAndHashCode"); a != nil {
-		c.lombokEqualsHashCode(cl, a)
+		c.lombokEqualsHashCode(cl, onSiteOf(a, classAnnos))
 	}
 	if a := hasAnno(classAnnos, "RequiredArgsConstructor"); a != nil {
-		c.lombokCtor(cl, a, "required")
+		c.lombokCtor(cl, onSiteOf(a, classAnnos), "required")
 	}
 	if a := hasAnno(classAnnos, "AllArgsConstructor"); a != nil {
-		c.lombokCtor(cl, a, "all")
+		c.lombokCtor(cl, onSiteOf(a, classAnnos), "all")
 	}
 	if a := hasAnno(classAnnos, "NoArgsConstructor"); a != nil {
-		c.lombokCtor(cl, a, "none")
+		c.lombokCtor(cl, onSiteOf(a, classAnnos), "none")
 	}
 	if a := hasAnno(classAnnos, "Builder", "SuperBuilder"); a != nil {
 		if a.Is("SuperBuilder") {
@@ -293,11 +293,7 @@ func (c *Checker) applyLombok(cl *ast.Class) {
 	}
 	c.lombokDelegates(cl)
 	if a := hasAnno(classAnnos, "CustomLog"); a != nil {
-		// Lombok reads lombok.log.custom.declaration for this one, and Teyru
-		// does not read lombok.config: say so instead of producing nothing.
-		c.errf(cl.Decl.Pos, "TY-INT-0006",
-			"@CustomLog needs lombok.config, which Teyru does not read; name a logger with @Log or declare the field yourself")
-		_ = a
+		c.lombokCustomLog(cl, a)
 	}
 	if hasAnno(classAnnos, "Jacksonized") != nil {
 		// No Jackson serialization exists in Teyru; the annotation is accepted
@@ -435,10 +431,10 @@ func (c *Checker) lombokMembers(cl *ast.Class, accessors accessorsOptions, class
 					continue
 				}
 				if a := hasAnno(d.Annos, "Getter"); a != nil {
-					c.lombokGetter(cl, []*ast.Field{f}, a, accessors)
+					c.lombokGetter(cl, []*ast.Field{f}, onSiteOf(a, d.Annos), accessors)
 				}
 				if a := hasAnno(d.Annos, "Setter"); a != nil {
-					c.lombokSetter(cl, []*ast.Field{f}, a, accessors)
+					c.lombokSetter(cl, []*ast.Field{f}, onSiteOf(a, d.Annos), accessors)
 				}
 				if hasAnno(d.Annos, "NonNull") != nil {
 					f.NonNull = true
@@ -455,7 +451,7 @@ func (c *Checker) lombokMembers(cl *ast.Class, accessors accessorsOptions, class
 					}
 				}
 				if a := hasAnno(d.Annos, "With"); a != nil {
-					c.lombokWith(cl, f, a)
+					c.lombokWith(cl, f, onSiteOf(a, d.Annos))
 				}
 				if a := hasAnno(d.Annos, "FieldNameConstants"); a != nil {
 					// field-level variant adds one constant
@@ -500,7 +496,8 @@ func (c *Checker) lombokMembers(cl *ast.Class, accessors accessorsOptions, class
 
 // ---------------------------------------------------------------- getters
 
-func (c *Checker) lombokGetter(cl *ast.Class, fields []*ast.Field, a *ast.Annotation, o accessorsOptions) {
+func (c *Checker) lombokGetter(cl *ast.Class, fields []*ast.Field, s onSite, o accessorsOptions) {
+	a := s.gen
 	mods, ok := annoAccess(a)
 	if !ok && a.Value() != nil {
 		// AccessLevel.NONE
@@ -521,13 +518,14 @@ func (c *Checker) lombokGetter(cl *ast.Class, fields []*ast.Field, a *ast.Annota
 		}
 		name := getterName(f, o)
 		if lazy {
-			c.lombokLazyGetter(cl, f, fmods, name)
+			c.lombokLazyGetter(cl, f, fmods, name, s)
 			continue
 		}
 		m := c.newSynthMethod(cl, name, fmods, f.Type, nil, nil,
 			blockOf(returnOf(thisField(f))), "@Getter")
 		m.Anno = "@Getter"
 		m.Prop = f
+		c.placeOn(m, s.memberAnnos(), nil)
 		c.addSynthMethod(cl, m)
 	}
 }
@@ -568,7 +566,8 @@ func accessLevelName(a *ast.Annotation) (string, bool) {
 	return "", false
 }
 
-func (c *Checker) lombokSetter(cl *ast.Class, fields []*ast.Field, a *ast.Annotation, o accessorsOptions) {
+func (c *Checker) lombokSetter(cl *ast.Class, fields []*ast.Field, s onSite, o accessorsOptions) {
+	a := s.gen
 	if _, isNone := accessLevelName(a); isNone {
 		return
 	}
@@ -598,13 +597,14 @@ func (c *Checker) lombokSetter(cl *ast.Class, fields []*ast.Field, a *ast.Annota
 		m := c.newSynthMethod(cl, setterName(f, o), mmods, result, []ast.Type{f.Type}, []string{"value"},
 			blockOf(stmts...), "")
 		m.Anno = "@Setter"
+		c.placeOn(m, s.memberAnnos(), s.paramAnnos())
 		c.addSynthMethod(cl, m)
 	}
 }
 
 // lombokLazyGetter implements @Getter(lazy = true): the value is computed once
 // and cached in a synthesized holder field.
-func (c *Checker) lombokLazyGetter(cl *ast.Class, f *ast.Field, mods ast.Mods, name string) {
+func (c *Checker) lombokLazyGetter(cl *ast.Class, f *ast.Field, mods ast.Mods, name string, s onSite) {
 	holder := &ast.Field{
 		Name: "__lazy$" + f.Name, Type: f.Type,
 		Mods: ast.ModPrivate | ast.ModVolatile, Pos: f.Pos, Storage: true,
@@ -624,12 +624,14 @@ func (c *Checker) lombokLazyGetter(cl *ast.Class, f *ast.Field, mods ast.Mods, n
 	)
 	m := c.newSynthMethod(cl, name, mods, f.Type, nil, nil, body, "")
 	m.Anno = "@Getter(lazy)"
+	c.placeOn(m, s.memberAnnos(), nil)
 	c.addSynthMethod(cl, m)
 }
 
 // ---------------------------------------------------------------- tostring
 
-func (c *Checker) lombokToString(cl *ast.Class, a *ast.Annotation) {
+func (c *Checker) lombokToString(cl *ast.Class, s onSite) {
+	a := s.gen
 	fields := c.toStringFields(cl, a)
 	if hasMethodDecl(cl.Decl, "toString", 0) {
 		return
@@ -657,6 +659,7 @@ func (c *Checker) lombokToString(cl *ast.Class, a *ast.Annotation) {
 	m := c.newSynthMethod(cl, "toString", ast.ModPublic, c.strType, nil, nil,
 		blockOf(returnOf(concatStr(parts...))), "")
 	m.Anno = "@ToString"
+	c.placeOn(m, s.memberAnnos(), nil)
 	c.addSynthMethod(cl, m)
 }
 
@@ -696,7 +699,8 @@ func (c *Checker) toStringFields(cl *ast.Class, a *ast.Annotation) []*ast.Field 
 
 // ---------------------------------------------------------------- equals/hashCode
 
-func (c *Checker) lombokEqualsHashCode(cl *ast.Class, a *ast.Annotation) {
+func (c *Checker) lombokEqualsHashCode(cl *ast.Class, s onSite) {
+	a := s.gen
 	of := annoStringList(a, "of")
 	exclude := map[string]bool{}
 	for _, n := range annoStringList(a, "exclude") {
@@ -723,14 +727,14 @@ func (c *Checker) lombokEqualsHashCode(cl *ast.Class, a *ast.Annotation) {
 		}
 	}
 	if !hasMethodDecl(cl.Decl, "equals", 1) {
-		c.lombokEquals(cl, fields, callSuper)
+		c.lombokEquals(cl, fields, callSuper, s)
 	}
 	if !hasMethodDecl(cl.Decl, "hashCode", 0) {
-		c.lombokHashCode(cl, fields, callSuper)
+		c.lombokHashCode(cl, fields, callSuper, s)
 	}
 }
 
-func (c *Checker) lombokEquals(cl *ast.Class, fields []*ast.Field, callSuper bool) {
+func (c *Checker) lombokEquals(cl *ast.Class, fields []*ast.Field, callSuper bool, s onSite) {
 	self := &ast.ClassType{Class: cl, Args: typeVarArgs(cl)}
 	objType := &ast.ClassType{Class: c.b.Object}
 	stmts := []ast.Stmt{
@@ -777,10 +781,12 @@ func (c *Checker) lombokEquals(cl *ast.Class, fields []*ast.Field, callSuper boo
 	m := c.newSynthMethod(cl, "equals", ast.ModPublic, ast.TBoolean,
 		[]ast.Type{objType}, []string{"o"}, blockOf(stmts...), "")
 	m.Anno = "@EqualsAndHashCode"
+	// Lombok puts onParam_ on the parameter of the generated equals method.
+	c.placeOn(m, s.memberAnnos(), s.paramAnnos())
 	c.addSynthMethod(cl, m)
 }
 
-func (c *Checker) lombokHashCode(cl *ast.Class, fields []*ast.Field, callSuper bool) {
+func (c *Checker) lombokHashCode(cl *ast.Class, fields []*ast.Field, callSuper bool, s onSite) {
 	start := ast.Expr(intLit(1))
 	if callSuper && cl.Super != nil {
 		start = superCall("hashCode")
@@ -812,6 +818,8 @@ func (c *Checker) lombokHashCode(cl *ast.Class, fields []*ast.Field, callSuper b
 	stmts = append(stmts, returnOf(id("result")))
 	m := c.newSynthMethod(cl, "hashCode", ast.ModPublic, ast.TInt, nil, nil, blockOf(stmts...), "")
 	m.Anno = "@EqualsAndHashCode"
+	// hashCode takes no parameter, so only the member annotations apply.
+	c.placeOn(m, s.memberAnnos(), nil)
 	c.addSynthMethod(cl, m)
 }
 
@@ -840,7 +848,8 @@ func (c *Checker) ctorFields(cl *ast.Class, kind string) []*ast.Field {
 	return out
 }
 
-func (c *Checker) lombokCtor(cl *ast.Class, a *ast.Annotation, kind string) {
+func (c *Checker) lombokCtor(cl *ast.Class, s onSite, kind string) {
+	a := s.gen
 	fields := c.ctorFields(cl, kind)
 	var params []ast.Type
 	var names []string
@@ -858,20 +867,22 @@ func (c *Checker) lombokCtor(cl *ast.Class, a *ast.Annotation, kind string) {
 	if !ok {
 		mods = ast.ModPublic
 	}
-	if s := annoString(a, "staticName"); s != "" {
-		c.lombokStaticFactory(cl, s, params, names, stmts, mods)
+	if sn := annoString(a, "staticName"); sn != "" {
+		c.lombokStaticFactory(cl, sn, params, names, stmts, mods, s)
 		return
 	}
 	m := &ast.Method{Name: "<init>", Owner: cl, IsCtor: true, Mods: mods,
 		Result: ast.TVoid, Params: params, ParamNames: names, Body: blockOf(stmts...), Pos: pos()}
 	m.Anno = "@" + kind + "ArgsConstructor"
+	c.placeOn(m, s.ctorAnnos(), s.paramAnnos())
 	c.addSynthCtor(cl, m)
 }
 
 // lombokStaticFactory emits `static Cls of(args) { return new Cls(args) }`.
-func (c *Checker) lombokStaticFactory(cl *ast.Class, name string, params []ast.Type, names []string, ctorStmts []ast.Stmt, mods ast.Mods) {
+func (c *Checker) lombokStaticFactory(cl *ast.Class, name string, params []ast.Type, names []string, ctorStmts []ast.Stmt, mods ast.Mods, s onSite) {
 	inner := &ast.Method{Name: "<init>", Owner: cl, IsCtor: true, Mods: ast.ModPrivate,
 		Result: ast.TVoid, Params: params, ParamNames: names, Body: blockOf(ctorStmts...), Pos: pos()}
+	c.placeOn(inner, s.ctorAnnos(), s.paramAnnos())
 	c.addSynthCtor(cl, inner)
 	args := make([]ast.Expr, len(names))
 	for i, n := range names {
@@ -880,6 +891,7 @@ func (c *Checker) lombokStaticFactory(cl *ast.Class, name string, params []ast.T
 	m := c.newSynthMethod(cl, name, (mods&^(ast.ModProtected))|ast.ModStatic, &ast.ClassType{Class: cl, Args: typeVarArgs(cl)},
 		params, names, blockOf(returnOf(newObj(cl, args...))), "")
 	m.Anno = "staticConstructor"
+	c.placeOn(m, s.memberAnnos(), nil)
 	c.addSynthMethod(cl, m)
 }
 
@@ -895,12 +907,12 @@ func (c *Checker) lombokData(cl *ast.Class, o accessorsOptions) {
 			continue
 		}
 		f.Mods |= ast.ModPrivate
-		c.lombokGetter(cl, []*ast.Field{f}, &ast.Annotation{Name: "Getter"}, o)
+		c.lombokGetter(cl, []*ast.Field{f}, onSiteOf(&ast.Annotation{Name: "Getter"}, nil), o)
 		if !f.Mods.Has(ast.ModFinal) {
-			c.lombokSetter(cl, []*ast.Field{f}, &ast.Annotation{Name: "Setter"}, o)
+			c.lombokSetter(cl, []*ast.Field{f}, onSiteOf(&ast.Annotation{Name: "Setter"}, nil), o)
 		}
 	}
-	c.lombokCtor(cl, &ast.Annotation{Name: "RequiredArgsConstructor"}, "required")
+	c.lombokCtor(cl, onSiteOf(&ast.Annotation{Name: "RequiredArgsConstructor"}, nil), "required")
 }
 
 func (c *Checker) lombokValue(cl *ast.Class, o accessorsOptions, a *ast.Annotation) {
@@ -908,7 +920,7 @@ func (c *Checker) lombokValue(cl *ast.Class, o accessorsOptions, a *ast.Annotati
 	for _, f := range c.instanceAndStaticFields(cl) {
 		f.Mods |= ast.ModPrivate | ast.ModFinal
 	}
-	c.lombokGetter(cl, c.instanceAndStaticFields(cl), &ast.Annotation{Name: "Getter"}, o)
+	c.lombokGetter(cl, c.instanceAndStaticFields(cl), onSiteOf(&ast.Annotation{Name: "Getter"}, nil), o)
 	if !hasMethodDecl(cl.Decl, "toString", 0) {
 		c.lombokToStringNoAnno(cl)
 	}
@@ -917,15 +929,15 @@ func (c *Checker) lombokValue(cl *ast.Class, o accessorsOptions, a *ast.Annotati
 	if sn := annoString(a, "staticConstructor"); sn != "" {
 		cta.Args = append(cta.Args, &ast.AnnoArg{Name: "staticName", Value: strLit(sn)})
 	}
-	c.lombokCtor(cl, cta, "all")
+	c.lombokCtor(cl, onSiteOf(cta, nil), "all")
 }
 
 func (c *Checker) lombokToStringNoAnno(cl *ast.Class) {
-	c.lombokToString(cl, &ast.Annotation{Name: "ToString"})
+	c.lombokToString(cl, onSiteOf(&ast.Annotation{Name: "ToString"}, nil))
 }
 
 func (c *Checker) lombokEqualsHashCodeNoAnno(cl *ast.Class) {
-	c.lombokEqualsHashCode(cl, &ast.Annotation{Name: "EqualsAndHashCode"})
+	c.lombokEqualsHashCode(cl, onSiteOf(&ast.Annotation{Name: "EqualsAndHashCode"}, nil))
 }
 
 func (c *Checker) lombokUtilityClass(cl *ast.Class) {
@@ -1496,7 +1508,7 @@ func (c *Checker) lombokMethodBuilder(cl *ast.Class, d *ast.MethodDecl, a *ast.A
 
 // ---------------------------------------------------------------- misc
 
-func (c *Checker) lombokWith(cl *ast.Class, f *ast.Field, a *ast.Annotation) {
+func (c *Checker) lombokWith(cl *ast.Class, f *ast.Field, s onSite) {
 	fields := c.ctorFields(cl, "all")
 	var params []ast.Type
 	var names []string
@@ -1515,6 +1527,7 @@ func (c *Checker) lombokWith(cl *ast.Class, f *ast.Field, a *ast.Annotation) {
 	m := c.newSynthMethod(cl, "with"+util.Capitalize(f.Name), ast.ModPublic, &ast.ClassType{Class: cl, Args: typeVarArgs(cl)},
 		[]ast.Type{f.Type}, []string{"value"}, blockOf(returnOf(newObj(cl, args...))), "")
 	m.Anno = "@With"
+	c.placeOn(m, s.memberAnnos(), s.paramAnnos())
 	c.addSynthMethod(cl, m)
 }
 
@@ -1673,6 +1686,7 @@ func (c *Checker) lombokExtensionMethods(cl *ast.Class) []*ast.Class {
 // applyLombokToProgram runs the pass over every class, twice for nested
 // builders that only appear once their owner is processed.
 func (c *Checker) applyLombokToProgram() {
+	generatedOn = map[*ast.Method]*onCopies{}
 	seen := map[*ast.Class]bool{}
 	for i := 0; i < 2; i++ {
 		for _, cl := range append([]*ast.Class(nil), c.classes...) {

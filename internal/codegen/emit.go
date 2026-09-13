@@ -57,6 +57,10 @@ type Emitter struct {
 	stackLocals map[*ast.Var]*ast.New
 	// what is known about each method's receiver
 	leakCache map[*ast.Method]leakState
+	// primitive types named by a class literal, whose class objects the emitter
+	// synthesizes; filled in while the function bodies are emitted and written
+	// out with the rest of the metadata, before them
+	primClasses map[ast.PrimKind]bool
 }
 
 // finFrame is one try statement whose finally action must still run.
@@ -69,11 +73,12 @@ type finFrame struct {
 // Emit returns the C source for a program.
 func Emit(p *sema.Program) string {
 	e := &Emitter{
-		prog:      p,
-		strings:   map[string]int{},
-		locals:    map[*ast.Var]string{},
-		leakCache: map[*ast.Method]leakState{},
-		code:      &strings.Builder{},
+		prog:        p,
+		strings:     map[string]int{},
+		locals:      map[*ast.Var]string{},
+		leakCache:   map[*ast.Method]leakState{},
+		primClasses: map[ast.PrimKind]bool{},
+		code:        &strings.Builder{},
 	}
 	e.run()
 	var out strings.Builder
@@ -96,6 +101,36 @@ func (e *Emitter) run() {
 	}
 	for _, cl := range e.prog.Classes {
 		e.emitClassCode(cl)
+	}
+	// the metadata of the classes a class literal synthesized, now that the
+	// bodies that may name them have been emitted
+	e.emitPrimClassMeta()
+}
+
+// primClassName is the C name of the class a primitive class literal names.
+func primClassName(k ast.PrimKind) string {
+	return mangle("teyru.prim." + (&ast.PrimType{Kind: k}).String())
+}
+
+// emitPrimClassMeta writes the class behind a primitive class literal, such as
+// `int.class`. A primitive is not a class in Teyru: no value is ever an
+// instance of one, since an int boxes to teyru.Integer, and the program has no
+// metadata for it. The literal still has to answer with what javac answers --
+// "int", "boolean", "void" -- so the class is synthesized here rather than
+// reusing the wrapper class, which would answer "teyru.Integer" and compare
+// equal to Integer.class, where Java keeps the two apart.
+//
+// The struct carries only a name: nothing walks it. Its id is negative, since
+// it is not one of the program's classes (that counter starts at zero and the
+// runtime never reads the field), and it has no superclass or members, as a
+// primitive type has none.
+func (e *Emitter) emitPrimClassMeta() {
+	for k := ast.Void; k <= ast.Double; k++ {
+		if !e.primClasses[k] {
+			continue
+		}
+		fmt.Fprintf(&e.data, "static tyclass cls_%s = {%q, %d, 0, NULL, 0, NULL, 0, NULL, NULL, 0, 0, NULL, 0, NULL, 0, NULL};\n",
+			primClassName(k), (&ast.PrimType{Kind: k}).String(), -1-int(k))
 	}
 }
 

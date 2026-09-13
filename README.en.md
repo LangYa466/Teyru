@@ -316,6 +316,7 @@ compiled and checked together with every user program:
 `Object`, `String`, `StringBuilder`, `Math`, `System`, `PrintStream`,
 `Iterable`/`Iterator`, `Comparable`, `AutoCloseable`, `Cloneable`, `Enum`, `Record`,
 the eight primitive wrappers (`Byte`, `Short`, `Integer`, `Long`, `Float`, `Double`,
+`Character`, `Boolean`), their supertype `Number`,
 `Character`, `Boolean`), the collections (`List`, `ArrayList`, `Map`, `HashMap`), and the
 `Throwable` family (`Exception`, `RuntimeException`, `NullPointerException`,
 `ArrayIndexOutOfBoundsException`, `ArithmeticException`, `ClassCastException`,

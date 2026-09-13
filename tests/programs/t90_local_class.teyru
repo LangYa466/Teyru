@@ -1,0 +1,50 @@
+// Local classes in a static and in an instance context.
+//
+// A local class declared in a static method has no enclosing instance to point
+// at (JLS 8.1.3), so `new Local()` needs no qualifier -- the same rule as for
+// a static nested class. Declared in an instance method it does have one, and
+// the body may read the enclosing instance's fields, in its own body and in a
+// sibling local class's.
+//
+// Known divergence: two local classes with the same simple name in one class
+// are rejected (TY-TYP-0001 "duplicate nested type"). Java scopes a local class
+// to its block (JLS 6.3), so `class Local` in two different methods is legal
+// there and names two distinct types. Teyru resolves a local class by simple
+// name through the enclosing type, which is a single namespace; giving local
+// classes block scope needs a per-block environment in the checker.
+
+class Main {
+  int base = 100
+
+  public static void main(String[] args) {
+    System.out.println(staticLocal())
+    System.out.println(new Main().instanceLocal())
+    System.out.println(new Main().nested())
+  }
+
+  static int staticLocal() {
+    class Local {
+      int v = 5
+      int get() { return v }
+    }
+    Local l = new Local()
+    return l.get()
+  }
+
+  int instanceLocal() {
+    class Local {
+      int get() { return base + 1 }
+    }
+    return new Local().get()
+  }
+
+  int nested() {
+    class Outer {
+      int get() { return base + 2 }
+    }
+    class Inner {
+      int get() { return new Outer().get() * 2 }
+    }
+    return new Inner().get()
+  }
+}

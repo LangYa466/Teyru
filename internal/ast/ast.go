@@ -550,6 +550,11 @@ type (
 		Captures []*Var
 		CapThis  bool
 		Class    *Class // synthesized closure class
+		// Outer is the lambda this one is written inside, when it is nested.
+		// A body that needs the enclosing instance makes every lambda around
+		// it carry the reference, so the chain from the use outwards is what
+		// says which closures capture it.
+		Outer *Lambda
 		// ExprStmt marks a body that is a statement expression and whose
 		// functional method returns void (JLS 15.27.2).
 		ExprStmt bool
@@ -717,7 +722,13 @@ type Class struct {
 	// LocalScopes is the scope chain of the enclosing method at the point a
 	// local or anonymous class is declared, so that its body can see the
 	// variables that are in scope there (JLS 6.3).
-	LocalScopes  []map[string]*Var
+	LocalScopes []map[string]*Var
+	// LocalClasses is the local classes in scope where a local or anonymous
+	// class is declared. A local class belongs to its block (JLS 6.3), so two
+	// methods may each declare `class Local` and they are different types;
+	// naming one through the enclosing type's Nested map -- one namespace --
+	// could only ever hold one of them.
+	LocalClasses map[string]*Class
 	Special      string // "String", "array", "Object", box names
 	Subclasses   []*Class
 	EnumConsts   []*Field
@@ -735,5 +746,10 @@ func (c *Class) IsInterface() bool { return c.Kind == KindInterface || c.Kind ==
 type TypeVar struct {
 	Name  string
 	Bound Type
-	ID    int
+	// Bounds holds every bound of an intersection (JLS 4.4: `<T extends A & B>`)
+	// with Bound kept equal to Bounds[0] for the single-bound call sites. A
+	// member of any bound is a member of the variable, so lookups walk the
+	// whole list; erasure is the leftmost bound, as the JLS requires.
+	Bounds []Type
+	ID     int
 }

@@ -1,20 +1,42 @@
 package teyru
 
-class Byte extends Object {
+// Number is the supertype of the numeric wrappers, exactly as in Java: the six
+// conversions are abstract here and every wrapper implements all of them, the
+// narrowings by Java's narrowing conversion rules.
+abstract class Number extends Object {
+  public abstract int intValue()
+  public abstract long longValue()
+  public abstract double doubleValue()
+  public abstract float floatValue()
+  public abstract byte byteValue()
+  public abstract short shortValue()
+}
+
+class Byte extends Number {
   public static native Byte valueOf(byte v)
   public native byte byteValue()
   public native int hashCode()
   public native String toString()
+  public native int intValue()
+  public native long longValue()
+  public native double doubleValue()
+  public native float floatValue()
+  public native short shortValue()
 }
 
-class Short extends Object {
+class Short extends Number {
   public static native Short valueOf(short v)
   public native short shortValue()
   public native int hashCode()
   public native String toString()
+  public native int intValue()
+  public native long longValue()
+  public native double doubleValue()
+  public native float floatValue()
+  public native byte byteValue()
 }
 
-class Integer extends Object implements Comparable<Integer> {
+class Integer extends Number implements Comparable<Integer> {
   public static native int parseInt(String s)
   public static native Integer valueOf(int v)
   public static native int compare(int a, int b)
@@ -26,9 +48,14 @@ class Integer extends Object implements Comparable<Integer> {
   public native int compareTo(Integer o)
   public native String toString()
   public static native String toString(int v)
+  public native long longValue()
+  public native double doubleValue()
+  public native float floatValue()
+  public native byte byteValue()
+  public native short shortValue()
 }
 
-class Long extends Object implements Comparable<Long> {
+class Long extends Number implements Comparable<Long> {
   public static native long parseLong(String s)
   public static native Long valueOf(long v)
   public static native int compare(long a, long b)
@@ -41,9 +68,13 @@ class Long extends Object implements Comparable<Long> {
   public native int compareTo(Long o)
   public native String toString()
   public static native String toString(long v)
+  public native double doubleValue()
+  public native float floatValue()
+  public native byte byteValue()
+  public native short shortValue()
 }
 
-class Float extends Object implements Comparable<Float> {
+class Float extends Number implements Comparable<Float> {
   public static native float parseFloat(String s)
   public static native Float valueOf(float v)
   public static native int compare(float a, float b)
@@ -52,9 +83,14 @@ class Float extends Object implements Comparable<Float> {
   public native boolean equals(Object o)
   public native int compareTo(Float o)
   public native String toString()
+  public native int intValue()
+  public native long longValue()
+  public native double doubleValue()
+  public native byte byteValue()
+  public native short shortValue()
 }
 
-class Double extends Object implements Comparable<Double> {
+class Double extends Number implements Comparable<Double> {
   public static native double parseDouble(String s)
   public static native Double valueOf(double v)
   public static native int compare(double a, double b)
@@ -65,6 +101,11 @@ class Double extends Object implements Comparable<Double> {
   public native int compareTo(Double o)
   public native String toString()
   public static native String toString(double v)
+  public native int intValue()
+  public native long longValue()
+  public native float floatValue()
+  public native byte byteValue()
+  public native short shortValue()
 }
 
 class Character extends Object implements Comparable<Character> {

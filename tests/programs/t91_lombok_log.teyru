@@ -1,0 +1,57 @@
+// Lombok's logger annotations and the onX family.
+//
+// @Log and its siblings generate a `log` field of the logger type the
+// annotation names. @CustomLog reads lombok.log.custom.declaration from the
+// nearest lombok.config (see lombok.config beside this file) and builds the
+// logger with the factory the declaration names.
+//
+// The onX options copy an annotation onto the members another annotation
+// generates: @Getter(onMethod_ = ...) puts it on the getter, @Setter(onParam_
+// = ...) on the setter's parameter, @AllArgsConstructor(onConstructor_ = ...)
+// on the generated constructor. Teyru keeps annotations on the generated
+// declarations, so a later pass can read them the way it reads a written one.
+
+import lombok.Getter
+import lombok.Setter
+import lombok.AllArgsConstructor
+import lombok.Log
+import lombok.CustomLog
+
+// The logger @CustomLog builds: a class with a static factory taking the class
+// name, and the logger methods the body calls.
+class TestLog {
+  String tag
+  TestLog(String tag) { this.tag = tag }
+  static TestLog of(String name) { return new TestLog(name) }
+  void info(String m) { System.out.println(tag + " " + m) }
+}
+
+@Log
+class Tagged {
+  String name
+  Tagged(String name) { this.name = name }
+  void show() { log.info(name) }
+}
+
+@CustomLog
+class Customised {
+  void show() { log.info("built by the declaration") }
+}
+
+@AllArgsConstructor(onConstructor_ = @Deprecated)
+class Annotated {
+  @Getter(onMethod_ = @Deprecated) String name
+  @Getter @Setter(onParam_ = @Deprecated) int age
+}
+
+class Main {
+  public static void main(String[] args) {
+    new Tagged("first").show()
+    new Customised().show()
+
+    Annotated a = new Annotated("n", 4)
+    System.out.println(a.getName() + " " + a.getAge())
+    a.setAge(9)
+    System.out.println(a.getAge())
+  }
+}

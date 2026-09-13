@@ -454,6 +454,10 @@ void *ty_alloc_arr(int64_t len, size_t elemsize) {
   a->data = (char *)a + sizeof(tyarr);
   a->esize = (int32_t)elemsize;
   a->refs = 0;
+  /* no promise about the elements: the caller that knows the element class
+     (the generated code for `new T[]`) records it, and only then is a store
+     into this array checked against it */
+  a->elemcls = NULL;
   return a;
 }
 
@@ -801,6 +805,10 @@ tyarr *ty_str_split(tystr *s, tystr *sep) {
   if (sep->len == 0) {
     tyarr *one = ty_array_new(1, 8);
     one->refs = 1;
+    /* the declared result is String[], so the array promises String for its
+       elements the same way `new String[]` does; TY_STRING is installed before
+       any user code runs */
+    one->elemcls = TY_STRING;
     ((void **)one->data)[0] = ty_str_new(s->data, s->len);
     return one;
   }
@@ -815,6 +823,7 @@ tyarr *ty_str_split(tystr *s, tystr *sep) {
   }
   tyarr *out = ty_array_new(count, 8);
   out->refs = 1;
+  out->elemcls = TY_STRING;
   int64_t start = 0, field = 0;
   i = 0;
   while (i + sep->len <= s->len) {
@@ -957,6 +966,9 @@ tyarr *ty_array_clone(tyarr *a, int64_t elemsize) {
   r->obj.cls = array_class();
   r->esize = a->esize;
   r->refs = a->refs;
+  /* Java's clone keeps the array's runtime element type, so a copy of a
+     String[] is still a String[] for the store check below */
+  r->elemcls = a->elemcls;
   memcpy(r->data, a->data, (size_t)(a->len * elemsize));
   return r;
 }
@@ -970,10 +982,7 @@ void *ty_arr_slot_ref(tyarr *a, int64_t i) {
 }
 void *ty_arr_ref(tyarr *a, int64_t i) { return *(void **)ty_arr_slot_ref(a, i); }
 
-void ty_array_store_ref(tyarr *a, int64_t i, void *v) {
-  if (!a || i < 0 || i >= a->len) ty_throw((tyobj *)ty_aioobe(i, a ? a->len : 0));
-  ((void **)a->data)[i] = v;
-}
+
 
 /* ------------------------------------------------------------------ boxing */
 

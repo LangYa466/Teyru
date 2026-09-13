@@ -1,0 +1,27 @@
+// Reading a field of a null reference throws NullPointerException, as in Java.
+// A field read dereferences the receiver, so before the read was tested the
+// program died with SIGSEGV instead. The last read is left uncaught, so the
+// message and the exit status are part of the test; javac prints the same
+// stdout and exits 1.
+class A {
+  int v = 7
+  public String name = "a"
+}
+
+class Main {
+  public static void main(String[] args) {
+    A a = null
+    try {
+      System.out.println(a.v)
+    } catch (NullPointerException e) {
+      System.out.println("int field threw")
+    }
+    try {
+      System.out.println(a.name)
+    } catch (NullPointerException e) {
+      System.out.println("ref field threw")
+    }
+    System.out.println("last read")
+    System.out.println(a.name)
+  }
+}

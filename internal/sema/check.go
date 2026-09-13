@@ -12,14 +12,21 @@ import (
 
 // methodCtx carries the local scope of one method body.
 type methodCtx struct {
-	c               *Checker
-	cl              *ast.Class
-	m               *ast.Method
-	env             *typeEnv
-	scopes          []map[string]*ast.Var
-	loops           int
-	sw              *ast.Switch
-	lambda          *ast.Lambda
+	c      *Checker
+	cl     *ast.Class
+	m      *ast.Method
+	env    *typeEnv
+	scopes []map[string]*ast.Var
+	loops  int
+	sw     *ast.Switch
+	lambda *ast.Lambda
+	// envs is the type-environment stack that mirrors scopes: push swaps in a
+	// block's own environment and pop puts the enclosing one back.
+	envs []*typeEnv
+	// noThis marks a context that inherits its staticness from the method a
+	// lambda was written in: the lambda's own method is never static, so the
+	// answer cannot be read off m alone.
+	noThis          bool
 	staticImports   []*ast.Field
 	staticMethods   map[string][]*ast.Method
 	props           map[ast.Expr]ast.Expr
@@ -229,8 +236,52 @@ func (c *Checker) newCtx(cl *ast.Class, m *ast.Method) *methodCtx {
 	return ctx
 }
 
-func (ctx *methodCtx) push() { ctx.scopes = append(ctx.scopes, map[string]*ast.Var{}) }
-func (ctx *methodCtx) pop()  { ctx.scopes = ctx.scopes[:len(ctx.scopes)-1] }
+func (ctx *methodCtx) push() {
+	ctx.scopes = append(ctx.scopes, map[string]*ast.Var{})
+	ctx.envs = append(ctx.envs, ctx.env)
+	if ctx.env != nil {
+		// a block gets its own type environment so that a local class declared
+		// in it is visible for the rest of the block and nowhere else (JLS 6.3)
+		ctx.env = &typeEnv{cls: ctx.env.cls, tvars: ctx.env.tvars, file: ctx.env.file,
+			locals: map[string]*ast.Class{}, parent: ctx.env}
+	}
+}
+func (ctx *methodCtx) pop() {
+	ctx.scopes = ctx.scopes[:len(ctx.scopes)-1]
+	if n := len(ctx.envs); n > 0 {
+		ctx.env = ctx.envs[n-1]
+		ctx.envs = ctx.envs[:n-1]
+	}
+}
+
+// declareLocalClass binds a local class name in the block that declares it.
+func (ctx *methodCtx) declareLocalClass(name string, cl *ast.Class) {
+	if ctx.env == nil {
+		return
+	}
+	if ctx.env.locals == nil {
+		ctx.env.locals = map[string]*ast.Class{}
+	}
+	ctx.env.locals[name] = cl
+}
+
+// visibleClasses is every local class name in scope at this point, for the
+// body of a local class declared here to resolve against.
+func (ctx *methodCtx) visibleClasses() map[string]*ast.Class {
+	var out map[string]*ast.Class
+	for e := ctx.env; e != nil; e = e.parent {
+		for n, cl := range e.locals {
+			if out == nil {
+				out = map[string]*ast.Class{}
+			}
+			// the innermost binding of a name wins
+			if _, seen := out[n]; !seen {
+				out[n] = cl
+			}
+		}
+	}
+	return out
+}
 
 func (ctx *methodCtx) errf(pos source.Pos, code, format string, args ...any) {
 	ctx.c.errf(pos, code, format, args...)
@@ -294,7 +345,57 @@ func isStaticCtx(cl *ast.Class) bool {
 	return cl.Decl != nil && cl.Decl.Implicit
 }
 
-func (ctx *methodCtx) inStatic() bool { return ctx.m == nil || ctx.m.IsStatic() }
+func (ctx *methodCtx) inStatic() bool {
+	return ctx.m == nil || ctx.m.IsStatic() || ctx.noThis
+}
+
+// hasThis reports whether `this` denotes an instance at the point being
+// checked. A lambda body inherits the answer from where the lambda was
+// written: JLS 15.27.2 gives `this` the same meaning inside the body as
+// outside it, so a lambda in a static method has no instance to name, while a
+// lambda in an instance method, constructor or field initializer does.
+func (ctx *methodCtx) hasThis() bool {
+	if ctx.noThis {
+		return false
+	}
+	// a compact source file's implicit class has no instance at all
+	if ctx.cl != nil && isStaticCtx(ctx.cl) {
+		return false
+	}
+	if ctx.m != nil {
+		return !ctx.m.IsStatic()
+	}
+	// no method in scope: a field initializer runs on the instance under
+	// construction
+	return true
+}
+
+// noteThis records that the lambda body being checked uses `this`, which is
+// the instance the lambda was created in. Every lambda between the use and
+// that instance has to carry the reference, so each one captures it in turn:
+// the innermost needs the enclosing instance, the one around it needs it for
+// the innermost, and so on.
+func (ctx *methodCtx) noteThis() {
+	for l := ctx.lambda; l != nil; l = l.Outer {
+		l.CapThis = true
+	}
+}
+
+// thisUse is the check every use of the enclosing instance inside a lambda has
+// to pass: either there is an instance to capture, or the use is an error. In
+// a static method there is no `this`, so Java rejects the use instead of
+// silently binding it to the closure object.
+func (ctx *methodCtx) thisUse(pos source.Pos, what string) bool {
+	if ctx.lambda == nil {
+		return true
+	}
+	if !ctx.hasThis() {
+		ctx.errf(pos, "TY-TYP-0098", "non-static %s cannot be referenced from a static context", what)
+		return false
+	}
+	ctx.noteThis()
+	return true
+}
 
 // expectType gives the declared type of a field declarator.
 // ---------------------------------------------------------------- statements
@@ -333,6 +434,27 @@ func (ctx *methodCtx) checkStmt(s ast.Stmt) {
 		if cd.Sym == nil {
 			cl := c.declareClass(ctx.cl.File, cd, ctx.cl)
 			cl.LocalOwner = ctx.m
+			// A local class declared in a static context has no enclosing
+			// instance to point at (JLS 8.1.3): `class Local {...}` inside a
+			// static method is instantiated with `new Local()`, exactly like a
+			// static nested class. declareClass marks every class without a
+			// `static` modifier as inner, which is right for a nested type and
+			// wrong here, so the local case corrects it before the outer field
+			// is laid out.
+			cl.Inner = !ctx.inStatic()
+			// A local class belongs to the block that declares it (JLS 6.3),
+			// so two methods may each declare `class Local` and they are
+			// distinct types. declareClass put it in the enclosing type's
+			// scope, which is a single namespace and the wrong one; move it to
+			// this block, and give it a name of its own so the two do not
+			// collide as C symbols either.
+			if ctx.cl.Nested[cd.Name] == cl {
+				delete(ctx.cl.Nested, cd.Name)
+			}
+			c.localN++
+			cl.Full = fmt.Sprintf("%s$%s$%d", ctx.cl.Full, cd.Name, c.localN)
+			cl.LocalClasses = ctx.visibleClasses()
+			ctx.declareLocalClass(cd.Name, cl)
 			c.resolveHeader(cl)
 			c.resolveMembers(cl)
 			c.layout(cl)
@@ -591,12 +713,34 @@ func (ctx *methodCtx) checkSwitch(s *ast.Switch, expr bool) {
 			ctx.errf(cs.Pos, "TY-TYP-0089", "'case null' requires a reference selector")
 		}
 	}
+	// Java allows a switch on a boxed integral type as well as on the primitive,
+	// and unboxes the selector (JLS 14.11). A pattern or a `case null` keeps the
+	// box instead: those cases ask about the box itself, and only the constant
+	// form below is rewritten.
+	boxed := c.boxedSwitchPrim(xt)
 	switch {
 	case hasPattern && ast.IsRef(xt):
 		s.Kind = ast.SwitchType
-	case isIntegralType(xt):
-		// float and double selectors are not integral: they fall through to
-		// the diagnostic below rather than being truncated to int.
+	case hasPattern && isIntegralType(xt):
+		// A primitive selector under a pattern switch (JEP 507): each case asks
+		// whether the value converts exactly to the pattern's type, so a long
+		// selector is legal here even though no constant switch accepts one
+		// (t72_primitive_switch).
+		s.Kind = ast.SwitchInt
+	case boxed != nil:
+		// `switch (Character c)` is a switch on the char the box holds, and a
+		// null box throws NullPointerException when it is opened, exactly as in
+		// Java. Rewriting the selector as the primitive keeps one lowering: the
+		// constant C switch the backend writes for a char selector, whose labels
+		// are already the values the box carries.
+		s.X = ctx.convertWith(s.X, boxed, xt)
+		xt = boxed
+		s.Kind = ast.SwitchInt
+	case isSwitchSelectorType(xt):
+		// byte, short, char and int are the primitives a constant switch may
+		// select on. long is integral but is not one of them, and float and
+		// double are not integral at all: all three fall through to the
+		// diagnostic below rather than being truncated to int.
 		s.Kind = ast.SwitchInt
 	case c.isSubtype(xt, c.strType):
 		s.Kind = ast.SwitchString
@@ -604,7 +748,7 @@ func (ctx *methodCtx) checkSwitch(s *ast.Switch, expr bool) {
 		s.Kind = ast.SwitchEnum
 	default:
 		if xt != nil && !ast.IsError(xt) {
-			ctx.errf(s.Pos, "TY-TYP-0035", "switch selector must be an integral, String or enum type, found %s", xt)
+			ctx.errf(s.Pos, "TY-TYP-0035", "switch selector must be a char, byte, short, int, Character, Byte, Short, Integer, String or enum type, found %s", xt)
 		}
 		s.Kind = ast.SwitchInt
 	}
@@ -689,8 +833,9 @@ func (ctx *methodCtx) checkSwitch(s *ast.Switch, expr bool) {
 	}
 	// A switch expression must be exhaustive (JLS 14.11.2): with no default and
 	// no arms that cover every value it would evaluate to the type's zero
-	// value, a silent wrong answer. An enum selector is decidable here, so it
-	// is checked rather than refused outright like the others.
+	// value, a silent wrong answer. An enum selector and a sealed one are
+	// decidable here, so those are checked rather than refused outright like
+	// the others.
 	if expr && !hasDefault {
 		switch s.Kind {
 		case ast.SwitchInt, ast.SwitchString:
@@ -705,8 +850,86 @@ func (ctx *methodCtx) checkSwitch(s *ast.Switch, expr bool) {
 					}
 				}
 			}
+		case ast.SwitchType:
+			if !ctx.patternsExhaustive(s, xt) {
+				ctx.errf(s.Pos, "TY-TYP-0096", "switch expression does not cover all possible input values")
+			}
 		}
 	}
+}
+
+// patternsExhaustive reports whether the type patterns of a switch expression
+// cover every value of its selector type.
+//
+// A pattern whose type is a supertype of the selector's is total -- every value
+// of the selector matches it -- and covers the whole switch on its own. Failing
+// that the question is answerable only for a sealed selector: the values it can
+// take are its permitted subtypes, and it has to be exhaustive for each of them
+// (JLS 14.11.2). A guarded pattern is not counted, since `when` can fail and so
+// proves nothing about the value it binds: javac rejects the same switch.
+//
+// Constant labels are not counted either. A sealed interface whose permitted
+// subtype is an enum can be switched with constant labels in Java, but a label
+// against an interface selector compares a pointer with a constant in this
+// backend, so such a switch is left to the `default` it should have written.
+func (ctx *methodCtx) patternsExhaustive(s *ast.Switch, xt ast.Type) bool {
+	var pats []ast.Type
+	for _, cs := range s.Cases {
+		if cs.Pattern == nil || cs.Guard != nil || cs.Pattern.Type == nil {
+			continue
+		}
+		pats = append(pats, cs.Pattern.Type.Resolved)
+	}
+	return ctx.patternsCover(pats, xt, map[*ast.Class]bool{})
+}
+
+// patternsCover reports whether pats cover every value of t: some pattern is a
+// supertype of t, or t is sealed and every one of its permitted subtypes is
+// covered in turn. seen breaks a `permits` cycle, which is illegal Java but is
+// not something the sealed-type checks this compiler lacks would have caught.
+func (ctx *methodCtx) patternsCover(pats []ast.Type, t ast.Type, seen map[*ast.Class]bool) bool {
+	c := ctx.c
+	for _, p := range pats {
+		if c.isSubtype(t, p) {
+			return true
+		}
+	}
+	cl, ok := t.(*ast.ClassType)
+	if !ok || cl.Class == nil || !cl.Class.Mods.Has(ast.ModSealed) || seen[cl.Class] {
+		// Nothing is known about the values of a type that is not sealed: only a
+		// default or a total pattern can make such a switch exhaustive.
+		return false
+	}
+	seen[cl.Class] = true
+	permits := c.permittedSubtypes(ctx.env, cl.Class)
+	if len(permits) == 0 {
+		// A sealed type that names no permitted subclass says nothing about the
+		// values it can take, so exhaustiveness cannot be shown for it.
+		return false
+	}
+	for _, pc := range permits {
+		if !ctx.patternsCover(pats, &ast.ClassType{Class: pc}, seen) {
+			return false
+		}
+	}
+	return true
+}
+
+// permittedSubtypes returns the classes a sealed type's permits clause names.
+// A name that does not resolve is left out: the caller can then only answer
+// conservatively, and reporting a bad name belongs to the sealed-type checks
+// this compiler does not have yet (AGENTS.md §10).
+func (c *Checker) permittedSubtypes(env *typeEnv, cl *ast.Class) []*ast.Class {
+	if cl.Decl == nil {
+		return nil
+	}
+	var out []*ast.Class
+	for _, te := range cl.Decl.Permits {
+		if pc := c.lookupClassName(env, te.Name); pc != nil {
+			out = append(out, pc)
+		}
+	}
+	return out
 }
 
 func isEnumType(t ast.Type) bool {
@@ -720,6 +943,30 @@ func isEnumType(t ast.Type) bool {
 func isIntegralType(t ast.Type) bool {
 	p, ok := t.(*ast.PrimType)
 	return ok && p.IsIntegral()
+}
+
+// isSwitchSelectorType reports whether t is a primitive a switch with constant
+// labels may select on: char, byte, short and int (JLS 14.11). long is integral
+// but is not one of them -- Java rejects `switch` on a long selector -- and
+// float and double are not integral at all.
+func isSwitchSelectorType(t ast.Type) bool {
+	p, ok := t.(*ast.PrimType)
+	return ok && p.IsIntegral() && p.Kind != ast.Long
+}
+
+// boxedSwitchPrim returns the primitive a boxed switch selector is unboxed to,
+// or nil when the selector is not one of the four boxes Java allows: Character,
+// Byte, Short and Integer. Long, Float, Double and Boolean are not among them.
+func (c *Checker) boxedSwitchPrim(t ast.Type) *ast.PrimType {
+	p, ok := c.unboxed(t)
+	if !ok {
+		return nil
+	}
+	switch p.Kind {
+	case ast.Byte, ast.Short, ast.Char, ast.Int:
+		return p
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------- expressions
@@ -838,7 +1085,7 @@ func (ctx *methodCtx) checkExpr(e ast.Expr, want ast.Type) {
 			return
 		}
 		if ctx.lambda != nil {
-			ctx.lambda.CapThis = true
+			ctx.thisUse(v.Pos, "variable this")
 		}
 		v.SetType(&ast.ClassType{Class: ctx.cl, Args: typeVarArgs(ctx.cl)})
 	case *ast.SuperExpr:
@@ -846,6 +1093,11 @@ func (ctx *methodCtx) checkExpr(e ast.Expr, want ast.Type) {
 			ctx.errf(v.Pos, "TY-TYP-0044", "no superclass")
 			v.SetType(ast.ErrorType{})
 			return
+		}
+		// super.x reaches the enclosing instance too, so a lambda body has to
+		// carry it exactly as it carries `this`
+		if ctx.lambda != nil {
+			ctx.thisUse(v.Pos, "variable super")
 		}
 		v.SetType(ctx.cl.Super)
 	case *ast.SwitchExpr:
@@ -890,15 +1142,30 @@ func (ctx *methodCtx) checkExpr(e ast.Expr, want ast.Type) {
 		v.SetType(rt)
 	case *ast.ClassLit:
 		t := c.resolveType(ctx.env, v.Type)
-		v.SetType(&ast.ClassType{Class: c.b.Object})
-		if _, ok := t.(*ast.ClassType); ok {
-			v.SetType(&ast.ClassType{Class: c.b.Object})
-		}
+		// A class literal denotes a Class object -- the same kind of value
+		// Object.getClass() returns -- so that is its static type. It used to
+		// be Object, which made `A.class.getName()` unresolvable.
+		v.SetType(c.classLiteralType())
 		v.Type.Resolved = t
 	default:
 		ctx.errf(e.GetPos(), "TY-INT-0002", "unsupported expression %T", e)
 		e.SetType(ast.ErrorType{})
 	}
+}
+
+// preludeClassFull is the prelude class a class literal's value is an instance
+// of, teyru.Class (lib/01_core.teyru). Object.getClass() returns the same kind
+// of value, and code generation hands the runtime this same class.
+const preludeClassFull = "teyru.Class"
+
+// classLiteralType is the static type of a class literal: the prelude's Class.
+func (c *Checker) classLiteralType() ast.Type {
+	if cl := c.global[preludeClassFull]; cl != nil {
+		return &ast.ClassType{Class: cl}
+	}
+	// The prelude always declares Class; a prelude without it has already been
+	// reported by initBuiltins, and Object keeps the checker going.
+	return &ast.ClassType{Class: c.b.Object}
 }
 
 func blockYieldType(b *ast.Block) ast.Type {
@@ -990,6 +1257,12 @@ func (ctx *methodCtx) checkIdent(v *ast.Ident, want ast.Type) {
 		}
 		if f.Mods.Has(ast.ModPrivate) && !sameNest(f.Owner, ctx.cl) {
 			ctx.errf(v.Pos, "TY-TYP-0046", "%s has private access in %s", f.Name, f.Owner.Name)
+		}
+		// A bare field name reads through the enclosing instance, so a lambda
+		// body has to carry that instance the same way an explicit `this` makes
+		// it. The static case is already reported above, by TY-TYP-0045.
+		if !f.Mods.Has(ast.ModStatic) && ctx.lambda != nil && ctx.hasThis() {
+			ctx.noteThis()
 		}
 		v.Ref = f
 		v.SetType(f.Type)
@@ -1796,7 +2069,7 @@ func (ctx *methodCtx) checkNew(v *ast.New, want ast.Type) {
 	ctor := c.resolveCtor(ctx, ctorType, v, cl, want)
 	_ = ctor
 	// outer instance for inner classes
-	if cl.Inner {
+	if cl.Inner && !ctx.inScopeOf(cl) {
 		if v.Outer != nil {
 			ctx.checkExpr(v.Outer, nil)
 		} else if !ctx.inStatic() {
@@ -1806,6 +2079,8 @@ func (ctx *methodCtx) checkNew(v *ast.New, want ast.Type) {
 		} else {
 			ctx.errf(v.Pos, "TY-TYP-0071", "an enclosing instance of %s is required", cl.Name)
 		}
+	} else if cl.Inner && v.Outer != nil {
+		ctx.checkExpr(v.Outer, nil)
 	}
 	if v.Body != nil {
 		body := v.Body
@@ -1879,6 +2154,21 @@ func nestHost(cl *ast.Class) *ast.Class {
 		cl = cl.Outer
 	}
 	return cl
+}
+
+// inScopeOf reports whether cl is a local class whose declaring block we are
+// lexically inside. Its enclosing instance is then the current `this`, so
+// `new Local()` needs no qualifier -- findClass cannot see it, because a local
+// class is deliberately not a member of the enclosing type (JLS 6.3).
+func (ctx *methodCtx) inScopeOf(cl *ast.Class) bool {
+	for e := ctx.env; e != nil; e = e.parent {
+		for _, l := range e.locals {
+			if l == cl {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func findEnclosing(from, target *ast.Class) *ast.Class {
@@ -2628,6 +2918,16 @@ func (ctx *methodCtx) checkUnqualifiedCall(v *ast.Call, want ast.Type) {
 		}
 		v.Method = m
 		v.Static = m.IsStatic()
+		// An unqualified instance call runs on the enclosing instance, which
+		// inside a lambda is the instance the lambda was created in and not the
+		// closure object the body is compiled into. Naming that instance as the
+		// receiver is what makes the closure carry it and what keeps the call
+		// from dispatching back into the lambda's own method.
+		if !m.IsStatic() && ctx.lambda != nil {
+			if ctx.thisUse(v.Pos, "method "+callSignature(m)) {
+				v.Recv = ctx.implicitThis(v.Pos)
+			}
+		}
 		v.SetType(ctx.c.subst(m.Result, s.targs))
 		return
 	}
@@ -2675,6 +2975,27 @@ func (ctx *methodCtx) checkUnqualifiedCall(v *ast.Call, want ast.Type) {
 	}
 	ctx.errf(v.Pos, "TY-TYP-0076", "cannot find method %s(%s)", v.Name, argTypes(v.Args))
 	v.SetType(ast.ErrorType{})
+}
+
+// implicitThis is the receiver an unqualified instance member access runs on:
+// the instance the enclosing method was called on, or, from inside a lambda,
+// the instance the lambda was created in (JLS 15.27.2).
+func (ctx *methodCtx) implicitThis(pos source.Pos) ast.Expr {
+	return &ast.This{ExprBase: ast.ExprBase{Pos: pos, T: &ast.ClassType{Class: ctx.cl, Args: typeVarArgs(ctx.cl)}},
+		Var: ctx.thisVar(ctx.cl)}
+}
+
+// callSignature renders a method the way a diagnostic names it: "apply(int)".
+func callSignature(m *ast.Method) string {
+	var parts []string
+	for _, p := range m.Params {
+		if p == nil {
+			parts = append(parts, "?")
+			continue
+		}
+		parts = append(parts, p.String())
+	}
+	return m.Name + "(" + strings.Join(parts, ", ") + ")"
 }
 
 func (ctx *methodCtx) thisVar(cl *ast.Class) *ast.Var {
@@ -2740,6 +3061,19 @@ func (ctx *methodCtx) checkMethodCall(v *ast.Call, rt ast.Type, want ast.Type) {
 		return
 	}
 	cands := ctx.c.methodsFor(recvCT, v.Name)
+	if len(cands) == 0 {
+		// an intersection bound reaches past the erasure: try the other bounds
+		// before giving up
+		for _, alt := range ctx.recvClasses(rt) {
+			if alt.Class == recvCT.Class {
+				continue
+			}
+			if more := ctx.c.methodsFor(alt, v.Name); len(more) > 0 {
+				cands, recvCT = more, alt
+				break
+			}
+		}
+	}
 	if len(cands) == 0 {
 		if ctx.tryExtensionMethod(v, rt) {
 			return
@@ -2817,6 +3151,33 @@ func visName(m ast.Mods) string {
 		return "protected"
 	}
 	return "package"
+}
+
+// recvClasses lists every reference type a receiver expression can be looked
+// up in. For an intersection bound (JLS 4.4: `<T extends A & B>`) the variable
+// has the members of all of its bounds, not only the leftmost one -- that one
+// is the erasure, not the whole type. Every other receiver answers with the
+// single class recvClass gives.
+func (ctx *methodCtx) recvClasses(t ast.Type) []*ast.ClassType {
+	if tv, ok := t.(*ast.TypeVarType); ok && len(tv.Var.Bounds) > 1 {
+		var out []*ast.ClassType
+		seen := map[*ast.Class]bool{}
+		for _, b := range tv.Var.Bounds {
+			ct, ok := ctx.c.erasure(b).(*ast.ClassType)
+			if !ok || ct.Class == nil || seen[ct.Class] {
+				continue
+			}
+			seen[ct.Class] = true
+			out = append(out, ct)
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	if ct := ctx.recvClass(t); ct != nil {
+		return []*ast.ClassType{ct}
+	}
+	return nil
 }
 
 // recvClass unwraps a type into a receiver class type (boxing primitives).
@@ -2963,6 +3324,19 @@ func (ctx *methodCtx) checkSelect(v *ast.Select, want ast.Type) {
 		return
 	}
 	f := ctx.c.findField(ct, v.Name)
+	if f == nil {
+		// a field may come from any bound of an intersection, not only the
+		// leftmost one
+		for _, alt := range ctx.recvClasses(xt) {
+			if alt.Class == ct.Class {
+				continue
+			}
+			if f = ctx.c.findField(alt, v.Name); f != nil {
+				ct = alt
+				break
+			}
+		}
+	}
 	if f == nil {
 		ctx.errf(v.Pos, "TY-TYP-0080", "cannot find symbol %s in %s", v.Name, ct.Class.Name)
 		v.SetType(ast.ErrorType{})
@@ -3112,7 +3486,8 @@ func (ctx *methodCtx) checkLambda(lam *ast.Lambda, want ast.Type) {
 	cl.Methods[m.Name] = append(cl.Methods[m.Name], m)
 	c.addCtor(cl, &ast.Method{Name: "<init>", IsCtor: true, Owner: cl, Mods: ast.ModPublic, Result: ast.TVoid, SynthKind: "lambda-ctor"})
 	// check the body in the lambda's scope
-	lctx := &methodCtx{c: c, cl: ctx.cl, m: m, env: ctx.env, lambda: lam}
+	lam.Outer = ctx.lambda
+	lctx := &methodCtx{c: c, cl: ctx.cl, m: m, env: ctx.env, lambda: lam, noThis: !ctx.hasThis()}
 	lctx.push()
 	outerLocals := ctx.scopes
 	lctx.scopes = append(append([]map[string]*ast.Var{}, outerLocals...), map[string]*ast.Var{})
@@ -3132,9 +3507,6 @@ func (ctx *methodCtx) checkLambda(lam *ast.Lambda, want ast.Type) {
 		p.Sym = lctx.declare(name, t, p.Pos)
 		m.ParamVars = append(m.ParamVars, p.Sym)
 	}
-	if isStaticCtx(ctx.cl) || ctx.m != nil && ctx.m.IsStatic() {
-		// static context lamdbdas cannot capture this
-	}
 	switch b := lam.Body.(type) {
 	case ast.Expr:
 		if ast.IsPrim(m.Result, ast.Void) {
@@ -3152,11 +3524,15 @@ func (ctx *methodCtx) checkLambda(lam *ast.Lambda, want ast.Type) {
 		}
 	}
 	if lam.CapThis {
-		// `this` of the enclosing class is captured as a field
-		f := &ast.Field{Name: "this", Type: &ast.ClassType{Class: ctx.cl, Args: typeVarArgs(ctx.cl)},
+		// The instance the lambda was created in is captured like any other
+		// variable, under the name code generation reads for it: cap_this. It
+		// is registered as a capture rather than as an instance field of the
+		// synthetic class so that it travels with the rest of them -- the
+		// struct slot, the reference layout the collector walks, and the store
+		// the closure does when it is created.
+		cv := &ast.Var{Name: "this", Type: &ast.ClassType{Class: ctx.cl, Args: typeVarArgs(ctx.cl)}, ID: -1}
+		cl.CapFields[cv] = &ast.Field{Name: "this", Type: cv.Type,
 			Mods: ast.ModPrivate | ast.ModFinal, Pos: lam.Pos, Storage: true, Owner: cl}
-		cl.Fields = append(cl.Fields, f)
-		cl.FieldMap["this"] = f
 	}
 	// captured variables become fields of the synthetic class
 	for _, v := range lam.Captures {

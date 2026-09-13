@@ -1,0 +1,94 @@
+// A sealed hierarchy decides its own values, so a switch *expression* over one
+// is checked for exhaustiveness: naming every permitted subtype needs no
+// default, and a value that no case could take is a compile-time error
+// (TY-TYP-0096) rather than a zero value. javac 25 accepts every switch
+// expression below and prints the same lines for them.
+//
+// A switch *statement* stays lenient, as docs/language.md §6.4 says: the one at
+// the end of main covers a single subtype and is rejected by javac, which is
+// the divergence this program pins down.
+
+sealed interface Shape permits Circle, Square, Blob {
+  double area()
+}
+
+record Circle(double r) implements Shape {
+  public double area() {
+    return 3.0 * r * r
+  }
+}
+
+record Square(double side) implements Shape {
+  public double area() {
+    return side * side
+  }
+}
+
+// A permitted subtype that is sealed in turn: a case that names Blob covers
+// Dot and Ring, because every one of them is a Blob.
+sealed interface Blob extends Shape permits Dot, Ring {
+  double area()
+}
+
+record Dot() implements Blob {
+  public double area() {
+    return 0.0
+  }
+}
+
+record Ring(double inner) implements Blob {
+  public double area() {
+    return 3.0 * inner * inner
+  }
+}
+
+class Main {
+  // every permitted subtype named, directly or through a supertype
+  static String kind(Shape s) {
+    return switch (s) {
+      case Circle c -> "circle " + c.r()
+      case Square q -> "square " + q.side()
+      case Blob b -> "blob " + b.area()
+    }
+  }
+
+  // Blob itself is never named: its own permitted subtypes are what the cases
+  // cover, and a sealed type is exhaustive when each of them is
+  static String area(Shape s) {
+    return switch (s) {
+      case Circle c -> "circle " + c.r()
+      case Square q -> "square " + q.side()
+      case Dot d -> "dot"
+      case Ring r -> "ring " + r.inner()
+    }
+  }
+
+  // a pattern whose type is a supertype of the selector's is total: it covers
+  // the whole switch on its own
+  static String any(Shape s) {
+    return switch (s) {
+      case Shape x -> "shape"
+    }
+  }
+
+  static String everything(Shape s) {
+    return switch (s) {
+      case Object o -> "object"
+    }
+  }
+
+  public static void main(String[] args) {
+    System.out.println(kind(new Circle(2.0)))
+    System.out.println(kind(new Square(3.0)))
+    System.out.println(kind(new Dot()))
+    System.out.println(kind(new Ring(1.0)))
+    System.out.println(area(new Circle(1.0)) + ", " + area(new Dot()) + ", " + area(new Ring(2.0)))
+    System.out.println(any(new Square(4.0)) + " " + everything(new Ring(0.5)))
+
+    Shape s = new Square(5.0)
+    switch (s) {
+      case Circle c -> System.out.println("statement: circle")
+    }
+    System.out.println("statement done " + s.area())
+  }
+}

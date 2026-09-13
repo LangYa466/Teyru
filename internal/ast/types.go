@@ -63,26 +63,52 @@ type ClassType struct {
 	Args  []Type
 }
 
+// A type half-built by inference can reach String() with a nil Class or nil
+// argument -- a diagnostic must print something rather than crash the compiler.
+// The placeholders below are what those print as.
+const (
+	unknownClass = "?"
+	unknownArg   = "?"
+	unknownVar   = "?"
+)
+
 func (c *ClassType) String() string {
+	name := unknownClass
+	if c.Class != nil {
+		name = c.Class.Name
+	}
 	if len(c.Args) == 0 {
-		return c.Class.Name
+		return name
 	}
 	parts := make([]string, len(c.Args))
 	for i, a := range c.Args {
-		parts[i] = a.String()
+		parts[i] = unknownArg
+		if a != nil {
+			parts[i] = a.String()
+		}
 	}
-	return c.Class.Name + "<" + strings.Join(parts, ", ") + ">"
+	return name + "<" + strings.Join(parts, ", ") + ">"
 }
 
 // ArrayType is T[].
 type ArrayType struct{ Elem Type }
 
-func (a *ArrayType) String() string { return a.Elem.String() + "[]" }
+func (a *ArrayType) String() string {
+	if a.Elem == nil {
+		return "?[]"
+	}
+	return a.Elem.String() + "[]"
+}
 
 // TypeVarType references a generic parameter.
 type TypeVarType struct{ Var *TypeVar }
 
-func (t *TypeVarType) String() string { return t.Var.Name }
+func (t *TypeVarType) String() string {
+	if t.Var == nil {
+		return unknownVar
+	}
+	return t.Var.Name
+}
 
 // NullType is the type of `null`.
 type NullType struct{}

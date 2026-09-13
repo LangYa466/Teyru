@@ -26,6 +26,14 @@ typedef struct tyarr {
   char *data;
   int32_t esize;
   int32_t refs; /* 1 when elements are object references */
+  /* The class the array promised for its elements, recorded by the `new T[]`
+     the array came from. Java's arrays are covariant but their element type is
+     fixed at creation, so a store through a wider view (Object[] o = new
+     String[2]) has to reject a value the array never promised; elemcls is what
+     ty_array_store_ref compares against. NULL means the array carries no
+     promise and accepts any reference, which is what every array the runtime
+     itself creates does. */
+  tyclass *elemcls;
 } tyarr;
 
 typedef struct tymap {
@@ -155,19 +163,58 @@ tystr *ty_str_replace(tystr *s, uint16_t a, uint16_t b);
 int32_t ty_str_isempty(tystr *s);
 int32_t ty_str_toint(tystr *s);
 
+/* ---- interfaces / casts ---------------------------------------------- */
+/* Declared before the arrays: the array store test below calls ty_instanceof
+   for the values whose class is not the one the array promised. */
+void *ty_itab(void *o, int32_t sel);
+int32_t ty_instanceof(void *o, tyclass *c);
+void *ty_checkcast(void *o, tyclass *c);
+
 /* ---- arrays ----------------------------------------------------------- */
 tyarr *ty_array_new(int64_t len, int64_t elemsize);
 int64_t ty_array_len(tyarr *a);
 tyarr *ty_array_clone(tyarr *a, int64_t elemsize);
-void ty_array_store_ref(tyarr *a, int64_t i, void *v);
+
+/* Store the reference v into element i of a, applying the array store check
+   Java applies to a covariant store: a value whose class the array's element
+   class never promised is an ArrayStoreException, not a silent write. The null
+   test and the bounds test come first, in Java's order.
+
+   selem is the element class at the store site. It lets the two common cases
+   skip the test, which is what keeps the check off the hot path:
+
+   - an array that carries no promise (elemcls == NULL) accepts anything, as it
+     did before element classes were recorded;
+   - an array whose promise is exactly selem cannot fail this store. The
+     compiler accepted the store, so the value's static type is assignable to
+     selem, and assignability is about the class hierarchy: whatever value
+     arrives, its class is a subtype of selem -- which is the class this array
+     promised. The test would always pass, so it is not made.
+
+   Anything else is checked: the value's own class first, then its subtyping,
+   so `Object[] o = new String[2]; o[0] = "x"` costs one compare.
+
+   The first test is deliberately `a->elemcls != selem` rather than the two
+   tests it spells out, so that the case a caller spends its time in -- a store
+   into an array that really is an selem[] -- costs one load, one compare and
+   one branch. Everything the first test does not answer falls into the second
+   test, which is written the long way round because it has to be right, not
+   quick.
+
+   The generated code inlines this, so the fast path is a compare and a store;
+   the compiler's generated store sites pass &cls_<element type> for selem. */
+static inline void ty_array_store_ref(tyarr *a, tyclass *selem, int64_t i, void *v) {
+  if (!a) ty_npe();
+  if (i < 0 || i >= a->len) ty_aioobe(i, a->len);
+  if (a->elemcls != selem && a->elemcls && v &&
+      ((tyobj *)v)->cls != a->elemcls && !ty_instanceof(v, a->elemcls)) {
+    ty_arraystore();
+  }
+  ((void **)a->data)[i] = v;
+}
 void *ty_arr_ptr(tyarr *a, int64_t i);
 void *ty_arr_slot_ref(tyarr *a, int64_t i);
 void *ty_arr_ref(tyarr *a, int64_t i);
-
-/* ---- interfaces / casts ---------------------------------------------- */
-void *ty_itab(void *o, int32_t sel);
-int32_t ty_instanceof(void *o, tyclass *c);
-void *ty_checkcast(void *o, tyclass *c);
 
 /* ---- boxing ----------------------------------------------------------- */
 void *ty_box_int(int32_t v);
@@ -265,6 +312,13 @@ int32_t ty_double_hash(void *o);
 int32_t ty_long_toint(void *o);
 int32_t ty_dhash_bits(double d);
 int32_t ty_fhash_bits(float f);
+/* the six java.lang.Number conversions, for any boxed numeric receiver */
+int32_t ty_num_int(void *o);
+int64_t ty_num_long(void *o);
+double ty_num_double(void *o);
+float ty_num_float(void *o);
+int8_t ty_num_byte(void *o);
+int16_t ty_num_short(void *o);
 int32_t ty_abs_int(int32_t v);
 int64_t ty_abs_long(int64_t v);
 double ty_abs_double(double v);

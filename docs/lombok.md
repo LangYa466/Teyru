@@ -66,13 +66,13 @@ System.out.println(p)                  // Person(name=ada, age=36)
 | `@Singular` | ✅ 完整 | 逐項加入、整批加入、清除、`build()` 取得副本；`@Singular("name")` 可改名；見 §4 |
 | `@Jacksonized` | ❌ 不適用 | 沒有 Jackson，註解被接受但不產生任何東西 |
 | `@Builder.ObtainVia` | ✅ 完整 | `field`／`method` 兩種形式 |
-| `@onMethod_`／`@onParam_`／`@onConstructor_` | ⚠️ 有限 | 會被解析，但註解不會被複製到產生的成員上 |
-| `@CustomLog` | ❌ 不支援 | 需要 `lombok.config` 的 `lombok.log.custom.declaration`；Teyru 不讀設定檔，所以回報 `TY-INT-0006` 而不是默默不產生東西 |
+| `@onMethod_`／`@onParam_`／`@onConstructor_` | ✅ 完整 | 註解被複製到產生的 getter／setter 參數／建構子上（見 §3.5） |
+| `@CustomLog` | ✅ 完整 | 讀 `lombok.config` 的 `lombok.log.custom.declaration`（見 §3.5） |
 
 「完整」的定義：`tests/programs/t16`–`t19`、`t54` 有對應的測試，`go test ./...` 會驗證輸出；
-`t55_lombok_every.teyru` 在一支程式裡把上表每一個 ✅ 的註解各用一次，輸出逐行比對。
-唯一的 ⚠️ 一列（`@onMethod_`／`@onParam_`／`@onConstructor_`）沒有被 `t55` 涵蓋，
-它只做到「剖析後忽略」。
+`t55_lombok_every.teyru` 在一支程式裡把上表每一個 ✅ 的註解各用一次，輸出逐行比對；
+`t91_lombok_log.teyru` 涵蓋 `@Log`、`@CustomLog`（含 `lombok.config`）與 `@onX` 家族。
+上表已無 ⚠️ 一列。
 （寫 `t55` 時才發現 `@Builder.Default`、`@StandardException`、回傳值的 `@Synchronized`
 三個「文件說完成、實際沒測過」的 bug，已修。）
 
@@ -156,10 +156,58 @@ class Person {
    Lombok 對「直接指派欄位」的檢查在此不適用。
 3. **`@Singular` 傳的是可變副本**，不是 `Collections.unmodifiableList` 包裝（見 §4）。
 4. **`@SuperBuilder` 產生一個攤平的 builder**，不是 builder 繼承鏈（見 §4）。
-5. **`@onX` 註解不會被複製**到產生出來的成員上（沒有 `java.lang.annotation` 執行期）。
-6. **`lombok.config` 不被讀取**，所有設定都必須寫在註解參數上；需要設定檔的
-   `@CustomLog` 因此回報 `TY-INT-0006`。
+5. **`@onX` 註解只會被複製，不會被執行。** 註解字面上會掛到產生出來的成員上，
+   但 Teyru 沒有 `java.lang.annotation` 的執行期，所以 `@Deprecated` 之類的標記
+   不會有任何效果；需要反射讀取註解的框架在此不適用。
+6. **只讀 `lombok.config` 的一個鍵。** `lombok.log.custom.declaration`
+   （`@CustomLog` 用）會被讀取；其餘鍵與 `config.stopBubbling` 都不讀，搜尋一律
+   走到檔案系統根目錄。
 7. **`@Value` 的欄位一定是 private final**；若欄位已經有初始值，建構子不會再收它。
+
+---
+
+## 3.5 `@onX` 家族與 `@CustomLog`
+
+### `@onMethod_`／`@onParam_`／`@onConstructor_`
+
+這些選項把一個註解複製到另一個註解產生出來的成員上：
+
+```teyru
+class Annotated {
+  @Getter(onMethod_ = @Deprecated) String name
+  @Getter @Setter(onParam_ = @Deprecated) int age
+}
+
+@AllArgsConstructor(onConstructor_ = @Deprecated)
+class Made { String a; int b }
+```
+
+`onMethod_` 掛到 getter 上，`onParam_` 掛到 setter 的參數上，`onConstructor_`
+掛到產生的建構子上。兩種寫法都讀：Lombok 的參數形式（含 javac7 時代的 `@__(...)`
+包裝）與緊鄰在旁邊的 `@onMethod_Deprecated` 裸寫法。
+
+註解只是**被複製**，不會被執行——Teyru 沒有 `java.lang.annotation` 的執行期，
+所以標記本身沒有作用，是給後續的編譯器階段讀的。
+
+### `@CustomLog`
+
+Lombok 只用 `lombok.config` 設定這一個註解。Teyru 讀
+`lombok.log.custom.declaration`，格式與 Lombok 相同：
+
+```
+lombok.log.custom.declaration = MyLog MyLog.of(NAME)
+```
+
+第一個字是 logger 型別，後面是建立它的樣式；`NAME` 會被代換成掛註解的類別名稱，
+`TYPE` 在 Lombok 是類別物件。**Teyru 不支援 `TYPE`**：樣式裡的引數會傳給一個
+靜態工廠，而 Teyru 的 `X.class`（見 `docs/language.md`）能表達的只有名稱，
+硬傳會產生一個對不上工廠參數的東西，因此回報 `TY-INT-0006` 並要求改用 `NAME`。
+
+搜尋規則與 Lombok 相同：從來源檔所在目錄往上找最近的 `lombok.config`，每個鍵
+最近的一份為準。差別是 `config.stopBubbling` 不被讀取，搜尋一律走到根目錄。
+
+若宣告的型別找不到，回報 `TY-INT-0006`；找不到 `log` 符號時則是一般的
+`TY-TYP-0048`。
 
 ---
 

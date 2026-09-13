@@ -83,16 +83,75 @@ func (e *Emitter) coerce(v string, src, dst ast.Type) string {
 	return v
 }
 
+// classLiteralTarget is the C tyclass a class literal's Class object names.
+func (e *Emitter) classLiteralTarget(v *ast.ClassLit) string {
+	switch t := v.Type.Resolved.(type) {
+	case *ast.ClassType:
+		return "&cls_" + mangle(t.Class.Full)
+	case *ast.PrimType:
+		// A primitive type is not one of the program's classes and no value is
+		// ever an instance of it, so its class object names a class emitted for
+		// the literal itself (emitPrimClassMeta). Naming the wrapper class
+		// instead would answer "teyru.Integer" for int.class and make it equal
+		// to Integer.class, which Java keeps apart.
+		e.primClasses[t.Kind] = true
+		return "&cls_" + primClassName(t.Kind)
+	case *ast.ArrayType:
+		// Every array value is an instance of the one synthetic teyru.Array
+		// class, so that is the class `A[].class` denotes; naming a class per
+		// element type, as Java does, would make the literal a class no array
+		// is an instance of.
+		if a := e.prog.ArrayClass(); a != nil {
+			return "&cls_" + mangle(a.Full)
+		}
+	}
+	return "&cls_" + mangle(e.prog.Builtins.Object.Full)
+}
+
+// classObject renders a class literal as the Class object it denotes: the same
+// kind of value Object.getClass() returns, built by the same runtime helper and
+// equal to it, since the wrapper is cached per class.
+//
+// The literal used to render as the raw tyclass handle `(tyobj*)&cls_A`, which
+// every other consumer reads as an object: the class's *name* sits exactly
+// where an object keeps its class pointer, so println dispatched on the name
+// and jumped through it.
+//
+// ty_class_of_cls wraps the class of the object it is handed, so the named
+// tyclass rides in the header of a throwaway object -- a compound literal,
+// whose address is good for the enclosing statement expression. The second
+// argument is this program's Class, which the runtime needs to make the wrapper
+// an instance of it; dispatch, instanceof and casts then work as for any other
+// object.
+func (e *Emitter) classObject(v *ast.ClassLit) string {
+	cls := e.classLiteralTarget(v)
+	wrap, ok := v.GetType().(*ast.ClassType)
+	if !ok {
+		// The checker types every class literal as the prelude's Class
+		// (sema.classLiteralType); rendering the bare handle keeps an internal
+		// invariant from becoming a panic, which the compiler path forbids.
+		return "((tyobj*)" + cls + ")"
+	}
+	return "({ extern " + classOfProto + "; ty_class_of_cls(&(tyobj){(tyclass*)" + cls +
+		"}, (void*)&cls_" + mangle(wrap.Class.Full) + "); })"
+}
+
 func (e *Emitter) boxCall(v string, p *ast.PrimType, dst ast.Type) string {
 	fn := boxFn(p.Kind)
 	if fn == "" {
 		return v
 	}
+	// The formal a boxed argument is passed to is the *erased* one: an
+	// unbounded type variable erases to Object, a bounded one to its bound.
+	// coerce has already erased dst, so what arrives here is that reference
+	// type -- `Number` for `class Bag<T extends Number>` -- and not the box
+	// class the call site substituted. Boxing to the argument's own wrapper
+	// and casting to the erasure is what `M_Bag__init__0(C_Bag*,
+	// C_teyru_Number*)` expects; without the cast `new Bag<Integer>(7)`
+	// passes a bare `int` where the pointer goes.
 	switch d := dst.(type) {
 	case *ast.ClassType:
-		if d.Class.Special == "box" || d.Class.Special == "Object" {
-			return "(" + cname(d.Class) + "*)" + fn + "(" + v + ")"
-		}
+		return "(" + cname(d.Class) + "*)" + fn + "(" + v + ")"
 	case *ast.TypeVarType:
 		return "(void*)" + fn + "(" + v + ")"
 	}
@@ -193,24 +252,24 @@ func (e *Emitter) expr(x ast.Expr) string {
 	case *ast.Conv:
 		return e.coerce(e.expr(v.X), v.X.GetType(), v.GetType())
 	case *ast.This:
-		if e.curLambda != nil && v.Qual == "" && e.curLambda.CapThis {
-			return "((" + e.ctype(v.GetType()) + ")this->cap_this)"
-		}
-		if v.Qual != "" {
-			if cl := e.prog.LookupClass(v.Qual); cl != nil {
-				return "(" + cname(cl) + "*)" + e.outerAccess(cl)
+		if v.Qual == "" {
+			// A synthesized node (the Lombok pass builds `this` by hand) can
+			// reach here without a type. The cast narrows the instance to the
+			// static type of this use; when there is none to narrow to, the
+			// instance itself is the answer -- `((void)this)` is not.
+			if t := v.GetType(); t == nil || t == ast.TVoid {
+				return e.thisExpr()
 			}
-			return "((void*)this)"
+			return "((" + e.ctype(v.GetType()) + ")" + e.thisExpr() + ")"
 		}
-		return "this"
+		if cl := e.prog.LookupClass(v.Qual); cl != nil {
+			return "(" + cname(cl) + "*)" + e.outerAccess(cl)
+		}
+		return "((void*)" + e.thisExpr() + ")"
 	case *ast.SuperExpr:
-		return "((void*)this)"
+		return "((void*)" + e.thisExpr() + ")"
 	case *ast.ClassLit:
-		t := v.Type.Resolved
-		if ct, ok := t.(*ast.ClassType); ok {
-			return "((tyobj*)&cls_" + mangle(ct.Class.Full) + ")"
-		}
-		return "((tyobj*)&cls_" + mangle(e.prog.Builtins.Object.Full) + ")"
+		return e.classObject(v)
 	case *ast.Lambda:
 		return e.lambdaExpr(v)
 	case *ast.MethodRef:
@@ -291,7 +350,7 @@ func (e *Emitter) ident(v *ast.Ident) string {
 		if e.curClass != nil && r.Owner != nil && r.Owner != e.curClass && !r.Mods.Has(ast.ModStatic) {
 			return e.outerFieldAccess(r)
 		}
-		return e.fieldAccess(r, "this")
+		return e.fieldAccess(r, e.thisExpr())
 	case *ast.Var:
 		if r == nil {
 			return "0"
@@ -304,13 +363,55 @@ func (e *Emitter) ident(v *ast.Ident) string {
 	return "0"
 }
 
+// thisExpr is the C expression for the instance the code being emitted runs
+// on. In a lambda body that is not the closure object: Java's `this` inside a
+// lambda is the instance the lambda was created in (JLS 15.27.2), and the
+// closure reaches that instance through the field it captured for it. An
+// unqualified call, a bare field name and `this` itself all go through here,
+// so none of them can land on the lambda object by accident.
+func (e *Emitter) thisExpr() string {
+	if f := e.capThisField(e.curLambda); f != nil {
+		return "this->cap_" + mangle(f.Name)
+	}
+	return "this"
+}
+
+// capThisField is the field a lambda holds the instance its body calls `this`,
+// or nil when the body does not need one. The checker adds it as a capture
+// under the name `this` when the body uses the enclosing instance, and the
+// capture mechanism gives it the struct slot `cap_this`.
+func (e *Emitter) capThisField(lam *ast.Lambda) *ast.Field {
+	if lam == nil || !lam.CapThis || lam.Class == nil {
+		return nil
+	}
+	for _, f := range lam.Class.CapFields {
+		if f.Name == "this" {
+			return f
+		}
+	}
+	return nil
+}
+
+// enclosureOf is the class of the instance a lambda body's `this` denotes, or
+// nil when the body does not use the enclosing instance.
+func (e *Emitter) enclosureOf(lam *ast.Lambda) *ast.Class {
+	f := e.capThisField(lam)
+	if f == nil {
+		return nil
+	}
+	if ct, ok := f.Type.(*ast.ClassType); ok {
+		return ct.Class
+	}
+	return nil
+}
+
 // outerAccess walks the enclosing-instance chain to the class that owns an
 // outer object, for references from a nested or inner class.
 func (e *Emitter) outerAccess(target *ast.Class) string {
-	recv := "this"
+	recv := e.thisExpr()
 	for cl := e.curClass; cl != nil && cl != target; cl = cl.Outer {
 		if cl.OuterField == nil || cl.Outer == nil {
-			return "((void*)this)"
+			return "((void*)" + e.thisExpr() + ")"
 		}
 		recv = "((" + cname(cl.Outer) + "*)" + recv + "->f_" + mangle(cl.OuterField.Name) + ")"
 	}
@@ -383,6 +484,23 @@ func needsClinit(cl *ast.Class, seen map[*ast.Class]bool) bool {
 	return false
 }
 
+// fieldRead reads an instance field through a receiver expression. Java reads
+// the receiver before the field, so a null one has to answer with a
+// NullPointerException instead of a load from address zero: the receiver is
+// bound once, tested, and only then dereferenced. The test is a compare and a
+// branch the compiler folds away when it can see the receiver is not null, and
+// that the branch predictor answers the same way when it cannot.
+//
+// A read of an implicit `this.f` does not come through here — ident renders it
+// directly, and `this` is null only for a method that was entered through a call
+// the generator binds without a test, which is a gap of its own.
+func (e *Emitter) fieldRead(f *ast.Field, recv ast.Expr) string {
+	n := e.tmpName()
+	ct := cname(f.Owner)
+	return "({ " + ct + "* " + n + " = (" + ct + "*)" + e.expr(recv) + ";" +
+		" if (!" + n + ") ty_npe(); " + n + "->f_" + mangle(f.Name) + "; })"
+}
+
 // fieldAccess renders a field read through a receiver expression.
 func (e *Emitter) fieldAccess(f *ast.Field, recv string) string {
 	if f.Owner == nil {
@@ -408,8 +526,7 @@ func (e *Emitter) selectExpr(v *ast.Select) string {
 		if f.Mods.Has(ast.ModStatic) {
 			return e.fieldAccess(f, "")
 		}
-		recv := e.expr(v.X)
-		return e.fieldAccess(f, e.tmpRef(recv))
+		return e.fieldRead(f, v.X)
 	}
 	return "0"
 }
@@ -655,7 +772,12 @@ func (e *Emitter) lvalue(x ast.Expr) string {
 			if f.Mods.Has(ast.ModStatic) {
 				return "G_" + mangle(f.Owner.Full) + "_" + mangle(f.Name)
 			}
-			return e.fieldAccess(f, "this")
+			// a bare name is a field of the instance the code runs on, which
+			// inside a lambda body is the instance the lambda was created in
+			if e.curClass != nil && f.Owner != nil && f.Owner != e.curClass {
+				return e.outerFieldAccess(f)
+			}
+			return e.fieldAccess(f, e.thisExpr())
 		}
 		return e.ident(v)
 	case *ast.Select:
@@ -1052,6 +1174,15 @@ func (e *Emitter) targetClinit(x ast.Expr) string {
 
 func (e *Emitter) assign(v *ast.Assign) string {
 	pre := e.targetClinit(v.X)
+	// A plain store of a reference into an array element goes through the
+	// runtime's checked store, which is what makes an array reject a value its
+	// element class never promised. targetClinit never wraps an index target, so
+	// the check for one costs nothing here.
+	if ix, ok := v.X.(*ast.Index); ok && v.Op == "=" && pre == "" {
+		if selem := e.elemClass(ix.GetType()); selem != "" {
+			return e.refElemStore(ix, selem, e.coerce(e.expr(v.Y), v.Y.GetType(), v.X.GetType()))
+		}
+	}
 	if v.Op == "=" {
 		lv := e.lvalue(v.X)
 		if pre != "" {
@@ -1120,6 +1251,25 @@ func (e *Emitter) assignInner(v *ast.Assign, lv string) string {
 	return "(" + lv + " " + op + "= " + e.operand(v.Y, v.OpType) + ")"
 }
 
+// refElemStore renders the store of val into ix, an element of an array of
+// references, as one statement expression. selem is the element class at the
+// store site, which the runtime store check compares the array's own element
+// class against (see ty_array_store_ref in tyrt.h).
+//
+// The order is Java's for an array assignment: the array, then the index, then
+// the value, and only then the tests, which is why the value is bound to a
+// temporary first. The result of the assignment is the stored value, so it is
+// the last expression of the statement expression.
+func (e *Emitter) refElemStore(ix *ast.Index, selem, val string) string {
+	n := e.tmpName()
+	k := e.tmpName()
+	v := e.tmpName()
+	t := e.ctype(ix.GetType())
+	return "({ tyarr* " + n + " = (tyarr*)" + e.expr(ix.X) + "; int64_t " + k + " = (int64_t)(" +
+		e.expr(ix.Index) + "); " + t + " " + v + " = (" + t + ")(" + val + ");" +
+		" ty_array_store_ref(" + n + ", " + selem + ", " + k + ", (void*)" + v + "); " + v + "; })"
+}
+
 // ---------------------------------------------------------------- calls
 
 func (e *Emitter) callExpr(v *ast.Call) string {
@@ -1153,9 +1303,15 @@ func (e *Emitter) callExpr(v *ast.Call) string {
 	if !m.IsStatic() {
 		switch {
 		case v.Recv == nil:
-			recv = "this"
+			// an unqualified call is a call on the instance the code runs on.
+			// The checker names the enclosing instance for a lambda body, so a
+			// call that still arrives without a receiver is a method of the
+			// class the body was written in: inside a lambda `this` is that
+			// instance, not the closure object, or the call would dispatch back
+			// into the lambda's own method and recurse until the stack ran out.
+			recv = e.thisExpr()
 		case v.Super:
-			recv = "((void*)this)"
+			recv = "((void*)" + e.thisExpr() + ")"
 		default:
 			recv = e.expr(v.Recv)
 		}
@@ -1178,7 +1334,7 @@ func (e *Emitter) callExpr(v *ast.Call) string {
 	}
 	if v.Recv == nil {
 		if m.Selector >= 0 || m.VIndex >= 0 {
-			return e.virtCall(m, cname(m.Owner)+"*", "this", v.Args)
+			return e.virtCall(m, cname(m.Owner)+"*", e.thisExpr(), v.Args)
 		}
 		return name + "(" + a + ")"
 	}
@@ -1287,7 +1443,7 @@ func (e *Emitter) newExpr(v *ast.New) string {
 	fmt.Fprintf(&b, "({ %s %s = (%s)ty_alloc(sizeof(%s)); %s->obj.cls = &cls_%s;",
 		cname(cl)+"*", n, cname(cl)+"*", cname(cl), n, mangle(cl.Full))
 	if cl.Inner && cl.OuterField != nil {
-		fmt.Fprintf(&b, " %s->f_%s = (%s*)%s;", n, mangle(cl.OuterField.Name), cname(cl.Outer), e.outerArg(v))
+		fmt.Fprintf(&b, " %s->f_%s = (%s*)%s;", n, mangle(cl.OuterField.Name), cname(cl.Outer), e.outerArg(v, cl.Outer))
 	}
 	if init := e.clinitStmt(cl); init != "" {
 		fmt.Fprintf(&b, " %s", strings.TrimSuffix(init, "\n"))
@@ -1316,11 +1472,44 @@ func (e *Emitter) argsWithCaptures(n string, v *ast.New, cl *ast.Class) string {
 	return a
 }
 
-func (e *Emitter) outerArg(v *ast.New) string {
+// outerArg is the enclosing instance an inner class's new object is created
+// with, as seen from the code doing the creating. It is not always `this`: a
+// local class declared inside another local class reaches the outer instance
+// through the chain of captured references, and `this` there is the innermost
+// object -- storing it as the outer instance of a class further out reads
+// whatever happens to lie at that offset.
+func (e *Emitter) outerArg(v *ast.New, outer *ast.Class) string {
 	if v.Outer != nil {
 		return e.expr(v.Outer)
 	}
-	return "this"
+	if outer == nil {
+		return e.thisExpr()
+	}
+	return e.outerAccess(outer)
+}
+
+// elemClass is the C expression for the one class an array of elem promises its
+// elements are, or "" when the element type is not a single class. A primitive
+// array holds no references, and Teyru has one runtime class for every array
+// type, so an array of arrays cannot name the class its elements have either.
+func (e *Emitter) elemClass(elem ast.Type) string {
+	ct, ok := e.prog.Erased(elem).(*ast.ClassType)
+	if !ok {
+		return ""
+	}
+	return "&cls_" + mangle(ct.Class.Full)
+}
+
+// elemPromise renders the statement that records what an array promises for its
+// elements, which is what the store check in tyrt.h compares a value against,
+// or "" when the element type names no single class (see elemClass). An array
+// created without one is stored into unchecked, as every array was before the
+// promise was recorded.
+func (e *Emitter) elemPromise(name string, elem ast.Type) string {
+	if c := e.elemClass(elem); c != "" {
+		return " " + name + "->elemcls = " + c + ";"
+	}
+	return ""
 }
 
 func (e *Emitter) newArray(v *ast.NewArray) string {
@@ -1333,14 +1522,17 @@ func (e *Emitter) newArray(v *ast.NewArray) string {
 	if v.Init != nil {
 		return e.arrayInitOf(v.Init, elem)
 	}
+	promise := e.elemPromise("_a", elem)
 	if len(v.Dims) == 0 {
-		return "({ tyarr* _a = ty_array_new(0, " + es + "); _a->refs = " + refs + "; _a; })"
+		return "({ tyarr* _a = ty_array_new(0, " + es + "); _a->refs = " + refs + ";" + promise + " _a; })"
 	}
 	dim := e.expr(v.Dims[0])
 	if len(v.Dims) == 1 {
-		return "({ tyarr* _a = ty_array_new(" + dim + ", " + es + "); _a->refs = " + refs + "; _a; })"
+		return "({ tyarr* _a = ty_array_new(" + dim + ", " + es + "); _a->refs = " + refs + ";" + promise + " _a; })"
 	}
-	// multi-dimensional creation allocates the inner arrays as well
+	// multi-dimensional creation allocates the inner arrays as well. The outer
+	// arrays hold arrays, so they carry no promise; the recursive call gives the
+	// innermost ones theirs.
 	elemDims := &ast.NewArray{ExprBase: ast.ExprBase{Pos: v.Pos, T: v.GetType()}, Elem: v.Elem, Dims: v.Dims[1:], Extra: v.Extra}
 	inner := e.newArray(elemDims)
 	n := e.tmpName()
@@ -1364,7 +1556,7 @@ func (e *Emitter) arrayInitOf(v *ast.ArrayInit, elem ast.Type) string {
 	}
 	var b strings.Builder
 	n := e.tmpName()
-	fmt.Fprintf(&b, "({ tyarr* %s = ty_array_new(%d, %s); %s->refs = %s;", n, len(v.Elems), es, n, refs)
+	fmt.Fprintf(&b, "({ tyarr* %s = ty_array_new(%d, %s); %s->refs = %s;%s", n, len(v.Elems), es, n, refs, e.elemPromise(n, elem))
 	for i, el := range v.Elems {
 		val := e.arrayElemValue(el, elem)
 		if e.isRefElem(elem) {
@@ -1407,10 +1599,14 @@ func (e *Emitter) lambdaExpr(lam *ast.Lambda) string {
 			fmt.Fprintf(&b, " %s->cap_%s = %s;", n, mangle(v.Name), e.refExpr(lam.RecvExpr))
 			continue
 		}
+		if f := e.capThisField(lam); f != nil && f.Name == v.Name {
+			// the enclosing instance comes from the same place a use of `this`
+			// inside this body does: the closure around it, or the method the
+			// lambda was created in
+			fmt.Fprintf(&b, " %s->cap_%s = %s;", n, mangle(v.Name), e.thisExpr())
+			continue
+		}
 		fmt.Fprintf(&b, " %s->cap_%s = %s;", n, mangle(v.Name), e.localName(v))
-	}
-	if lam.CapThis {
-		fmt.Fprintf(&b, " %s->cap_this = (%s*)this;", n, cname(cl))
 	}
 	fmt.Fprintf(&b, " %s; })", n)
 	return b.String()
@@ -1428,8 +1624,17 @@ func (e *Emitter) emitLambdaMethod(cl *ast.Class, m *ast.Method) {
 	for i, pv := range m.ParamVars {
 		e.locals[pv] = fmt.Sprintf("a%d", i)
 	}
-	// captured locals live in fields of the synthetic lambda class
+	// Captured locals live in fields of the synthetic lambda class. From the
+	// body's point of view `this` is the instance the lambda was created in
+	// (JLS 15.27.2), so the class in scope is the one the body was written in,
+	// not the closure class: a bare field name and an enclosing-class reference
+	// have to resolve the way they do in that class.
+	prevLambda, prevClass := e.curLambda, e.curClass
 	e.curLambda = lam
+	if enc := e.enclosureOf(lam); enc != nil {
+		e.curClass = enc
+	}
+	defer func() { e.curLambda, e.curClass = prevLambda, prevClass }()
 	for v, f := range cl.CapFields {
 		e.locals[v] = "this->cap_" + mangle(f.Name)
 	}

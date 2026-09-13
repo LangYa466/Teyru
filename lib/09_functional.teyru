@@ -1,0 +1,77 @@
+package teyru
+
+// The functional interfaces Java programs use most, with Java's method names,
+// so a lambda written against java.util.function ports unchanged. Only the
+// default methods that carry their weight are here; the rest of the package
+// (BiConsumer, the primitive specialisations, the operator variants) is not.
+
+interface Function<T, R> {
+  R apply(T t)
+
+  default <V> Function<V, R> compose(Function<V, T> before) {
+    return v -> apply(before.apply(v))
+  }
+
+  default <V> Function<T, V> andThen(Function<R, V> after) {
+    return t -> after.apply(apply(t))
+  }
+
+  static <T> Function<T, T> identity() {
+    return t -> t
+  }
+}
+
+interface BiFunction<T, U, R> {
+  R apply(T t, U u)
+
+  default <V> BiFunction<T, U, V> andThen(Function<R, V> after) {
+    return (t, u) -> after.apply(apply(t, u))
+  }
+}
+
+interface Consumer<T> {
+  void accept(T t)
+
+  default Consumer<T> andThen(Consumer<T> after) {
+    return t -> {
+      accept(t)
+      after.accept(t)
+    }
+  }
+}
+
+interface Supplier<T> {
+  T get()
+}
+
+interface Predicate<T> {
+  boolean test(T t)
+
+  default Predicate<T> and(Predicate<T> other) {
+    return t -> test(t) && other.test(t)
+  }
+
+  default Predicate<T> or(Predicate<T> other) {
+    return t -> test(t) || other.test(t)
+  }
+
+  default Predicate<T> negate() {
+    return t -> !test(t)
+  }
+
+  static <T> Predicate<T> isEqual(Object target) {
+    return t -> target == null ? t == null : target.equals(t)
+  }
+}
+
+interface Runnable {
+  void run()
+}
+
+interface Comparator<T> {
+  int compare(T a, T b)
+
+  default Comparator<T> reversed() {
+    return (a, b) -> compare(b, a)
+  }
+}

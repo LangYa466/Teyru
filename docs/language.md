@@ -75,7 +75,17 @@
 
 `T[]`、`T[][]`、`new int[10]`、`new int[2][3]`（會建立內層陣列）、
 `new String[]{"a","b"}`、`{1,2,3}` 初始化列表。陣列有 `length` 欄位與
-`clone()` 方法；元素存取會做邊界檢查。
+`clone()` 方法；元素存取會做邊界檢查（讀取與寫入都是，null 陣列先丟
+`NullPointerException` 再檢查邊界，順序與 Java 相同）。
+
+陣列是共變的（`Object[] o = new String[2]` 合法），但建立時就記下元素型別，
+所以透過較寬的視角寫入不符合的值會丟 `ArrayStoreException`：
+
+```teyru
+Object[] o = new String[2]
+o[0] = "hello"
+o[0] = Integer.valueOf(5)   // ArrayStoreException
+```
 
 ### 3.4 `var` 與 `val`
 
@@ -409,7 +419,10 @@ try {
 - `Throwable` 家族：`Exception`、`RuntimeException`、`NullPointerException`、
   `ArithmeticException`、`ArrayIndexOutOfBoundsException`、`ClassCastException`、
   `IllegalArgumentException`、`IllegalStateException`、`NoSuchElementException`、
-  `NegativeArraySizeException`、`AssertionError`、`UnsupportedOperationException`。
+  `NegativeArraySizeException`、`ArrayStoreException`、`AssertionError`、
+  `UnsupportedOperationException`。
+- 讀取 null 參考的欄位、呼叫 null 參考的方法、對 null 參考賦值都會丟
+  `NullPointerException`。
 - `catch` 多型別用 `|`；`finally` 一定會執行（含 catch 內再拋出的情況）。
 - **沒有 checked exception 檢查**：`throws` 會被剖析但不強制。
 - 未捕捉的例外會印出訊息並以狀態 1 結束。
@@ -427,6 +440,7 @@ try {
 | `Math` | `PI`、`abs`、`max`、`min`、`sqrt`、`pow`、`floor`、`ceil`、`round`、`random` |
 | `System` | `out`、`err`、`currentTimeMillis`、`nanoTime`、`exit`、`arraycopy` |
 | `PrintStream` | `print`／`println`（String／Object／int／long／double／boolean／char／無參數） |
+| `Number` | `Byte`、`Short`、`Integer`、`Long`、`Float`、`Double` 的共同父類別，六個轉換 `intValue`／`longValue`／`doubleValue`／`floatValue`／`byteValue`／`shortValue`（窄化依 Java 規則） |
 | 包裝類別 | `Byte`、`Short`、`Integer`、`Long`、`Float`、`Double`、`Character`、`Boolean`：`valueOf`、`parseXxx`、`xxxValue`、`compareTo`、`equals`、`hashCode`、`toString` |
 | 介面 | `Cloneable`、`Comparable<T>`、`AutoCloseable`、`Iterable<T>`、`Iterator<T>` |
 | `Enum<E>` | `ordinal`、`name`、`compareTo`、`toString`、`hashCode`、`equals` |
@@ -465,15 +479,26 @@ for (String n : names) {
 7. 捕獲的區域變數不要求 effectively final。
 8. 沒有 annotation processor、沒有執行期反射、沒有 JNI。
 9. 泛型與 checked exception 的規則同 Java，但沒有 checked 檢查。
+10. 同名區域類別：Java 把區域類別限縮在它的區塊（JLS 6.3），所以同一個類別的
+    兩個方法可以各宣告一個 `class Local`；Teyru 以簡單名稱透過外圍型別解析，
+    這種寫法會回報 `TY-TYP-0001`。
+11. lambda 的型別引數推論不會從主體回推，`f.compose(v -> v * 10)` 這種沒有目標
+    型別的寫法需要寫出型別見證（javac 也拒絕該例，只是訊息不同）。
 
 ## 13. 尚未實作
 
 - checked exception 的編譯期檢查（`throws` 只被解析）
-- `sealed` 家族的窮盡性檢查
-- 反射、執行緒、`java.util` 集合、檔案與網路 I/O
+- `sealed` 的 `permits` 子句沒有被驗證：沒有 `permits` 的 sealed 型別在
+  switch 窮盡性上被視為不可判定而要求 `default`；switch **陳述式**的窮盡性
+  仍從寬
+- 反射、執行緒、檔案與網路 I/O
 - 與 Java 生態互通（JAR、JDK 類別庫、JNI）
 - 識別字中的 Unicode 逸出（`\u0041` 不能拼出識別字）
 - 泛型建構子的顯式型別引數 `new <T>Foo(...)`
 - 文字區塊的縮排細則（目前實作最小縮排去除）
-- 註解的執行期保留與讀取（`java.lang.annotation` 不存在）
+- 註解的執行期保留與讀取（`java.lang.annotation` 不存在；Lombok 的 `@onX`
+  只把註解複製到產生的成員上，不會有任何執行期效果）
 - 模組系統的語意（`import module X` 會被剖析後忽略，執行期沒有模組系統；`module-info` 不支援）
+- 陣列的執行期元素型別一律是 `teyru.Array`，所以 `String[].class` 與
+  `int[].class` 是同一個物件（Java 是兩個）
+- 標準程式庫缺口：`String.lines()`（需要 `Stream`）、`List.of(...)`

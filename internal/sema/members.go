@@ -84,9 +84,13 @@ func (c *Checker) methodEnv(cl *ast.Class, tps []*ast.TypeParam, m *ast.Method) 
 	}
 	for _, tp := range tps {
 		if len(tp.Bounds) > 0 {
-			tp.Sym.Bound = c.resolveType(menv, tp.Bounds[0])
+			for _, b := range tp.Bounds {
+				tp.Sym.Bounds = append(tp.Sym.Bounds, c.resolveType(menv, b))
+			}
+			tp.Sym.Bound = tp.Sym.Bounds[0]
 		} else {
 			tp.Sym.Bound = c.objType
+			tp.Sym.Bounds = []ast.Type{c.objType}
 		}
 	}
 	return menv
