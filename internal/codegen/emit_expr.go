@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/LangYa466/Teyru/internal/ast"
@@ -716,6 +717,14 @@ func (e *Emitter) foldBinary(v *ast.Binary) (string, bool) {
 		return "", false
 	}
 	x, y := int64(xl.Int), int64(yl.Int)
+	// JLS 15.19: only the low bits of the count are significant, and how many
+	// depends on the type the shift is performed in -- not on the int64 used
+	// here. Masking with the long width would fold an int `a << 32` to 0 where
+	// Java gives 1.
+	mask := uint((1 << shiftBitsInt) - 1)
+	if wide {
+		mask = (1 << shiftBitsLong) - 1
+	}
 	var r int64
 	switch v.Op {
 	case "+":
@@ -741,9 +750,9 @@ func (e *Emitter) foldBinary(v *ast.Binary) (string, bool) {
 	case "^":
 		r = x ^ y
 	case "<<":
-		r = x << (uint(y) & 63)
+		r = x << (uint(y) & mask)
 	case ">>":
-		r = x >> (uint(y) & 63)
+		r = x >> (uint(y) & mask)
 	default:
 		return "", false
 	}
@@ -800,9 +809,9 @@ func (e *Emitter) flatSpine(v, b *ast.Binary) bool {
 // `a - (b - c)`, keeps its parentheses because its grouping differs.
 func (e *Emitter) flatChain(v *ast.Binary) string {
 	if b, ok := v.X.(*ast.Binary); ok && e.flatSpine(v, b) {
-		return e.flatChain(b) + " " + v.Op + " " + e.flatOperand(v.Y, v)
+		return e.flatChain(b) + " " + v.Op + " " + e.flatRight(v.Y, v)
 	}
-	return e.flatOperand(v.X, v) + " " + v.Op + " " + e.flatOperand(v.Y, v)
+	return e.flatOperand(v.X, v) + " " + v.Op + " " + e.flatRight(v.Y, v)
 }
 
 // flatOperand renders one operand of a chain: a short-circuit operator tests
@@ -812,6 +821,53 @@ func (e *Emitter) flatOperand(x ast.Expr, v *ast.Binary) string {
 		return e.cond(x)
 	}
 	return e.operand(x, v.OpType)
+}
+
+// flatRight renders the right operand of a flattened link. For a shift that
+// operand is the count, and a flattened chain has to mask it exactly like the
+// nested spelling does, or the two spellings of one expression disagree.
+func (e *Emitter) flatRight(y ast.Expr, v *ast.Binary) string {
+	s := e.flatOperand(y, v)
+	if v.Op == "<<" || v.Op == ">>" {
+		return shiftCount(s, v.OpType)
+	}
+	return s
+}
+
+// shiftBitsInt and shiftBitsLong are the number of low bits of a shift count
+// that JLS 15.19 leaves significant: 5 for the int family, 6 for long. Every
+// other bit of the count is discarded, so an int `a << 33` shifts by 1. C
+// instead leaves a shift whose count reaches the operand width undefined, and
+// clang at -O1 and -O2 folds such a shift to an arbitrary value or lets a stack
+// address through, so masking is what keeps the emitted program defined rather
+// than an optimisation.
+const (
+	shiftBitsInt  = 5
+	shiftBitsLong = 6
+)
+
+// shiftType is the type a shift whose left operand has type t is performed in:
+// JLS 5.6 promotes every integral type but long to int.
+func shiftType(t ast.Type) ast.Type {
+	if ast.IsPrim(t, ast.Long) {
+		return ast.TLong
+	}
+	return ast.TInt
+}
+
+// shiftCount renders an already-rendered shift count reduced to the bits of
+// shiftBitsInt/shiftBitsLong. The count is masked as an unsigned value, so a
+// negative one wraps the way Java's does (`a << -1` shifts by 31), and the
+// masked count is cast back to the signed type the shift is performed in: a
+// count of unsigned type would drag the shifted operand into unsigned
+// arithmetic under the usual conversions and quietly turn `>>` into a logical
+// shift. left is the type of the operand being shifted.
+func shiftCount(count string, left ast.Type) string {
+	ut, st, bits := "uint32_t", "int32_t", shiftBitsInt
+	if ast.IsPrim(left, ast.Long) {
+		ut, st, bits = "uint64_t", "int64_t", shiftBitsLong
+	}
+	return "(" + st + ")((" + ut + ")(" + count + ") & " + strconv.Itoa((1<<bits)-1) + ")"
 }
 
 func (e *Emitter) binary(v *ast.Binary) string {
@@ -827,7 +883,8 @@ func (e *Emitter) binary(v *ast.Binary) string {
 		if ast.IsPrim(v.OpType, ast.Byte) || ast.IsPrim(v.OpType, ast.Short) || ast.IsPrim(v.OpType, ast.Char) {
 			ut = "uint32_t"
 		}
-		return "(" + e.ctype(v.GetType()) + ")((" + ut + ")(" + e.expr(v.X) + ") >> " + e.expr(v.Y) + ")"
+		return "(" + e.ctype(v.GetType()) + ")((" + ut + ")(" + e.expr(v.X) + ") >> " +
+			shiftCount(e.operand(v.Y, v.OpType), v.OpType) + ")"
 	}
 	if e.flattenable(v) {
 		return "(" + e.flatChain(v) + ")"
@@ -851,6 +908,11 @@ func (e *Emitter) binary(v *ast.Binary) string {
 	}
 	x := e.operand(v.X, v.OpType)
 	y := e.operand(v.Y, v.OpType)
+	// C makes a shift whose count reaches the operand width undefined, so the
+	// count of `<<` and `>>` is masked before it is emitted
+	if v.Op == "<<" || v.Op == ">>" {
+		y = shiftCount(y, v.OpType)
+	}
 	return "(" + x + " " + v.Op + " " + y + ")"
 }
 
@@ -1017,12 +1079,20 @@ func (e *Emitter) assignInner(v *ast.Assign, lv string) string {
 		return "(" + lv + " = (tystr*)" + e.concatFrom("(tystr*)"+lv, v.Y) + ")"
 	}
 	op := v.Op[:len(v.Op)-1]
-	if op == ">>>" {
-		ut := "uint32_t"
-		if ast.IsPrim(v.X.GetType(), ast.Long) {
-			ut = "uint64_t"
+	// a compound shift masks its count exactly like the binary form; the target
+	// also gives the type the count is unboxed to, since sema leaves the
+	// operation type of a compound assignment unset
+	if op == "<<" || op == ">>" || op == ">>>" {
+		st := shiftType(v.X.GetType())
+		count := shiftCount(e.operand(v.Y, st), st)
+		if op == ">>>" {
+			ut := "uint32_t"
+			if ast.IsPrim(st, ast.Long) {
+				ut = "uint64_t"
+			}
+			return "(" + lv + " = (" + e.ctype(v.X.GetType()) + ")((" + ut + ")" + lv + " >> " + count + "))"
 		}
-		return "(" + lv + " = (" + e.ctype(v.X.GetType()) + ")((" + ut + ")" + lv + " >> " + e.expr(v.Y) + "))"
+		return "(" + lv + " " + op + "= " + count + ")"
 	}
 	if op == "/" || op == "%" {
 		xt := v.X.GetType()
