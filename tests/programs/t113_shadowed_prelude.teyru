@@ -1,0 +1,28 @@
+/* A user class named the same as one in the standard library. The prelude's
+   names are global -- that is what makes `List` and `Pattern` usable without an
+   import -- and a global name is easy to overwrite by accident: this program's
+   own `Node` used to become the `Node` the regex engine meant, and the library
+   stopped compiling (TY-TYP-0076, from inside lib/21). A file in a named
+   package now resolves its own package first and cannot see the default package
+   at all (JLS 7.4.2). Expected output is javac 25's. */
+
+class Node {
+  String label
+  Node(String label) { this.label = label }
+  public String toString() { return "N(" + label + ")" }
+}
+
+class T113 {
+  public static void main(String[] args) {
+    Node n = new Node("mine")
+    System.out.println(n)
+    System.out.println(Pattern.compile("[0-9]+").matcher("ab123").find())
+    System.out.println("a1b22c".replaceAll("[0-9]+", "-"))
+    System.out.println("a,b,c".split(",").length)
+    List<String> xs = new ArrayList<String>()
+    xs.add(n.toString())
+    xs.add("second")
+    System.out.println(xs)
+    System.out.println(new Node("x").label.length())
+  }
+}
