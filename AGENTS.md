@@ -125,13 +125,6 @@ source → lexer → parser → ast → sema → codegen
 
 ## 8. 提交與 PR 規範
 
-- 遵循使用者全域規則：**不要加** `Co-Authored-By: Claude` 或任何 AI 署名。
-- 一律使用：
-
-  ```sh
-  git -c user.email=langya466@gmail.com -c user.name=LangYa466 commit -m "…"
-  ```
-
 - 訊息用範圍前綴：`feat(compiler):`、`fix(runtime):`、`feat(codegen):`、`test:`、
   `docs:`、`chore:`。
 - 一個提交做一件事；不要把改名、重構與新功能混在一起。
