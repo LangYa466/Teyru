@@ -2,8 +2,6 @@
 package parser
 
 import (
-	"fmt"
-	"os"
 	"strings"
 
 	"github.com/LangYa466/Teyru/internal/ast"
@@ -27,7 +25,6 @@ type parser struct {
 	nl     []bool // stack: are newlines significant?
 	spec   int    // >0 while speculating (errors suppressed)
 	failed bool
-	anon   int
 }
 
 // ---------------------------------------------------------------- helpers
@@ -422,22 +419,6 @@ func (p *parser) parseAnnoValue() (ast.Expr, *ast.Annotation) {
 	return &ast.Literal{ExprBase: base, Kind: ast.LitNull}, nil
 }
 
-func (p *parser) skipBalanced(open, close string) {
-	depth := 0
-	for p.tok().Kind != lexer.EOF {
-		if p.is(open) {
-			depth++
-		} else if p.is(close) {
-			depth--
-			if depth == 0 {
-				p.next()
-				return
-			}
-		}
-		p.next()
-	}
-}
-
 var modifierBits = map[string]ast.Mods{
 	"public": ast.ModPublic, "private": ast.ModPrivate, "protected": ast.ModProtected,
 	"static": ast.ModStatic, "final": ast.ModFinal, "abstract": ast.ModAbstract,
@@ -601,7 +582,6 @@ func (p *parser) parseEnumConstants(cd *ast.ClassDecl) {
 			ec.Args = p.parseArgs()
 		}
 		if p.is("{") {
-			p.anon++
 			body := &ast.ClassDecl{Pos: p.pos(), Kind: ast.KindClass, Name: "", Mods: ast.ModFinal}
 			p.parseClassBody(body)
 			ec.Body = body
@@ -838,13 +818,15 @@ func (p *parser) parseType() *ast.TypeExpr {
 	} else {
 		var parts []string
 		parts = append(parts, p.ident())
-		if p.is("<") {
+		// a `<` that begins a line never starts the type arguments of the
+		// reference before it: a newline ends the construct (see continues()).
+		if p.is("<") && p.continues() {
 			te.Args = p.parseTypeArgs()
 		}
 		for p.is(".") && p.peekN(1).Kind == lexer.Ident {
 			p.next()
 			parts = append(parts, p.ident())
-			if p.is("<") {
+			if p.is("<") && p.continues() {
 				te.Args = p.parseTypeArgs()
 			}
 		}
@@ -1250,7 +1232,6 @@ func (p *parser) tryTypePattern() *ast.Param { return p.tryTypePatternOpt(false)
 // tryTypePatternOpt parses a type pattern; inComponent allows `)` to end it
 // (record pattern component lists).
 func (p *parser) tryTypePatternOpt(inComponent bool) *ast.Param {
-	dbg := os.Getenv("TEYRU_DEBUG_PATTERN") != ""
 	var prm *ast.Param
 	p.speculate(func() bool {
 		p.parseModifiers()
@@ -1273,9 +1254,6 @@ func (p *parser) tryTypePatternOpt(inComponent bool) *ast.Param {
 		}
 		return p.patternEnd(inComponent)
 	})
-	if dbg {
-		fmt.Fprintf(os.Stderr, "DBG pattern result=%v next=%q\n", prm != nil, p.tok().Text)
-	}
 	return prm
 }
 
@@ -1472,13 +1450,7 @@ func (p *parser) binOp() (string, int) {
 				if t2.Kind == lexer.Op && t2.Text == ">" && t2.Off == t1.End {
 					return ">>>", 3
 				}
-				if t2.Kind == lexer.Op && t2.Text == ">=" && t2.Off == t1.End {
-					return ">>>=", 3
-				}
 				return ">>", 2
-			}
-			if t1.Text == ">=" {
-				return ">>=", 2
 			}
 		}
 	}
@@ -1711,7 +1683,7 @@ func (p *parser) parsePostfix(x ast.Expr) ast.Expr {
 				mr.Name = p.ident()
 			}
 			x = mr
-		case p.is("<") && isTypeLike(x) && p.genericTypeRefAhead():
+		case p.is("<") && p.continues() && isTypeLike(x) && p.genericTypeRefAhead():
 			// Type<Args>::new or Type<Args>::method
 			te := &ast.TypeExpr{Pos: x.GetPos(), Name: exprName(x)}
 			te.Args = p.parseTypeArgs()
@@ -1865,13 +1837,13 @@ func (p *parser) parseNew() ast.Expr {
 		te.Name = t.Text
 	} else {
 		parts := []string{p.ident()}
-		if p.is("<") {
+		if p.is("<") && p.continues() {
 			te.Args = p.parseTypeArgs()
 		}
 		for p.is(".") {
 			p.next()
 			parts = append(parts, p.ident())
-			if p.is("<") {
+			if p.is("<") && p.continues() {
 				te.Args = p.parseTypeArgs()
 			}
 		}
@@ -1904,7 +1876,6 @@ func (p *parser) parseNew() ast.Expr {
 	n := &ast.New{ExprBase: ast.ExprBase{Pos: pos}, Type: te}
 	n.Args = p.parseArgs()
 	if p.is("{") && !p.lineBreak() {
-		p.anon++
 		body := &ast.ClassDecl{Pos: p.pos(), Kind: ast.KindClass, Mods: ast.ModFinal}
 		p.parseClassBody(body)
 		n.Body = body
