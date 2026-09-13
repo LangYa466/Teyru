@@ -5,6 +5,8 @@
 *.out
 *.ll
 a.out
+# the examples carry .java counterparts; running javac on them lands here
+*.class
 
 # Editor / OS
 .idea/
