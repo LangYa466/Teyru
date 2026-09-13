@@ -501,4 +501,8 @@ for (String n : names) {
 - 模組系統的語意（`import module X` 會被剖析後忽略，執行期沒有模組系統；`module-info` 不支援）
 - 陣列的執行期元素型別一律是 `teyru.Array`，所以 `String[].class` 與
   `int[].class` 是同一個物件（Java 是兩個）
-- 標準程式庫缺口：`String.lines()`（需要 `Stream`）、`List.of(...)`
+- 標準程式庫缺口：`String.lines()`（需要 `Stream`）、`String.join(...)`、
+  `String.format(...)`、`List.of(...)`、`java.util.Arrays`、
+  `Comparator.comparingInt(...)` 家族
+- 無法解析的完整限定名稱（例如 `java.util.Arrays.sort(x)`）會回報
+  `cannot find symbol java`——訊息指向鏈的第一段而不是整條路徑
