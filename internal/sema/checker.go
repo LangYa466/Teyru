@@ -33,15 +33,18 @@ type Builtins struct {
 
 // Checker holds global analysis state.
 type Checker struct {
-	diags      *source.Diagnostics
-	files      []*ast.File
-	classes    []*ast.Class
-	global     map[string]*ast.Class // simple and full names
-	b          *Builtins
-	nextID     int
-	varID      int
-	tvID       int
-	anonN      map[*ast.Class]int
+	diags   *source.Diagnostics
+	files   []*ast.File
+	classes []*ast.Class
+	global  map[string]*ast.Class // simple and full names
+	b       *Builtins
+	nextID  int
+	varID   int
+	tvID    int
+	anonN   map[*ast.Class]int
+	// localN numbers local classes so that two of the same name get distinct
+	// symbol names.
+	localN     int
 	selector   int
 	todo       []func()
 	Props      map[ast.Expr]ast.Expr
@@ -377,6 +380,12 @@ func (c *Checker) classEnv(cl *ast.Class) *typeEnv {
 	}
 	for _, tv := range cl.TypeParams {
 		env.tvars[tv.Name] = tv
+	}
+	if cl.LocalClasses != nil {
+		// the local classes of the blocks this one was declared in (JLS 6.3):
+		// a sibling local class is in scope inside the body, and a same-named
+		// one declared in another method is not
+		env.locals = cl.LocalClasses
 	}
 	return env
 }

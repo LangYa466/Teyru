@@ -1293,7 +1293,7 @@ func (e *Emitter) newExpr(v *ast.New) string {
 	fmt.Fprintf(&b, "({ %s %s = (%s)ty_alloc(sizeof(%s)); %s->obj.cls = &cls_%s;",
 		cname(cl)+"*", n, cname(cl)+"*", cname(cl), n, mangle(cl.Full))
 	if cl.Inner && cl.OuterField != nil {
-		fmt.Fprintf(&b, " %s->f_%s = (%s*)%s;", n, mangle(cl.OuterField.Name), cname(cl.Outer), e.outerArg(v))
+		fmt.Fprintf(&b, " %s->f_%s = (%s*)%s;", n, mangle(cl.OuterField.Name), cname(cl.Outer), e.outerArg(v, cl.Outer))
 	}
 	if init := e.clinitStmt(cl); init != "" {
 		fmt.Fprintf(&b, " %s", strings.TrimSuffix(init, "\n"))
@@ -1322,11 +1322,20 @@ func (e *Emitter) argsWithCaptures(n string, v *ast.New, cl *ast.Class) string {
 	return a
 }
 
-func (e *Emitter) outerArg(v *ast.New) string {
+// outerArg is the enclosing instance an inner class's new object is created
+// with, as seen from the code doing the creating. It is not always `this`: a
+// local class declared inside another local class reaches the outer instance
+// through the chain of captured references, and `this` there is the innermost
+// object -- storing it as the outer instance of a class further out reads
+// whatever happens to lie at that offset.
+func (e *Emitter) outerArg(v *ast.New, outer *ast.Class) string {
 	if v.Outer != nil {
 		return e.expr(v.Outer)
 	}
-	return "this"
+	if outer == nil {
+		return e.thisExpr()
+	}
+	return e.outerAccess(outer)
 }
 
 func (e *Emitter) newArray(v *ast.NewArray) string {

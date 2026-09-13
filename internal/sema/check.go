@@ -12,14 +12,21 @@ import (
 
 // methodCtx carries the local scope of one method body.
 type methodCtx struct {
-	c               *Checker
-	cl              *ast.Class
-	m               *ast.Method
-	env             *typeEnv
-	scopes          []map[string]*ast.Var
-	loops           int
-	sw              *ast.Switch
-	lambda          *ast.Lambda
+	c      *Checker
+	cl     *ast.Class
+	m      *ast.Method
+	env    *typeEnv
+	scopes []map[string]*ast.Var
+	loops  int
+	sw     *ast.Switch
+	lambda *ast.Lambda
+	// envs is the type-environment stack that mirrors scopes: push swaps in a
+	// block's own environment and pop puts the enclosing one back.
+	envs []*typeEnv
+	// noThis marks a context that inherits its staticness from the method a
+	// lambda was written in: the lambda's own method is never static, so the
+	// answer cannot be read off m alone.
+	noThis          bool
 	staticImports   []*ast.Field
 	staticMethods   map[string][]*ast.Method
 	props           map[ast.Expr]ast.Expr
@@ -229,8 +236,52 @@ func (c *Checker) newCtx(cl *ast.Class, m *ast.Method) *methodCtx {
 	return ctx
 }
 
-func (ctx *methodCtx) push() { ctx.scopes = append(ctx.scopes, map[string]*ast.Var{}) }
-func (ctx *methodCtx) pop()  { ctx.scopes = ctx.scopes[:len(ctx.scopes)-1] }
+func (ctx *methodCtx) push() {
+	ctx.scopes = append(ctx.scopes, map[string]*ast.Var{})
+	ctx.envs = append(ctx.envs, ctx.env)
+	if ctx.env != nil {
+		// a block gets its own type environment so that a local class declared
+		// in it is visible for the rest of the block and nowhere else (JLS 6.3)
+		ctx.env = &typeEnv{cls: ctx.env.cls, tvars: ctx.env.tvars, file: ctx.env.file,
+			locals: map[string]*ast.Class{}, parent: ctx.env}
+	}
+}
+func (ctx *methodCtx) pop() {
+	ctx.scopes = ctx.scopes[:len(ctx.scopes)-1]
+	if n := len(ctx.envs); n > 0 {
+		ctx.env = ctx.envs[n-1]
+		ctx.envs = ctx.envs[:n-1]
+	}
+}
+
+// declareLocalClass binds a local class name in the block that declares it.
+func (ctx *methodCtx) declareLocalClass(name string, cl *ast.Class) {
+	if ctx.env == nil {
+		return
+	}
+	if ctx.env.locals == nil {
+		ctx.env.locals = map[string]*ast.Class{}
+	}
+	ctx.env.locals[name] = cl
+}
+
+// visibleClasses is every local class name in scope at this point, for the
+// body of a local class declared here to resolve against.
+func (ctx *methodCtx) visibleClasses() map[string]*ast.Class {
+	var out map[string]*ast.Class
+	for e := ctx.env; e != nil; e = e.parent {
+		for n, cl := range e.locals {
+			if out == nil {
+				out = map[string]*ast.Class{}
+			}
+			// the innermost binding of a name wins
+			if _, seen := out[n]; !seen {
+				out[n] = cl
+			}
+		}
+	}
+	return out
+}
 
 func (ctx *methodCtx) errf(pos source.Pos, code, format string, args ...any) {
 	ctx.c.errf(pos, code, format, args...)
@@ -333,6 +384,27 @@ func (ctx *methodCtx) checkStmt(s ast.Stmt) {
 		if cd.Sym == nil {
 			cl := c.declareClass(ctx.cl.File, cd, ctx.cl)
 			cl.LocalOwner = ctx.m
+			// A local class declared in a static context has no enclosing
+			// instance to point at (JLS 8.1.3): `class Local {...}` inside a
+			// static method is instantiated with `new Local()`, exactly like a
+			// static nested class. declareClass marks every class without a
+			// `static` modifier as inner, which is right for a nested type and
+			// wrong here, so the local case corrects it before the outer field
+			// is laid out.
+			cl.Inner = !ctx.inStatic()
+			// A local class belongs to the block that declares it (JLS 6.3),
+			// so two methods may each declare `class Local` and they are
+			// distinct types. declareClass put it in the enclosing type's
+			// scope, which is a single namespace and the wrong one; move it to
+			// this block, and give it a name of its own so the two do not
+			// collide as C symbols either.
+			if ctx.cl.Nested[cd.Name] == cl {
+				delete(ctx.cl.Nested, cd.Name)
+			}
+			c.localN++
+			cl.Full = fmt.Sprintf("%s$%s$%d", ctx.cl.Full, cd.Name, c.localN)
+			cl.LocalClasses = ctx.visibleClasses()
+			ctx.declareLocalClass(cd.Name, cl)
 			c.resolveHeader(cl)
 			c.resolveMembers(cl)
 			c.layout(cl)
@@ -1796,7 +1868,7 @@ func (ctx *methodCtx) checkNew(v *ast.New, want ast.Type) {
 	ctor := c.resolveCtor(ctx, ctorType, v, cl, want)
 	_ = ctor
 	// outer instance for inner classes
-	if cl.Inner {
+	if cl.Inner && !ctx.inScopeOf(cl) {
 		if v.Outer != nil {
 			ctx.checkExpr(v.Outer, nil)
 		} else if !ctx.inStatic() {
@@ -1806,6 +1878,8 @@ func (ctx *methodCtx) checkNew(v *ast.New, want ast.Type) {
 		} else {
 			ctx.errf(v.Pos, "TY-TYP-0071", "an enclosing instance of %s is required", cl.Name)
 		}
+	} else if cl.Inner && v.Outer != nil {
+		ctx.checkExpr(v.Outer, nil)
 	}
 	if v.Body != nil {
 		body := v.Body
@@ -1879,6 +1953,21 @@ func nestHost(cl *ast.Class) *ast.Class {
 		cl = cl.Outer
 	}
 	return cl
+}
+
+// inScopeOf reports whether cl is a local class whose declaring block we are
+// lexically inside. Its enclosing instance is then the current `this`, so
+// `new Local()` needs no qualifier -- findClass cannot see it, because a local
+// class is deliberately not a member of the enclosing type (JLS 6.3).
+func (ctx *methodCtx) inScopeOf(cl *ast.Class) bool {
+	for e := ctx.env; e != nil; e = e.parent {
+		for _, l := range e.locals {
+			if l == cl {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func findEnclosing(from, target *ast.Class) *ast.Class {

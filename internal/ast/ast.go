@@ -717,7 +717,13 @@ type Class struct {
 	// LocalScopes is the scope chain of the enclosing method at the point a
 	// local or anonymous class is declared, so that its body can see the
 	// variables that are in scope there (JLS 6.3).
-	LocalScopes  []map[string]*Var
+	LocalScopes []map[string]*Var
+	// LocalClasses is the local classes in scope where a local or anonymous
+	// class is declared. A local class belongs to its block (JLS 6.3), so two
+	// methods may each declare `class Local` and they are different types;
+	// naming one through the enclosing type's Nested map -- one namespace --
+	// could only ever hold one of them.
+	LocalClasses map[string]*Class
 	Special      string // "String", "array", "Object", box names
 	Subclasses   []*Class
 	EnumConsts   []*Field

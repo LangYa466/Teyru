@@ -434,7 +434,7 @@ func (e *Emitter) stackNew(vd *ast.VarDeclarator, nw *ast.New, ct, name string) 
 	e.line("memset(&%s, 0, sizeof(%s));\n", slot, slot)
 	e.line("%s.obj.cls = &cls_%s;\n", slot, mangle(cl.Full))
 	if cl.Inner && cl.OuterField != nil {
-		e.line("%s.f_%s = (%s*)%s;\n", slot, mangle(cl.OuterField.Name), cname(cl.Outer), e.outerArg(nw))
+		e.line("%s.f_%s = (%s*)%s;\n", slot, mangle(cl.OuterField.Name), cname(cl.Outer), e.outerArg(nw, cl.Outer))
 	}
 	e.line("%s", e.clinitStmt(cl))
 	e.line("%s(%s);\n", e.cfunc(nw.Ctor), e.argsWithCaptures("&"+slot, nw, cl))
