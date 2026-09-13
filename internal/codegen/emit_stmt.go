@@ -351,7 +351,14 @@ func (e *Emitter) localVar(v *ast.LocalVar) {
 			e.stackNew(vd, nw, ct, name)
 			continue
 		}
+		// An `instanceof` pattern binds a variable whose scope is the rest of
+		// the expression, so `boolean b = o instanceof String s && s.length() > 0`
+		// is legal Java. Declare it here, before the statement that reads it:
+		// without this the emitted C named a variable that was never declared,
+		// and the compiler reported it as a C error in generated code.
+		e.hoistPatterns(vd.Init)
 		e.line("%s %s = %s;\n", ct, name, e.coerce(e.expr(vd.Init), vd.Init.GetType(), vd.Sym.Type))
+		e.clearPatterns()
 	}
 }
 
