@@ -20,21 +20,19 @@ func (e *Emitter) emitStaticFields(cl *ast.Class) {
 		ct := e.ctype(f.Type)
 		fmt.Fprintf(&e.data, "static %s %s = %s;\n", ct, staticName(cl, f), zeroOf(ct))
 	}
-	for _, f := range cl.Fields {
-		if f.Mods.Has(ast.ModStatic) {
-			fmt.Fprintf(&e.data, "static void* _root_%s = (void*)&%s;\n", staticName(cl, f), staticName(cl, f))
-		}
-	}
 }
 
-// clinitRefs collects the global addresses that must be registered with the GC.
+// clinitRefs lists the static field addresses the collector has to treat as
+// roots. The address of the field itself is registered, because the collector
+// reads *(void**)address to find the object: one extra level of indirection
+// would make it mark the address of the global instead of what the global
+// points at, and an object reachable only from a static would be collected.
 func (e *Emitter) clinitRefs() string {
 	var b []byte
 	for _, cl := range e.prog.Classes {
 		for _, f := range cl.Fields {
 			if f.Mods.Has(ast.ModStatic) {
-				nm := "_root_" + staticName(cl, f)
-				b = append(b, []byte("\tty_gc_register_static((void*)&"+nm+");\n")...)
+				b = append(b, []byte("\tty_gc_register_static((void*)&"+staticName(cl, f)+");\n")...)
 			}
 		}
 	}
