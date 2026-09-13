@@ -16,6 +16,68 @@ import (
 type nativeFn struct {
 	fn   string // C helper
 	recv string // C cast applied to the receiver ("" for static methods)
+	// classHint names a prelude class whose generated tyclass the call site
+	// passes to fn as a trailing argument. Object.getClass() needs it: the
+	// runtime builds a Class object from a tyclass this header-less C file
+	// cannot name.
+	classHint string
+}
+
+// streamTwin is the stream-aware twin of a PrintStream print helper: the same
+// output, written to whichever descriptor the receiver names.
+type streamTwin struct {
+	name  string // C helper taking the receiver first
+	proto string // its prototype, repeated at the call site
+}
+
+// printStreamClass is the prelude class whose print methods are stream aware.
+const printStreamClass = "teyru.PrintStream"
+
+// classOfProto is the prototype of the helper Object.getClass() calls. It is
+// not in tyrt.h because the generated program is the only caller.
+const classOfProto = "void *ty_class_of_cls(void *, tyclass *)"
+
+// streamTwins maps a stdout helper onto its stream-aware twin, which takes the
+// PrintStream as its first argument and writes to the descriptor in the
+// stream's `target` field. The helpers are not declared in tyrt.h (the shared
+// header is not this package's to change), so the call site declares them
+// inline -- the same statement-expression idiom the generated code already uses
+// for temporaries.
+var streamTwins = map[string]streamTwin{
+	"ty_println_void":   {"ty_ps_println_void", "void ty_ps_println_void(void *)"},
+	"ty_println_str":    {"ty_ps_println_str", "void ty_ps_println_str(void *, tystr *)"},
+	"ty_println_int":    {"ty_ps_println_int", "void ty_ps_println_int(void *, int64_t)"},
+	"ty_println_double": {"ty_ps_println_double", "void ty_ps_println_double(void *, double)"},
+	"ty_println_float":  {"ty_ps_println_float", "void ty_ps_println_float(void *, float)"},
+	"ty_println_bool":   {"ty_ps_println_bool", "void ty_ps_println_bool(void *, int32_t)"},
+	"ty_println_char":   {"ty_ps_println_char", "void ty_ps_println_char(void *, uint16_t)"},
+	"ty_println_obj":    {"ty_ps_println_obj", "void ty_ps_println_obj(void *, void *)"},
+	"ty_print_str":      {"ty_ps_print_str", "void ty_ps_print_str(void *, tystr *)"},
+	"ty_print_int":      {"ty_ps_print_int", "void ty_ps_print_int(void *, int64_t)"},
+	"ty_print_double":   {"ty_ps_print_double", "void ty_ps_print_double(void *, double)"},
+	"ty_print_float":    {"ty_ps_print_float", "void ty_ps_print_float(void *, float)"},
+	"ty_print_bool":     {"ty_ps_print_bool", "void ty_ps_print_bool(void *, int32_t)"},
+	"ty_print_char":     {"ty_ps_print_char", "void ty_ps_print_char(void *, uint16_t)"},
+	"ty_print_obj":      {"ty_ps_print_obj", "void ty_ps_print_obj(void *, void *)"},
+}
+
+// psTwin is the stream-aware twin of a PrintStream print method, or nil when
+// the method is not one. A class that extends PrintStream forces codegen down
+// the stub path (emit_synth builds that call from the table entry alone and
+// cannot declare the twin, so nf.fn has to be a function tyrt.h already
+// declares), and in such a program every stream writes to stdout again --
+// System.err included, because its receiver is a PrintStream too. That is what
+// the language did before the field existed, so no program gets worse; the
+// complete fix is to declare the twins in tyrt.h and point the table entries at
+// them, which is a change to a header this package does not own.
+func (e *Emitter) psTwin(m *ast.Method, nf nativeFn) *streamTwin {
+	if m.Owner == nil || m.Owner != e.prog.LookupClass(printStreamClass) {
+		return nil
+	}
+	if t, ok := streamTwins[nf.fn]; ok {
+		return &t
+	}
+	return nil
 }
 
 // specialNew maps classes whose allocation is owned by the runtime.
@@ -28,7 +90,7 @@ var nativeTable = map[string]nativeFn{
 	"Object.toString()":     {fn: "ty_object_tostring", recv: "void*"},
 	"Object.hashCode()":     {fn: "ty_obj_hash", recv: "void*"},
 	"Object.equals(Object)": {fn: "ty_obj_eq", recv: "void*"},
-	"Object.getClass()":     {fn: "ty_class_of", recv: "void*"},
+	"Object.getClass()":     {fn: "ty_class_of", recv: "void*", classHint: "teyru.Class"},
 	"Class.getName()":       {fn: "ty_class_name", recv: "void*"},
 	"Class.toString()":      {fn: "ty_class_name", recv: "void*"},
 
@@ -224,7 +286,6 @@ func (e *Emitter) nativeCall(m *ast.Method, recv string, args []ast.Expr) string
 	if !ok {
 		return "0"
 	}
-	var parts []string
 	vals := make([]string, 0, len(args))
 	for i, a := range args {
 		var want ast.Type
@@ -233,16 +294,32 @@ func (e *Emitter) nativeCall(m *ast.Method, recv string, args []ast.Expr) string
 		}
 		vals = append(vals, e.coerce(e.expr(a), a.GetType(), want))
 	}
-	if m.IsStatic() {
-		// for static natives the cast describes the first argument
-		if nf.recv != "" && len(vals) > 0 {
-			vals[0] = "(" + nf.recv + ")" + vals[0]
+	var call string
+	if t := e.psTwin(m, nf); t != nil {
+		// The receiver comes first: which descriptor the text goes to is a
+		// property of the PrintStream object, not of the method.
+		body := t.name + "(" + strings.Join(append([]string{"(void*)" + recv}, vals...), ", ") + ")"
+		call = "({ extern " + t.proto + "; " + body + "; })"
+	} else if nf.classHint != "" && e.prog.LookupClass(nf.classHint) != nil {
+		// getClass hands the runtime the tyclass of this program's Class, so
+		// that the object it returns is an instance of it.
+		cl := e.prog.LookupClass(nf.classHint)
+		all := append([]string{"(void*)" + recv}, vals...)
+		all = append(all, "(void*)&cls_"+mangle(cl.Full))
+		call = "({ extern " + classOfProto + "; ty_class_of_cls(" + strings.Join(all, ", ") + "); })"
+	} else {
+		var parts []string
+		if m.IsStatic() {
+			// for static natives the cast describes the first argument
+			if nf.recv != "" && len(vals) > 0 {
+				vals[0] = "(" + nf.recv + ")" + vals[0]
+			}
+		} else if nf.recv != "" {
+			parts = append(parts, "("+nf.recv+")"+recv)
 		}
-	} else if nf.recv != "" {
-		parts = append(parts, "("+nf.recv+")"+recv)
+		parts = append(parts, vals...)
+		call = nf.fn + "(" + strings.Join(parts, ", ") + ")"
 	}
-	parts = append(parts, vals...)
-	call := nf.fn + "(" + strings.Join(parts, ", ") + ")"
 	if e.isRef(m.Result) {
 		return "(" + e.ctype(m.Result) + ")" + call
 	}

@@ -6,7 +6,11 @@ class Object {
   public native String toString()
   public native int hashCode()
   public native boolean equals(Object o)
-  public native Class getClass()
+  /* final, as in java.lang.Object. The call site can then inline the call,
+     which is what lets it hand the runtime the tyclass this program gave to
+     teyru.Class: getClass has to return a real Class object, and only the
+     call site knows which generated class that is. */
+  public final native Class getClass()
 }
 
 class Class {

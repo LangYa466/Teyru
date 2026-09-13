@@ -1,0 +1,24 @@
+// Math.random() is documented as returning a double in [0, 1). The value is
+// not reproducible, so the program only prints properties of it: every draw is
+// in range, and a thousand draws are not all the same number (a stub that
+// always returns one value passes the range check but fails the second line).
+class Main {
+  public static void main(String[] args) {
+    double first = Math.random()
+    System.out.println("in range: " + (first >= 0.0 && first < 1.0))
+
+    int outOfRange = 0
+    int sameAsFirst = 0
+    for (int i = 0: i < 1000: i++) {
+      double x = Math.random()
+      if (x < 0.0 || x >= 1.0) {
+        outOfRange = outOfRange + 1
+      }
+      if (x == first) {
+        sameAsFirst = sameAsFirst + 1
+      }
+    }
+    System.out.println("out of range: " + outOfRange)
+    System.out.println("all the same: " + (sameAsFirst == 1000))
+  }
+}

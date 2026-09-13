@@ -7,6 +7,28 @@
 #include <math.h>
 #include <time.h>
 
+/* The helpers below that a generated program calls but tyrt.h does not declare
+   (that header is another component's): getClass's Class builder, and the
+   stream-aware print helpers. The call site declares them too, inside the
+   statement expression it wraps the call in. Forward declarations here keep a
+   -Wmissing-prototypes build of this file quiet. */
+void *ty_class_of_cls(void *o, tyclass *clscls);
+void ty_ps_print_str(void *self, tystr *s);
+void ty_ps_println_str(void *self, tystr *s);
+void ty_ps_print_int(void *self, int64_t v);
+void ty_ps_println_int(void *self, int64_t v);
+void ty_ps_print_double(void *self, double v);
+void ty_ps_println_double(void *self, double v);
+void ty_ps_print_float(void *self, float v);
+void ty_ps_println_float(void *self, float v);
+void ty_ps_print_char(void *self, uint16_t c);
+void ty_ps_println_char(void *self, uint16_t c);
+void ty_ps_print_bool(void *self, int32_t v);
+void ty_ps_println_bool(void *self, int32_t v);
+void ty_ps_print_obj(void *self, void *o);
+void ty_ps_println_obj(void *self, void *o);
+void ty_ps_println_void(void *self);
+
 /* ---- class initialisation --------------------------------------------- */
 
 void ty_unimplemented(const char *what) {
@@ -22,8 +44,77 @@ void ty_clinit(tyclass *c) {
   if (c->clinit) ((void (*)(void))c->clinit)();
 }
 
+/* ---- Class objects ------------------------------------------------------ */
+
+/* getClass has to hand back a real object. It used to return the tyclass
+   pointer itself, and every consumer of a reference reads the object's class
+   out of its first word, so `println(x.getClass())` walked a `const char*`
+   name as if it were a tyclass and crashed.
+
+   A Class object is a small wrapper: its payload is the tyclass it names, and
+   its own class is the program's own teyru.Class, which the call site hands
+   over (native.go emits `ty_class_of_cls(o, &cls_teyru_Class)`), because that
+   struct is static in the generated C and the runtime cannot name it. With the
+   real class in place, instanceof, casts, virtual dispatch and equality all
+   behave like they do for any other object.
+
+   One wrapper per tyclass is reused, so `a.getClass() == a.getClass()` holds.
+   The wrappers and the buckets below are malloc'd rather than allocated from
+   the runtime heap: class metadata is immortal, and memory the collector does
+   not own can never be collected out from under a Class object that a program
+   still refers to. */
+typedef struct tyclassobj {
+  tyobj obj;            /* obj.cls is teyru.Class */
+  tyclass *target;      /* the class this object names */
+  struct tyclassobj *next;
+} tyclassobj;
+
+#define TY_CLASS_BUCKETS 64
+static tyclassobj *ty_class_objs[TY_CLASS_BUCKETS];
+
+/* The generated teyru.Class, as passed by the call site. NULL until the first
+   call, which is also what a class literal's raw handle looks like. */
+static tyclass *ty_class_cls;
+
+void *ty_class_of_cls(void *o, tyclass *clscls) {
+  if (clscls) ty_class_cls = clscls;
+  if (!ty_class_cls) ty_class_cls = TY_OBJECT;
+  if (!o) ty_throw(ty_npe());
+  tyclass *k = ((tyobj *)o)->cls;
+  if (!k) return NULL;
+  int32_t b = (int32_t)((((uintptr_t)k) >> 4) & (TY_CLASS_BUCKETS - 1));
+  for (tyclassobj *c = ty_class_objs[b]; c; c = c->next) {
+    if (c->target == k) return c;
+  }
+  tyclassobj *c = (tyclassobj *)calloc(1, sizeof(tyclassobj));
+  if (!c) ty_throw(ty_npe());
+  c->obj.cls = ty_class_cls;
+  c->target = k;
+  c->next = ty_class_objs[b];
+  ty_class_objs[b] = c;
+  return c;
+}
+
+/* tyrt.h declares this one and nothing in a generated program calls it any
+   more: the getClass call site goes through ty_class_of_cls, which also hands
+   over the tyclass of teyru.Class. It stays as the raw handle accessor for
+   native code that wants the class pointer itself. */
 void *ty_class_of(void *o) { return o ? (void *)(((tyobj *)o)->cls) : NULL; }
-tystr *ty_class_name(void *c) { return c ? ty_str_intern(((tyclass *)c)->name) : NULL; }
+
+/* Class.getName and Class.toString. The receiver is either a Class object built
+   by ty_class_of_cls, whose payload names the class, or the raw tyclass handle
+   a class literal produces (codegen renders `String.class` as
+   `(tyobj*)&cls_teyru_String`), which is the tyclass itself. The wrapper's own
+   class tells the two apart: a tyclass's first word is its name, and a name
+   can never be the address of the generated Class struct. */
+tystr *ty_class_name(void *c) {
+  if (!c) return NULL;
+  if (ty_class_cls && ((tyobj *)c)->cls == ty_class_cls) {
+    tyclass *k = ((tyclassobj *)c)->target;
+    return k ? ty_str_intern(k->name) : NULL;
+  }
+  return ty_str_intern(((tyclass *)c)->name);
+}
 
 tystr *ty_str_ident(tystr *s) { return s; }
 
@@ -289,3 +380,77 @@ tystr *ty_readln(void) {
   while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
   return ty_str_new(buf, (int64_t)n);
 }
+
+/* ---- PrintStream ------------------------------------------------------- */
+
+/* A PrintStream writes to the file descriptor in its first instance field: 1 is
+   stdout and 2 is stderr, so System.err reaches descriptor 2 while every other
+   stream keeps writing to 1. The prelude declares the field (lib/03_io.teyru,
+   `private int target`) and System's initializer is what sets it; the helpers
+   below read it at the offset that follows the object header, which is where
+   the field lands because it is the only instance field of the class.
+
+   These helpers are not in tyrt.h: the generated program declares them at the
+   call site (see the stream twins in internal/codegen/native.go), so the shared
+   header does not have to change. Each one mirrors the stdout helper of the
+   same name in tyrt.c byte for byte, down to the formatting helper it calls, so
+   `System.out.println(x)` and `System.err.println(x)` produce identical text.
+
+   Writing to stderr flushes stdout first: stdout is block buffered when it is a
+   pipe, and without the flush the two streams would come out of order. */
+typedef struct {
+  tyobj obj;
+  int32_t target;
+} tyPrintStream;
+
+static FILE *ty_ps_out(void *self) {
+  if (!self) ty_throw(ty_npe());
+  if (((tyPrintStream *)self)->target != 2) return stdout;
+  fflush(stdout);
+  return stderr;
+}
+
+void ty_ps_print_str(void *self, tystr *s) {
+  FILE *f = ty_ps_out(self);
+  if (s) fwrite(s->data, 1, (size_t)s->len, f);
+  else fputs("null", f);
+}
+void ty_ps_println_str(void *self, tystr *s) {
+  ty_ps_print_str(self, s);
+  fputc('\n', ty_ps_out(self));
+}
+void ty_ps_print_int(void *self, int64_t v) { fprintf(ty_ps_out(self), "%lld", (long long)v); }
+void ty_ps_println_int(void *self, int64_t v) { fprintf(ty_ps_out(self), "%lld\n", (long long)v); }
+void ty_ps_print_double(void *self, double v) {
+  tystr *s = ty_str_of_double(v);
+  fwrite(s->data, 1, (size_t)s->len, ty_ps_out(self));
+}
+void ty_ps_println_double(void *self, double v) {
+  ty_ps_print_double(self, v);
+  fputc('\n', ty_ps_out(self));
+}
+void ty_ps_print_float(void *self, float v) {
+  tystr *s = ty_str_of_float(v);
+  fwrite(s->data, 1, (size_t)s->len, ty_ps_out(self));
+}
+void ty_ps_println_float(void *self, float v) {
+  ty_ps_print_float(self, v);
+  fputc('\n', ty_ps_out(self));
+}
+void ty_ps_print_char(void *self, uint16_t c) {
+  FILE *f = ty_ps_out(self);
+  if (c < 0x80) fputc((int)c, f);
+  else fputs(ty_str_of_char(c)->data, f);
+}
+void ty_ps_println_char(void *self, uint16_t c) {
+  ty_ps_print_char(self, c);
+  fputc('\n', ty_ps_out(self));
+}
+void ty_ps_print_bool(void *self, int32_t v) { fputs(v ? "true" : "false", ty_ps_out(self)); }
+void ty_ps_println_bool(void *self, int32_t v) { fputs(v ? "true\n" : "false\n", ty_ps_out(self)); }
+void ty_ps_print_obj(void *self, void *o) { ty_ps_print_str(self, ty_str_of_obj(o)); }
+void ty_ps_println_obj(void *self, void *o) {
+  ty_ps_print_obj(self, o);
+  fputc('\n', ty_ps_out(self));
+}
+void ty_ps_println_void(void *self) { fputc('\n', ty_ps_out(self)); }

@@ -20,8 +20,8 @@ class Math {
 }
 
 class System {
-  public static final PrintStream out = new PrintStream()
-  public static final PrintStream err = new PrintStream()
+  public static final PrintStream out = new PrintStream(1)
+  public static final PrintStream err = new PrintStream(2)
   public static native long currentTimeMillis()
   public static native long nanoTime()
   public static native void exit(int status)
@@ -29,6 +29,22 @@ class System {
 }
 
 class PrintStream extends Object {
+  /* The file descriptor this stream writes to: 1 is stdout, 2 is stderr.
+     System.err is the only standard stream that is not descriptor 1.
+
+     This field must stay the first instance field of the class: the runtime
+     reads it at the offset right after the object header, because the print
+     helpers take the receiver as a `void *` and cannot name the generated
+     struct (see ty_ps_out in internal/runtime/src/tyrt2.c). */
+  private int target = 1
+
+  public PrintStream() {
+  }
+
+  public PrintStream(int fd) {
+    this.target = fd
+  }
+
   public native void print(String s)
   public native void print(Object o)
   public native void print(int v)

@@ -1,0 +1,19 @@
+// System.out and System.err are two different streams, as the standard-library
+// table in docs/language.md says. System.err writes to descriptor 2.
+//
+// The harness merges the two descriptors into one pipe, so this program cannot
+// see which one a line came from -- what it does pin is the *order*: a write to
+// stderr has to reach the pipe after everything stdout had already buffered
+// (see ty_ps_out in internal/runtime/src/tyrt2.c, which flushes stdout before
+// switching descriptors). Without that flush the err lines come out ahead of
+// the out lines here. The separation itself is checked by hand with
+// `./program 2>/dev/null` and `./program 1>/dev/null`.
+class Main {
+  public static void main(String[] args) {
+    System.out.println("out1")
+    System.err.println("err1")
+    System.out.print("out2-no-newline ")
+    System.err.print("err2-no-newline\n")
+    System.out.println("out3")
+  }
+}
