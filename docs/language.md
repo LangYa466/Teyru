@@ -493,8 +493,7 @@ for (String n : names) {
 
 ### 沒有的東西
 
-反射、執行緒、`java.util.concurrent`、時區資料庫、`Scanner`、`List.of`／`Map.of`
-這組便利工廠。這些缺席都是刻意的：它們要嘛需要執行期反射，要嘛需要一份比整個語言還大
+反射、執行緒、`java.util.concurrent`、時區資料庫、`Scanner`。這些缺席都是刻意的：它們要嘛需要執行期反射，要嘛需要一份比整個語言還大
 的資料表（時區），要嘛需要語言本身沒有的東西（執行緒），要嘛——`Scanner` 就是——
 做半套會比不做更糟。
 
@@ -549,8 +548,7 @@ for (String n : names) {
 - 模組系統的語意（`import module X` 會被剖析後忽略，執行期沒有模組系統；`module-info` 不支援）
 - 陣列的執行期元素型別一律是 `teyru.Array`，所以 `String[].class` 與
   `int[].class` 是同一個物件（Java 是兩個）
-- 標準程式庫缺口：`List.of(...)`／`Map.of(...)` 這組便利工廠、
-  `Comparator.comparingInt(...)` 家族、`String.lines()`；`String.format` 的
+- 標準程式庫缺口：`Scanner`（見 §11）；`String.format` 的
   `%t`／`%T`（日期時間轉換）也未實作，遇到會以 `ty_unimplemented` 停止而不是
   印出看起來合理的東西
 - 無法解析的完整限定名稱（例如 `java.util.Arrays.sort(x)`）會回報

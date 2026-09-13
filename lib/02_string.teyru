@@ -76,6 +76,46 @@ class String extends Object implements Comparable<String> {
     return Pattern.compile(re).split(this, limit)
   }
 
+  /* Java's String.lines: the lines of this string as a stream. A line is a
+     sequence of characters up to a terminator (\n, \r\n or \r) or to the end
+     of the string, and the terminator is not part of it -- so a string that
+     ends in one has no empty line after it, and an empty string has no lines at
+     all. Both come out of the split's own rules: a limit of zero drops the
+     trailing empty fields, and the empty string is the one case that rule does
+     not cover. */
+  public Stream<String> lines() {
+    List<String> out = new ArrayList<String>()
+    int n = length()
+    int start = 0
+    while (start < n) {
+      int i = start
+      int at = -1
+      int skip = 1
+      while (i < n) {
+        char c = charAt(i)
+        if (c == '\n') {
+          at = i
+          break
+        }
+        if (c == '\r') {
+          at = i
+          if (i + 1 < n && charAt(i + 1) == '\n') {
+            skip = 2
+          }
+          break
+        }
+        i++
+      }
+      if (at < 0) {
+        out.add(substring(start, n))
+        break
+      }
+      out.add(substring(start, at))
+      start = at + skip
+    }
+    return Streams.of(out)
+  }
+
   public static native String valueOf(Object v)
   public static native String valueOf(char[] v)
   public static native String valueOf(char[] v, int offset, int count)
