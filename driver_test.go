@@ -103,17 +103,14 @@ func TestNoJava(t *testing.T) {
 	if err != nil {
 		t.Skipf("no C compiler available: %v", err)
 	}
-	data, err := os.ReadFile(res.CFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lower := strings.ToLower(string(data))
+	data := res.CSource
+	lower := strings.ToLower(data)
 	for _, bad := range []string{"jni", "jvm", "javac", "class file"} {
 		if strings.Contains(lower, bad) {
 			t.Errorf("generated C mentions %q", bad)
 		}
 	}
-	if strings.Contains(string(data), ".class") {
+	if strings.Contains(data, ".class") {
 		t.Error("generated C references class files")
 	}
 }

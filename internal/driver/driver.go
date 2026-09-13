@@ -52,7 +52,12 @@ type Result struct {
 	CFile    string
 	LLVMFile string
 	Exe      string
-	Diags    *source.Diagnostics
+	// CSource is the generated C of this build. It belongs to the result rather
+	// than to a file the caller has to read before the build's cleanup removes
+	// it: the C itself is scaffolding and only a path the caller passed with -c
+	// outlives the build.
+	CSource string
+	Diags   *source.Diagnostics
 }
 
 // Compile turns Teyru sources into a native executable.
@@ -106,23 +111,24 @@ func Compile(paths []string, opts Options) (*Result, error) {
 	}
 	csrc := codegen.Emit(prog)
 
-	cfile := opts.CFile
-	if cfile == "" {
-		cfile = strings.TrimSuffix(opts.Out, filepath.Ext(opts.Out)) + ".c"
-		if opts.Out == "" {
-			cfile = "a.c"
-		}
-	}
-	dir := filepath.Dir(cfile)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
-	}
 	rtDir, err := os.MkdirTemp("", "teyru-rt-")
 	if err != nil {
 		return nil, err
 	}
 	if !opts.KeptTemp {
 		defer os.RemoveAll(rtDir)
+	}
+	// The generated C is scaffolding: it is written into the build's temporary
+	// directory unless the caller named a path. Writing it next to the output
+	// (`teyru build -o impl prog.teyru` produced impl.c) silently replaced a
+	// file of the user's that happened to have that name.
+	cfile := opts.CFile
+	if cfile == "" {
+		cfile = filepath.Join(rtDir, "program.c")
+	}
+	dir := filepath.Dir(cfile)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
 	}
 	rtC := writeRuntime(rtDir)
 	if err := os.WriteFile(cfile, []byte(csrc), 0o644); err != nil {
@@ -143,7 +149,7 @@ func Compile(paths []string, opts Options) (*Result, error) {
 	}
 	// The result reports each output as it is written, so a failure never
 	// claims a file that was not produced.
-	res := &Result{CFile: cfile, Diags: diags}
+	res := &Result{CFile: cfile, CSource: csrc, Diags: diags}
 	// The IR is a file the caller named explicitly, so it is written on every
 	// path that gets this far, including the one that skips the C compiler.
 	if err := writeLLVMIR(cc, opt, cfile, rtDir, opts.EmitLLVM); err != nil {

@@ -124,7 +124,9 @@ func main() {
 	if cmd == "emit" {
 		// `emit` prints the generated C: it must not compile or link anything,
 		// and it must not leave a binary behind, so the C compiler is skipped.
-		opts.CFile = filepath.Join(os.TempDir(), "teyru-emit.c")
+		// The C itself goes to the driver's temporary directory like every other
+		// build: a fixed path in the shared temporary directory is one
+		// concurrent emit away from handing back another program's source.
 		opts.EmitC = ""
 		opts.CSourceOnly = true
 	}
@@ -152,12 +154,7 @@ func main() {
 	}
 	switch cmd {
 	case "emit":
-		data, err := os.ReadFile(res.CFile)
-		if err != nil {
-			fail(err)
-		}
-		os.Stdout.Write(data)
-		os.Remove(res.CFile)
+		os.Stdout.WriteString(res.CSource)
 	case "emit-llvm":
 		data, err := os.ReadFile(res.LLVMFile)
 		if err != nil {
