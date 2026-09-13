@@ -345,7 +345,57 @@ func isStaticCtx(cl *ast.Class) bool {
 	return cl.Decl != nil && cl.Decl.Implicit
 }
 
-func (ctx *methodCtx) inStatic() bool { return ctx.m == nil || ctx.m.IsStatic() }
+func (ctx *methodCtx) inStatic() bool {
+	return ctx.m == nil || ctx.m.IsStatic() || ctx.noThis
+}
+
+// hasThis reports whether `this` denotes an instance at the point being
+// checked. A lambda body inherits the answer from where the lambda was
+// written: JLS 15.27.2 gives `this` the same meaning inside the body as
+// outside it, so a lambda in a static method has no instance to name, while a
+// lambda in an instance method, constructor or field initializer does.
+func (ctx *methodCtx) hasThis() bool {
+	if ctx.noThis {
+		return false
+	}
+	// a compact source file's implicit class has no instance at all
+	if ctx.cl != nil && isStaticCtx(ctx.cl) {
+		return false
+	}
+	if ctx.m != nil {
+		return !ctx.m.IsStatic()
+	}
+	// no method in scope: a field initializer runs on the instance under
+	// construction
+	return true
+}
+
+// noteThis records that the lambda body being checked uses `this`, which is
+// the instance the lambda was created in. Every lambda between the use and
+// that instance has to carry the reference, so each one captures it in turn:
+// the innermost needs the enclosing instance, the one around it needs it for
+// the innermost, and so on.
+func (ctx *methodCtx) noteThis() {
+	for l := ctx.lambda; l != nil; l = l.Outer {
+		l.CapThis = true
+	}
+}
+
+// thisUse is the check every use of the enclosing instance inside a lambda has
+// to pass: either there is an instance to capture, or the use is an error. In
+// a static method there is no `this`, so Java rejects the use instead of
+// silently binding it to the closure object.
+func (ctx *methodCtx) thisUse(pos source.Pos, what string) bool {
+	if ctx.lambda == nil {
+		return true
+	}
+	if !ctx.hasThis() {
+		ctx.errf(pos, "TY-TYP-0098", "non-static %s cannot be referenced from a static context", what)
+		return false
+	}
+	ctx.noteThis()
+	return true
+}
 
 // expectType gives the declared type of a field declarator.
 // ---------------------------------------------------------------- statements
@@ -910,7 +960,7 @@ func (ctx *methodCtx) checkExpr(e ast.Expr, want ast.Type) {
 			return
 		}
 		if ctx.lambda != nil {
-			ctx.lambda.CapThis = true
+			ctx.thisUse(v.Pos, "variable this")
 		}
 		v.SetType(&ast.ClassType{Class: ctx.cl, Args: typeVarArgs(ctx.cl)})
 	case *ast.SuperExpr:
@@ -918,6 +968,11 @@ func (ctx *methodCtx) checkExpr(e ast.Expr, want ast.Type) {
 			ctx.errf(v.Pos, "TY-TYP-0044", "no superclass")
 			v.SetType(ast.ErrorType{})
 			return
+		}
+		// super.x reaches the enclosing instance too, so a lambda body has to
+		// carry it exactly as it carries `this`
+		if ctx.lambda != nil {
+			ctx.thisUse(v.Pos, "variable super")
 		}
 		v.SetType(ctx.cl.Super)
 	case *ast.SwitchExpr:
@@ -1062,6 +1117,12 @@ func (ctx *methodCtx) checkIdent(v *ast.Ident, want ast.Type) {
 		}
 		if f.Mods.Has(ast.ModPrivate) && !sameNest(f.Owner, ctx.cl) {
 			ctx.errf(v.Pos, "TY-TYP-0046", "%s has private access in %s", f.Name, f.Owner.Name)
+		}
+		// A bare field name reads through the enclosing instance, so a lambda
+		// body has to carry that instance the same way an explicit `this` makes
+		// it. The static case is already reported above, by TY-TYP-0045.
+		if !f.Mods.Has(ast.ModStatic) && ctx.lambda != nil && ctx.hasThis() {
+			ctx.noteThis()
 		}
 		v.Ref = f
 		v.SetType(f.Type)
@@ -2717,6 +2778,16 @@ func (ctx *methodCtx) checkUnqualifiedCall(v *ast.Call, want ast.Type) {
 		}
 		v.Method = m
 		v.Static = m.IsStatic()
+		// An unqualified instance call runs on the enclosing instance, which
+		// inside a lambda is the instance the lambda was created in and not the
+		// closure object the body is compiled into. Naming that instance as the
+		// receiver is what makes the closure carry it and what keeps the call
+		// from dispatching back into the lambda's own method.
+		if !m.IsStatic() && ctx.lambda != nil {
+			if ctx.thisUse(v.Pos, "method "+callSignature(m)) {
+				v.Recv = ctx.implicitThis(v.Pos)
+			}
+		}
 		v.SetType(ctx.c.subst(m.Result, s.targs))
 		return
 	}
@@ -2764,6 +2835,27 @@ func (ctx *methodCtx) checkUnqualifiedCall(v *ast.Call, want ast.Type) {
 	}
 	ctx.errf(v.Pos, "TY-TYP-0076", "cannot find method %s(%s)", v.Name, argTypes(v.Args))
 	v.SetType(ast.ErrorType{})
+}
+
+// implicitThis is the receiver an unqualified instance member access runs on:
+// the instance the enclosing method was called on, or, from inside a lambda,
+// the instance the lambda was created in (JLS 15.27.2).
+func (ctx *methodCtx) implicitThis(pos source.Pos) ast.Expr {
+	return &ast.This{ExprBase: ast.ExprBase{Pos: pos, T: &ast.ClassType{Class: ctx.cl, Args: typeVarArgs(ctx.cl)}},
+		Var: ctx.thisVar(ctx.cl)}
+}
+
+// callSignature renders a method the way a diagnostic names it: "apply(int)".
+func callSignature(m *ast.Method) string {
+	var parts []string
+	for _, p := range m.Params {
+		if p == nil {
+			parts = append(parts, "?")
+			continue
+		}
+		parts = append(parts, p.String())
+	}
+	return m.Name + "(" + strings.Join(parts, ", ") + ")"
 }
 
 func (ctx *methodCtx) thisVar(cl *ast.Class) *ast.Var {
@@ -3254,7 +3346,8 @@ func (ctx *methodCtx) checkLambda(lam *ast.Lambda, want ast.Type) {
 	cl.Methods[m.Name] = append(cl.Methods[m.Name], m)
 	c.addCtor(cl, &ast.Method{Name: "<init>", IsCtor: true, Owner: cl, Mods: ast.ModPublic, Result: ast.TVoid, SynthKind: "lambda-ctor"})
 	// check the body in the lambda's scope
-	lctx := &methodCtx{c: c, cl: ctx.cl, m: m, env: ctx.env, lambda: lam}
+	lam.Outer = ctx.lambda
+	lctx := &methodCtx{c: c, cl: ctx.cl, m: m, env: ctx.env, lambda: lam, noThis: !ctx.hasThis()}
 	lctx.push()
 	outerLocals := ctx.scopes
 	lctx.scopes = append(append([]map[string]*ast.Var{}, outerLocals...), map[string]*ast.Var{})
@@ -3274,9 +3367,6 @@ func (ctx *methodCtx) checkLambda(lam *ast.Lambda, want ast.Type) {
 		p.Sym = lctx.declare(name, t, p.Pos)
 		m.ParamVars = append(m.ParamVars, p.Sym)
 	}
-	if isStaticCtx(ctx.cl) || ctx.m != nil && ctx.m.IsStatic() {
-		// static context lamdbdas cannot capture this
-	}
 	switch b := lam.Body.(type) {
 	case ast.Expr:
 		if ast.IsPrim(m.Result, ast.Void) {
@@ -3294,11 +3384,15 @@ func (ctx *methodCtx) checkLambda(lam *ast.Lambda, want ast.Type) {
 		}
 	}
 	if lam.CapThis {
-		// `this` of the enclosing class is captured as a field
-		f := &ast.Field{Name: "this", Type: &ast.ClassType{Class: ctx.cl, Args: typeVarArgs(ctx.cl)},
+		// The instance the lambda was created in is captured like any other
+		// variable, under the name code generation reads for it: cap_this. It
+		// is registered as a capture rather than as an instance field of the
+		// synthetic class so that it travels with the rest of them -- the
+		// struct slot, the reference layout the collector walks, and the store
+		// the closure does when it is created.
+		cv := &ast.Var{Name: "this", Type: &ast.ClassType{Class: ctx.cl, Args: typeVarArgs(ctx.cl)}, ID: -1}
+		cl.CapFields[cv] = &ast.Field{Name: "this", Type: cv.Type,
 			Mods: ast.ModPrivate | ast.ModFinal, Pos: lam.Pos, Storage: true, Owner: cl}
-		cl.Fields = append(cl.Fields, f)
-		cl.FieldMap["this"] = f
 	}
 	// captured variables become fields of the synthetic class
 	for _, v := range lam.Captures {

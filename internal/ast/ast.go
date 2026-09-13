@@ -550,6 +550,11 @@ type (
 		Captures []*Var
 		CapThis  bool
 		Class    *Class // synthesized closure class
+		// Outer is the lambda this one is written inside, when it is nested.
+		// A body that needs the enclosing instance makes every lambda around
+		// it carry the reference, so the chain from the use outwards is what
+		// says which closures capture it.
+		Outer *Lambda
 		// ExprStmt marks a body that is a statement expression and whose
 		// functional method returns void (JLS 15.27.2).
 		ExprStmt bool

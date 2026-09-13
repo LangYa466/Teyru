@@ -199,18 +199,22 @@ func (e *Emitter) expr(x ast.Expr) string {
 	case *ast.Conv:
 		return e.coerce(e.expr(v.X), v.X.GetType(), v.GetType())
 	case *ast.This:
-		if e.curLambda != nil && v.Qual == "" && e.curLambda.CapThis {
-			return "((" + e.ctype(v.GetType()) + ")this->cap_this)"
-		}
-		if v.Qual != "" {
-			if cl := e.prog.LookupClass(v.Qual); cl != nil {
-				return "(" + cname(cl) + "*)" + e.outerAccess(cl)
+		if v.Qual == "" {
+			// A synthesized node (the Lombok pass builds `this` by hand) can
+			// reach here without a type. The cast narrows the instance to the
+			// static type of this use; when there is none to narrow to, the
+			// instance itself is the answer -- `((void)this)` is not.
+			if t := v.GetType(); t == nil || t == ast.TVoid {
+				return e.thisExpr()
 			}
-			return "((void*)this)"
+			return "((" + e.ctype(v.GetType()) + ")" + e.thisExpr() + ")"
 		}
-		return "this"
+		if cl := e.prog.LookupClass(v.Qual); cl != nil {
+			return "(" + cname(cl) + "*)" + e.outerAccess(cl)
+		}
+		return "((void*)" + e.thisExpr() + ")"
 	case *ast.SuperExpr:
-		return "((void*)this)"
+		return "((void*)" + e.thisExpr() + ")"
 	case *ast.ClassLit:
 		t := v.Type.Resolved
 		if ct, ok := t.(*ast.ClassType); ok {
@@ -297,7 +301,7 @@ func (e *Emitter) ident(v *ast.Ident) string {
 		if e.curClass != nil && r.Owner != nil && r.Owner != e.curClass && !r.Mods.Has(ast.ModStatic) {
 			return e.outerFieldAccess(r)
 		}
-		return e.fieldAccess(r, "this")
+		return e.fieldAccess(r, e.thisExpr())
 	case *ast.Var:
 		if r == nil {
 			return "0"
@@ -310,13 +314,55 @@ func (e *Emitter) ident(v *ast.Ident) string {
 	return "0"
 }
 
+// thisExpr is the C expression for the instance the code being emitted runs
+// on. In a lambda body that is not the closure object: Java's `this` inside a
+// lambda is the instance the lambda was created in (JLS 15.27.2), and the
+// closure reaches that instance through the field it captured for it. An
+// unqualified call, a bare field name and `this` itself all go through here,
+// so none of them can land on the lambda object by accident.
+func (e *Emitter) thisExpr() string {
+	if f := e.capThisField(e.curLambda); f != nil {
+		return "this->cap_" + mangle(f.Name)
+	}
+	return "this"
+}
+
+// capThisField is the field a lambda holds the instance its body calls `this`,
+// or nil when the body does not need one. The checker adds it as a capture
+// under the name `this` when the body uses the enclosing instance, and the
+// capture mechanism gives it the struct slot `cap_this`.
+func (e *Emitter) capThisField(lam *ast.Lambda) *ast.Field {
+	if lam == nil || !lam.CapThis || lam.Class == nil {
+		return nil
+	}
+	for _, f := range lam.Class.CapFields {
+		if f.Name == "this" {
+			return f
+		}
+	}
+	return nil
+}
+
+// enclosureOf is the class of the instance a lambda body's `this` denotes, or
+// nil when the body does not use the enclosing instance.
+func (e *Emitter) enclosureOf(lam *ast.Lambda) *ast.Class {
+	f := e.capThisField(lam)
+	if f == nil {
+		return nil
+	}
+	if ct, ok := f.Type.(*ast.ClassType); ok {
+		return ct.Class
+	}
+	return nil
+}
+
 // outerAccess walks the enclosing-instance chain to the class that owns an
 // outer object, for references from a nested or inner class.
 func (e *Emitter) outerAccess(target *ast.Class) string {
-	recv := "this"
+	recv := e.thisExpr()
 	for cl := e.curClass; cl != nil && cl != target; cl = cl.Outer {
 		if cl.OuterField == nil || cl.Outer == nil {
-			return "((void*)this)"
+			return "((void*)" + e.thisExpr() + ")"
 		}
 		recv = "((" + cname(cl.Outer) + "*)" + recv + "->f_" + mangle(cl.OuterField.Name) + ")"
 	}
@@ -661,7 +707,12 @@ func (e *Emitter) lvalue(x ast.Expr) string {
 			if f.Mods.Has(ast.ModStatic) {
 				return "G_" + mangle(f.Owner.Full) + "_" + mangle(f.Name)
 			}
-			return e.fieldAccess(f, "this")
+			// a bare name is a field of the instance the code runs on, which
+			// inside a lambda body is the instance the lambda was created in
+			if e.curClass != nil && f.Owner != nil && f.Owner != e.curClass {
+				return e.outerFieldAccess(f)
+			}
+			return e.fieldAccess(f, e.thisExpr())
 		}
 		return e.ident(v)
 	case *ast.Select:
@@ -1159,9 +1210,15 @@ func (e *Emitter) callExpr(v *ast.Call) string {
 	if !m.IsStatic() {
 		switch {
 		case v.Recv == nil:
-			recv = "this"
+			// an unqualified call is a call on the instance the code runs on.
+			// The checker names the enclosing instance for a lambda body, so a
+			// call that still arrives without a receiver is a method of the
+			// class the body was written in: inside a lambda `this` is that
+			// instance, not the closure object, or the call would dispatch back
+			// into the lambda's own method and recurse until the stack ran out.
+			recv = e.thisExpr()
 		case v.Super:
-			recv = "((void*)this)"
+			recv = "((void*)" + e.thisExpr() + ")"
 		default:
 			recv = e.expr(v.Recv)
 		}
@@ -1184,7 +1241,7 @@ func (e *Emitter) callExpr(v *ast.Call) string {
 	}
 	if v.Recv == nil {
 		if m.Selector >= 0 || m.VIndex >= 0 {
-			return e.virtCall(m, cname(m.Owner)+"*", "this", v.Args)
+			return e.virtCall(m, cname(m.Owner)+"*", e.thisExpr(), v.Args)
 		}
 		return name + "(" + a + ")"
 	}
@@ -1422,10 +1479,14 @@ func (e *Emitter) lambdaExpr(lam *ast.Lambda) string {
 			fmt.Fprintf(&b, " %s->cap_%s = %s;", n, mangle(v.Name), e.refExpr(lam.RecvExpr))
 			continue
 		}
+		if f := e.capThisField(lam); f != nil && f.Name == v.Name {
+			// the enclosing instance comes from the same place a use of `this`
+			// inside this body does: the closure around it, or the method the
+			// lambda was created in
+			fmt.Fprintf(&b, " %s->cap_%s = %s;", n, mangle(v.Name), e.thisExpr())
+			continue
+		}
 		fmt.Fprintf(&b, " %s->cap_%s = %s;", n, mangle(v.Name), e.localName(v))
-	}
-	if lam.CapThis {
-		fmt.Fprintf(&b, " %s->cap_this = (%s*)this;", n, cname(cl))
 	}
 	fmt.Fprintf(&b, " %s; })", n)
 	return b.String()
@@ -1443,8 +1504,17 @@ func (e *Emitter) emitLambdaMethod(cl *ast.Class, m *ast.Method) {
 	for i, pv := range m.ParamVars {
 		e.locals[pv] = fmt.Sprintf("a%d", i)
 	}
-	// captured locals live in fields of the synthetic lambda class
+	// Captured locals live in fields of the synthetic lambda class. From the
+	// body's point of view `this` is the instance the lambda was created in
+	// (JLS 15.27.2), so the class in scope is the one the body was written in,
+	// not the closure class: a bare field name and an enclosing-class reference
+	// have to resolve the way they do in that class.
+	prevLambda, prevClass := e.curLambda, e.curClass
 	e.curLambda = lam
+	if enc := e.enclosureOf(lam); enc != nil {
+		e.curClass = enc
+	}
+	defer func() { e.curLambda, e.curClass = prevLambda, prevClass }()
 	for v, f := range cl.CapFields {
 		e.locals[v] = "this->cap_" + mangle(f.Name)
 	}
