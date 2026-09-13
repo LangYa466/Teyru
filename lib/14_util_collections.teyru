@@ -130,9 +130,8 @@ class CollectionSupport {
  * library; sort(list) hands it a comparator over the natural ordering, since
  * the merge would otherwise have to ask each element for compareTo.
  *
- * shuffle uses Math.random(): Java takes a java.util.Random so that a caller
- * can reproduce a shuffle, and there is no Random in this library yet, so a
- * shuffle cannot be seeded (docs/language.md §13). */
+ * shuffle takes a java.util.Random, which is what lets a caller reproduce a
+ * shuffle: the seeded form is a function of the Random's own sequence. */
 class Collections {
   private Collections() {
   }
@@ -159,8 +158,17 @@ class Collections {
   }
 
   public static <T> void shuffle(List<T> list) {
+    shuffle(list, new Random())
+  }
+
+  /* The seeded form is what makes a shuffle reproducible, and it is the one
+     Java tests are written against: the sequence of swaps is a function of the
+     Random's own nextInt, so the same seed gives the same order here and
+     there. Java's no-argument form draws from a Random of its own, which is
+     what the call above does. */
+  public static <T> void shuffle(List<T> list, Random rnd) {
     for (int i = list.size() - 1 : i > 0 : i--) {
-      int j = (int) (Math.random() * (i + 1))
+      int j = rnd.nextInt(i + 1)
       T tmp = list.get(i)
       list.set(i, list.get(j))
       list.set(j, tmp)
