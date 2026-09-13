@@ -128,19 +128,45 @@ static void sync_head_used(void) {
     chunks->used = (size_t)(ty_bump - chunks->mem);
 }
 
+static tychunk *valid_obj_last = NULL;
+
+/* valid_obj_forget drops the last-chunk cache: the sweep frees whole chunks,
+   and a stale pointer would be a use after free. */
+static void valid_obj_forget(void) { valid_obj_last = NULL; }
+
+/* obj_in_chunk answers for one chunk: 1 valid object, 0 not an object, -1 the
+   address is not in this chunk at all. */
+static int obj_in_chunk(tychunk *c, char *p) {
+  if (p < c->mem || p + TY_HDR > c->mem + c->used) return -1;
+  /* The map is indexed by block header, and `p` is a payload, so step back a
+     header first. A p that lies below the chunk's first payload wraps the
+     index and is rejected by the bound below. */
+  size_t i = (size_t)(p - TY_HDR - c->mem) / TY_ALIGN;
+  if (i >= c->cap / TY_ALIGN) return -1;
+  if (!(c->starts[i >> 3] & (uint8_t)(1u << (i & 7)))) return 0; /* interior word */
+  uint64_t sz = *(uint64_t *)(p - TY_HDR);
+  if (sz & TY_FREE_BIT) return 0; /* freed: the payload is a free list link */
+  return sz >= TY_HDR;
+}
+
 static int valid_obj(char *p) {
   if (((uintptr_t)p) & (TY_ALIGN - 1)) return 0;
+  /* A collection tests thousands of candidate words, and they are almost always
+     in the chunk the previous one was in, so the last chunk that answered is
+     tried first: walking the whole list every time makes a collection
+     quadratic in the number of chunks. ty_gc clears the cache, because the
+     sweep can free the chunk it points at. */
+  if (valid_obj_last) {
+    int r = obj_in_chunk(valid_obj_last, p);
+    if (r >= 0) return r;
+  }
   for (tychunk *c = chunks; c; c = c->next) {
-    if (p < c->mem || p + TY_HDR > c->mem + c->used) continue;
-    /* The map is indexed by block header, and `p` is a payload, so step back a
-       header first. A p that lies below the chunk's first payload wraps the
-       index and is rejected by the bound below. */
-    size_t i = (size_t)(p - TY_HDR - c->mem) / TY_ALIGN;
-    if (i >= c->cap / TY_ALIGN) continue;
-    if (!(c->starts[i >> 3] & (uint8_t)(1u << (i & 7)))) return 0; /* interior word */
-    uint64_t sz = *(uint64_t *)(p - TY_HDR);
-    if (sz & TY_FREE_BIT) return 0; /* freed: the payload is a free list link */
-    return sz >= TY_HDR;
+    if (c == valid_obj_last) continue;
+    int r = obj_in_chunk(c, p);
+    if (r >= 0) {
+      valid_obj_last = c;
+      return r;
+    }
   }
   return 0;
 }
@@ -286,6 +312,7 @@ void ty_gc(void) {
     live_bytes += live;
     pp = &c->next;
   }
+  valid_obj_forget();
   if (chunks) {
     ty_bump = chunks->mem + chunks->used;
     ty_bump_end = chunks->mem + chunks->cap;
