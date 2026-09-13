@@ -1,0 +1,5 @@
+package b
+
+public class Widget {
+  public static String kind() { return "b.Widget" }
+}

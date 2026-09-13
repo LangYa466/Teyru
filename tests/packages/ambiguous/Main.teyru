@@ -1,0 +1,11 @@
+// Both on-demand imports provide Widget, so the unqualified name is ambiguous
+// (JLS 6.5.5.1). Declaration order must not silently pick one: that compiles a
+// program that means something other than it says.
+import a.*
+import b.*
+
+class Main {
+  public static void main(String[] args) {
+    System.out.println(Widget.who())
+  }
+}

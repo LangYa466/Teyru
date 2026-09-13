@@ -88,6 +88,69 @@ func TestPrograms(t *testing.T) {
 	}
 }
 
+// TestPackages compiles every directory under tests/packages and compares the
+// program's output with the directory's `expected` file.
+//
+// These are the multi-file, multi-package cases: each directory is a whole
+// package tree, compiled by naming the directory (which the driver walks) and
+// run as one program. A single-file case belongs in tests/programs instead.
+func TestPackages(t *testing.T) {
+	if _, err := exec.LookPath("clang"); err != nil {
+		if _, err2 := exec.LookPath("gcc"); err2 != nil {
+			t.Skip("no C compiler available")
+		}
+	}
+	root := "tests/packages"
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		dir := filepath.Join(root, name)
+		// A directory with an `error` file is a rejection case: it must not
+		// compile, and the named diagnostic must appear. The cross-package
+		// rejections need a real package tree, which a single-file case in
+		// TestDiagnostics cannot write.
+		if code, err := os.ReadFile(filepath.Join(dir, "error")); err == nil {
+			t.Run(name, func(t *testing.T) {
+				res, err := driver.Compile([]string{dir}, driver.Options{
+					Out: filepath.Join(t.TempDir(), name), Opt: "-O0"})
+				if err == nil {
+					t.Fatal("expected a compile failure")
+				}
+				if res == nil || res.Diags == nil || !strings.Contains(res.Diags.String(), strings.TrimSpace(string(code))) {
+					t.Errorf("expected %s in:\n%v\n%v", strings.TrimSpace(string(code)), res.Diags, err)
+				}
+			})
+			continue
+		}
+		want, err := os.ReadFile(filepath.Join(dir, "expected"))
+		if err != nil {
+			t.Fatalf("%s: missing expectation file: %v", name, err)
+		}
+		t.Run(name, func(t *testing.T) {
+			out := filepath.Join(t.TempDir(), name)
+			res, err := driver.Compile([]string{dir}, driver.Options{Out: out, Opt: "-O1"})
+			if err != nil {
+				t.Fatalf("compile failed: %v\n%s", err, res.Diags)
+			}
+			cmd := exec.Command(res.Exe)
+			var outBuf, errBuf strings.Builder
+			cmd.Stdout, cmd.Stderr = &outBuf, &errBuf
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("run failed: %v\nstderr:\n%s", err, errBuf.String())
+			}
+			if got := outBuf.String(); got != string(want) {
+				t.Errorf("output mismatch\n--- want ---\n%s\n--- got ---\n%s", want, got)
+			}
+		})
+	}
+}
+
 // TestDiagnostics checks that ill-typed programs are rejected.
 func TestDiagnostics(t *testing.T) {
 	cases := []struct {

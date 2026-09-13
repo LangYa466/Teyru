@@ -179,6 +179,7 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 | TY-TYP-0096 | `switch expression does not cover all possible input values` | switch **運算式**必須窮盡：`int`／`String` 選擇子一定要有 `default`，列舉選擇子要涵蓋每一個常數。switch 陳述式不受此限。 |
 | TY-TYP-0097 | `native methods %s and %s both need the C symbol %s` | 兩個多載 native 方法編碼後得到同一個 C 符號（例如類別名 `AI` 與 `int[]`）。改名或改參數型別。 |
 | TY-TYP-0098 | `non-static %s cannot be referenced from a static context` | lambda 主體用到撰寫處的 `this`（含未限定的實例方法呼叫、裸欄位名與 `super`），但 lambda 寫在 static 方法或 static 初始化區塊裡，沒有實例可捕獲。Java 同樣拒絕。 |
+| TY-TYP-0099 | `reference to %s is ambiguous: it is declared in both %s and %s` | 兩個 `import p.*` 都提供同一個簡單名稱（JLS 6.5.5.1）。寫出完整名稱或用單一類型匯入（`import a.Widget`）消歧義。 |
 
 ## TY-PROP：原生 property
 

@@ -4,6 +4,7 @@ package driver
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -73,14 +74,30 @@ func Compile(paths []string, opts Options) (*Result, error) {
 			return nil, err
 		}
 		if st.IsDir() {
-			entries, err := os.ReadDir(p)
+			// A directory stands for the package tree rooted at it: every
+			// .teyru file underneath belongs to the build, which is what makes
+			// `teyru build ./...` and a layout of one directory per package
+			// work without listing files by hand. WalkDir is lexical, so the
+			// file order does not depend on the filesystem.
+			err := filepath.WalkDir(p, func(path string, d fs.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				name := d.Name()
+				if d.IsDir() {
+					// hidden directories hold tool state, not sources
+					if path != p && strings.HasPrefix(name, ".") {
+						return fs.SkipDir
+					}
+					return nil
+				}
+				if strings.HasSuffix(name, ".teyru") {
+					files = append(files, path)
+				}
+				return nil
+			})
 			if err != nil {
 				return nil, err
-			}
-			for _, e := range entries {
-				if !e.IsDir() && strings.HasSuffix(e.Name(), ".teyru") {
-					files = append(files, filepath.Join(p, e.Name()))
-				}
 			}
 			continue
 		}
