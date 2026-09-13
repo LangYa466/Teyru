@@ -1,0 +1,40 @@
+package todo
+
+import teyru.RestController
+import teyru.RequestMapping
+import teyru.GetMapping
+import teyru.PostMapping
+import teyru.PathVariable
+import teyru.RequestParam
+import teyru.RequestBody
+import teyru.Autowired
+
+// The annotations are Spring's. The difference is when they are read: this
+// class's mappings become routes at compile time, so a path that collides or a
+// parameter that cannot be filled is reported then, not at the first request.
+@RestController
+@RequestMapping("/todos")
+class TodoController {
+  @Autowired TodoStore store
+
+  @GetMapping("")
+  String list(@RequestParam(value = "q", defaultValue = "") String q) {
+    int n = 0
+    for (Todo t : store.all()) {
+      n++
+    }
+    return "count=" + n + " q=" + q
+  }
+
+  @GetMapping("/{id}")
+  Todo one(@PathVariable("id") int id) { return store.find(id) }
+
+  @GetMapping("/count")
+  String count() { return "count=" + store.count() }
+
+  @PostMapping("")
+  Todo add(@RequestBody String text) { return store.add(text) }
+
+  @PostMapping("/{id}/done")
+  Todo complete(@PathVariable("id") int id) { return store.complete(id) }
+}

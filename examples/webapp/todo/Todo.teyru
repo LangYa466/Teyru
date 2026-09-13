@@ -1,0 +1,6 @@
+package todo
+
+// A record, which is what a JSON payload wants to be: the binding walks its
+// components and needs nothing else.
+record Todo(int id, String text, boolean done) {
+}

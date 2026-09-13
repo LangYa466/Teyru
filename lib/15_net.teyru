@@ -270,7 +270,14 @@ class ServerSocket extends Object implements AutoCloseable {
   // second copy of it would only add a place for descriptors to leak.
   public Socket accept() {
     requireOpen()
-    int c = Net.accept0(fd, timeout)
+    // Java's meaning of a zero timeout is "no timeout", and this layer keeps
+    // that meaning at its own boundary. The C helper uses the opposite
+    // convention -- a negative millisecond count waits forever, zero does not
+    // wait at all -- so the two have to be translated here. Without this the
+    // default ServerSocket, whose timeout starts at zero, never accepts
+    // anything: every accept polls with a zero deadline and reports a timeout
+    // before the first client can connect.
+    int c = Net.accept0(fd, timeout == 0 ? -1 : timeout)
     if (c < 0) {
       throw Net.failure(c, "accept on port " + getLocalPort())
     }

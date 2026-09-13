@@ -1,0 +1,16 @@
+package main
+
+import todo.TodoController
+import todo.TodoStore
+
+// A module's entry point. `teyru run` finds it, builds the container, turns the
+// controllers' annotations into routes, and serves them.
+class Main {
+  public static void main(String[] args) {
+    ApplicationContext ctx = Application.boot(args)
+    Router router = Application.routerFrom(ctx)
+    HttpServer server = new HttpServer(8080, router, ctx)
+    System.out.println("listening on " + server.getPort())
+    server.serve()
+  }
+}

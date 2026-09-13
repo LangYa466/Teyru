@@ -177,11 +177,12 @@ func (c *Checker) jsonAdapterFor(cl *ast.Class, pos source.Pos) *jsonAdapterPair
 	c.jsonAdapters[cl] = pair
 
 	// Gson allocates without calling a constructor, through Unsafe. Teyru has
-	// no such thing, so a bound class needs a no-argument constructor to be
+	// no such thing, so a bound *class* needs a no-argument constructor to be
 	// read: the reader has to build the object before it can fill the fields.
-	// Saying so here is better than a confusing "no suitable constructor" from
-	// the generated code.
-	if !c.hasNoArgCtor(cl) {
+	// A record is the exception -- it is read through its canonical
+	// constructor, which is the only way to make one -- and it is also the type
+	// most worth binding, so it is handled below rather than refused.
+	if cl.Kind != ast.KindRecord && !c.hasNoArgCtor(cl) {
 		c.errf(pos, "TY-TYP-0112",
 			"%s is bound from JSON but has no no-argument constructor; add one, or bind a class that has one", cl.Name)
 		delete(c.jsonAdapters, cl)
@@ -359,6 +360,24 @@ func (c *Checker) synthJsonReader(cl *ast.Class, fields []jsonField) *ast.Method
 		Type: &ast.TypeExpr{Pos: pos(), Name: "JsonObject"},
 		Vars: []*ast.VarDeclarator{{Pos: pos(), Name: "o", Init: callNamed(id("e"), "getAsJsonObject")}},
 	})
+	if cl.Kind == ast.KindRecord {
+		// A record has no no-argument constructor and no mutable fields: the
+		// only way to make one is its canonical constructor, so the components
+		// are read into the argument list rather than assigned afterwards. An
+		// absent member takes the component's zero value, since a record has no
+		// field initializer to fall back on.
+		var args []ast.Expr
+		for _, jf := range fields {
+			e := c.jsonReadValue(jf)
+			if e == nil {
+				return nil
+			}
+			args = append(args, absentOr(jf, e, zeroOfType(jf.field.Type)))
+		}
+		stmts = append(stmts, returnOf(newObj(cl, args...)))
+		m.Body = blockOf(stmts...)
+		return m
+	}
 	stmts = append(stmts, &ast.LocalVar{
 		Pos:  pos(),
 		Type: &ast.TypeExpr{Pos: pos(), Name: cl.Full, Resolved: &ast.ClassType{Class: cl}},
@@ -413,9 +432,19 @@ func (c *Checker) jsonPrimKind(t ast.Type) (ast.PrimKind, bool) {
 	return ast.Void, false
 }
 
+// jsonReadValue is the expression that reads one member's value out of the
+// object, without the guard for a member the document does not carry.
+func (c *Checker) jsonReadValue(jf jsonField) ast.Expr {
+	return c.jsonReadValue0(jf, true)
+}
+
 // jsonReadExpr is the expression that reads one field out of the object, or nil
 // for a field whose type has no mapping.
 func (c *Checker) jsonReadExpr(jf jsonField, owner *ast.Class) ast.Expr {
+	return c.jsonReadValue0(jf, false)
+}
+
+func (c *Checker) jsonReadValue0(jf jsonField, bare bool) ast.Expr {
 	// JsonObject answers with the element; the accessor belongs to the element,
 	// which is Gson's shape too (JsonObject.getAsString does not exist there
 	// either).
@@ -445,7 +474,7 @@ func (c *Checker) jsonReadExpr(jf jsonField, owner *ast.Class) ast.Expr {
 			c.errf(jf.field.Pos, "TY-TYP-0110", "%s has no JSON mapping for its type %s", jf.field.Name, jf.field.Type)
 			return nil
 		}
-		return absentGuard(jf, value)
+		return guardOrBare(jf, value, bare)
 	}
 	ct, ok := c.erasure(jf.field.Type).(*ast.ClassType)
 	if !ok || ct.Class == nil {
@@ -454,11 +483,11 @@ func (c *Checker) jsonReadExpr(jf jsonField, owner *ast.Class) ast.Expr {
 	}
 	switch {
 	case ct.Class.Special == "String":
-		return absentGuard(jf, get("getAsString"))
+		return guardOrBare(jf, get("getAsString"), bare)
 	case ct.Class == c.b.Object:
 		// an Object field keeps the tree as it arrived, which is what Gson's
 		// ObjectTypeAdapter answers with
-		return absentGuard(jf, callNamed(id("o"), "get", strLit(jf.name)))
+		return guardOrBare(jf, callNamed(id("o"), "get", strLit(jf.name)), bare)
 	}
 	pair := c.jsonAdapterFor(ct.Class, jf.field.Pos)
 	if pair == nil {
@@ -466,8 +495,17 @@ func (c *Checker) jsonReadExpr(jf jsonField, owner *ast.Class) ast.Expr {
 	}
 	// the nested reader takes the element itself, so this one does not read a
 	// value out of it first
-	return absentGuard(jf, callNamed(id(ct.Class.Full), pair.reader.Name,
-		callNamed(id("o"), "get", strLit(jf.name))))
+	return guardOrBare(jf, callNamed(id(ct.Class.Full), pair.reader.Name,
+		callNamed(id("o"), "get", strLit(jf.name))), bare)
+}
+
+// guardOrBare wraps a read in the question of whether the document carries the
+// member, or answers the bare read when the caller wants the value alone.
+func guardOrBare(jf jsonField, value ast.Expr, bare bool) ast.Expr {
+	if bare {
+		return value
+	}
+	return absentGuard(jf, value)
 }
 
 // absentGuard leaves a field alone when the document does not carry it, which is
@@ -475,6 +513,28 @@ func (c *Checker) jsonReadExpr(jf jsonField, owner *ast.Class) ast.Expr {
 func absentGuard(jf jsonField, value ast.Expr) ast.Expr {
 	return &ast.Cond{ExprBase: ast.ExprBase{Pos: pos()},
 		C: callNamed(id("o"), "has", strLit(jf.name)), X: value, Y: sel(id("v"), jf.field.Name)}
+}
+
+// absentOr picks the value a member takes when the document does not carry it.
+func absentOr(jf jsonField, value, fallback ast.Expr) ast.Expr {
+	return &ast.Cond{ExprBase: ast.ExprBase{Pos: pos()},
+		C: callNamed(id("o"), "has", strLit(jf.name)), X: value, Y: fallback}
+}
+
+// zeroOfType is the value a member of a type takes when nothing supplies one:
+// what Java's `new int[1]` or a field with no initializer would give.
+func zeroOfType(t ast.Type) ast.Expr {
+	if p, ok := t.(*ast.PrimType); ok {
+		switch p.Kind {
+		case ast.Boolean:
+			return boolLit(false)
+		case ast.Int, ast.Long, ast.Short, ast.Byte, ast.Char:
+			return intLit(0)
+		case ast.Float, ast.Double:
+			return &ast.Literal{ExprBase: ast.ExprBase{Pos: pos(), T: ast.TDouble}, Kind: ast.LitDouble}
+		}
+	}
+	return &ast.Literal{ExprBase: ast.ExprBase{Pos: pos(), T: ast.NullType{}}, Kind: ast.LitNull}
 }
 
 // jsonWriteStmt is the statement that writes one field into the object.
