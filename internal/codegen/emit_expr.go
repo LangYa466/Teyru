@@ -710,10 +710,6 @@ func (e *Emitter) operand(x ast.Expr, op ast.Type) string {
 }
 
 func (e *Emitter) equality(v *ast.Binary, lt, rt ast.Type) string {
-	neg := ""
-	if v.Op == "!=" {
-		neg = "!"
-	}
 	ls, lsOk := lt.(*ast.PrimType)
 	rs, rsOk := rt.(*ast.PrimType)
 	_ = ls
@@ -731,9 +727,10 @@ func (e *Emitter) equality(v *ast.Binary, lt, rt ast.Type) string {
 		}
 		return "(" + x + " " + v.Op + " " + y + ")"
 	}
-	if e.isStringType(lt) && e.isStringType(rt) {
-		return "(" + neg + "ty_str_eq((tystr*)" + e.expr(v.X) + ", (tystr*)" + e.expr(v.Y) + "))"
-	}
+	// `==` on two String references is a reference comparison, as in Java: two
+	// strings built separately are equal only under equals(). Literals are
+	// interned per program by strLit, so `a == "abc"` is still true, and so is a
+	// comparison against a concatenation of literals folded at compile time.
 	return "(" + e.expr(v.X) + " " + v.Op + " " + e.expr(v.Y) + ")"
 }
 
