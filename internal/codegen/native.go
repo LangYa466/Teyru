@@ -114,6 +114,10 @@ var nativeTable = map[string]nativeFn{
 	"Float.valueOf(F)":         {fn: "ty_box_float"},
 	"Float.toString()":         {fn: "ty_float_tostr", recv: "void*"},
 	"Float.parseFloat(String)": {fn: "ty_str_tofloat", recv: "tystr*"},
+	"Float.hashCode()":         {fn: "ty_float_hash", recv: "void*"},
+	"Float.equals(Object)":     {fn: "ty_float_equals", recv: "void*"},
+	"Float.compareTo(Float)":   {fn: "ty_float_compare_obj", recv: "void*"},
+	"Float.compare(F,F)":       {fn: "ty_float_compare"},
 
 	"Boolean.booleanValue()":       {fn: "ty_unbox_bool", recv: "void*"},
 	"Boolean.valueOf(Z)":           {fn: "ty_box_bool"},
@@ -122,12 +126,15 @@ var nativeTable = map[string]nativeFn{
 	"Boolean.hashCode()":           {fn: "ty_unbox_bool", recv: "void*"},
 	"Boolean.equals(Object)":       {fn: "ty_bool_equals", recv: "void*"},
 
-	"Character.charValue()":     {fn: "ty_unbox_char", recv: "void*"},
-	"Character.valueOf(C)":      {fn: "ty_box_char"},
-	"Character.isDigit(C)":      {fn: "ty_is_digit"},
-	"Character.isLetter(C)":     {fn: "ty_is_letter"},
-	"Character.isWhitespace(C)": {fn: "ty_is_space"},
-	"Character.toString()":      {fn: "ty_char_tostr", recv: "void*"},
+	"Character.charValue()":          {fn: "ty_unbox_char", recv: "void*"},
+	"Character.valueOf(C)":           {fn: "ty_box_char"},
+	"Character.isDigit(C)":           {fn: "ty_is_digit"},
+	"Character.isLetter(C)":          {fn: "ty_is_letter"},
+	"Character.isWhitespace(C)":      {fn: "ty_is_space"},
+	"Character.toString()":           {fn: "ty_char_tostr", recv: "void*"},
+	"Character.hashCode()":           {fn: "ty_char_hash", recv: "void*"},
+	"Character.equals(Object)":       {fn: "ty_char_equals", recv: "void*"},
+	"Character.compareTo(Character)": {fn: "ty_char_compare_obj", recv: "void*"},
 
 	// ---- Math
 	"Math.abs(I)":   {fn: "ty_abs_int"},
@@ -349,6 +356,20 @@ func (e *Emitter) nativeDecls() []NativeDecl {
 					Method:    cl.Full + "." + m.Name,
 				})
 			}
+		}
+		// Constructors are not in cl.Methods (they are named <init> and live in
+		// cl.Ctors), but a native constructor links against tyn_Class__init__...
+		// like any other native method: leaving them out made the linker ask for
+		// a symbol the header never declared.
+		for _, m := range cl.Ctors {
+			if !m.External || seen[m.Native] {
+				continue
+			}
+			seen[m.Native] = true
+			out = append(out, NativeDecl{
+				Signature: e.nativeSignature(m),
+				Method:    cl.Full + "." + cl.Name,
+			})
 		}
 	}
 	return out
