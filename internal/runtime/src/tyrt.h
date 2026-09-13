@@ -389,7 +389,6 @@ int32_t ty_object_equals(tyobj *a, tyobj *b);
 /* enum helpers */
 
 int32_t ty_div_int(int32_t a, int32_t b);
-tyarr *ty_str_split(tystr *s, tystr *sep);
 int64_t ty_div_long(int64_t a, int64_t b);
 int32_t ty_rem_int(int32_t a, int32_t b);
 int64_t ty_rem_long(int64_t a, int64_t b);
@@ -539,11 +538,6 @@ tystr *ty_str_interned(tystr *s);
 /* The regex-shaped methods: Teyru has no regular expression engine, so these
    answer for a pattern that is a literal -- no metacharacter can change what it
    matches -- and fail loudly for one that is not. */
-void ty_str_check_literal(tystr *re, const char *what);
-tystr *ty_str_replaceall(tystr *s, tystr *re, tystr *rep);
-tystr *ty_str_replacefirst(tystr *s, tystr *re, tystr *rep);
-int32_t ty_str_matches(tystr *s, tystr *re);
-tyarr *ty_str_split_limit(tystr *s, tystr *re, int32_t limit);
 /* String.format */
 tystr *ty_str_format(tystr *fmt, tyarr *args);
 

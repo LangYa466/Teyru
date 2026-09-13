@@ -832,47 +832,6 @@ int32_t ty_str_charat(tystr *s, int32_t i) {
   return (unsigned char)s->data[i];
 }
 int32_t ty_str_contains(tystr *s, tystr *sub) { return ty_str_indexof(s, sub) >= 0; }
-/* Java semantics: trailing empty fields are dropped, and an empty separator
-   returns the whole string as the single element. */
-tyarr *ty_str_split(tystr *s, tystr *sep) {
-  if (!s || !sep) ty_npe();
-  if (sep->len == 0) {
-    tyarr *one = ty_array_new(1, 8);
-    one->refs = 1;
-    /* the declared result is String[], so the array promises String for its
-       elements the same way `new String[]` does; TY_STRING is installed before
-       any user code runs */
-    one->elemcls = TY_STRING;
-    ((void **)one->data)[0] = ty_str_new(s->data, s->len);
-    return one;
-  }
-  int64_t count = 1, i = 0;
-  while (i + sep->len <= s->len) {
-    if (memcmp(s->data + i, sep->data, (size_t)sep->len) == 0) {
-      count++;
-      i += sep->len;
-    } else {
-      i++;
-    }
-  }
-  tyarr *out = ty_array_new(count, 8);
-  out->refs = 1;
-  out->elemcls = TY_STRING;
-  int64_t start = 0, field = 0;
-  i = 0;
-  while (i + sep->len <= s->len) {
-    if (memcmp(s->data + i, sep->data, (size_t)sep->len) == 0) {
-      ((void **)out->data)[field++] = ty_str_new(s->data + start, i - start);
-      i += sep->len;
-      start = i;
-    } else {
-      i++;
-    }
-  }
-  ((void **)out->data)[field] = ty_str_new(s->data + start, s->len - start);
-  while (out->len > 0 && ((tystr **)out->data)[out->len - 1]->len == 0) out->len--;
-  return out;
-}
 int32_t ty_str_starts(tystr *s, tystr *p) {
   if (!s || !p) return 0;
   return p->len <= s->len && memcmp(s->data, p->data, (size_t)p->len) == 0;
@@ -1904,51 +1863,6 @@ tystr *ty_str_replace_str(tystr *s, tystr *a, tystr *b) {
   return r;
 }
 
-/* --------------------------------------------------- regex-shaped methods */
-
-/* Teyru has no regular expression engine. Rather than answer a pattern it
-   cannot honour -- which would silently change what a program matches --
-   replaceAll, replaceFirst, matches and split(String, int) test the pattern for
-   a metacharacter and, for a pattern that has one, call ty_unimplemented, which
-   prints the method name and exits 70. A pattern with no metacharacter is a
-   literal, and for it these are exactly Java. */
-static const char *regex_meta = "\\^$.|?*+()[]{}";
-void ty_str_check_literal(tystr *re, const char *what) {
-  int64_t i;
-  if (!re) ty_npe();
-  for (i = 0; i < re->len; i++)
-    if (strchr(regex_meta, re->data[i])) ty_unimplemented(what);
-}
-tystr *ty_str_replaceall(tystr *s, tystr *re, tystr *rep) {
-  ty_str_check_literal(re, "String.replaceAll");
-  return ty_str_replace_str(s, re, rep);
-}
-tystr *ty_str_replacefirst(tystr *s, tystr *re, tystr *rep) {
-  int32_t at;
-  int64_t i, n;
-  char *p;
-  tystr *r;
-  ty_str_check_literal(re, "String.replaceFirst");
-  if (!s || !re || !rep) ty_npe();
-  at = ty_str_indexof(s, re);
-  if (at < 0) return ty_str_new(s->data, s->len);
-  n = at + rep->len + (s->len - at - re->len);
-  r = ty_str_new(NULL, n);
-  p = r->data;
-  memcpy(p, s->data, (size_t)at);
-  memcpy(p + at, rep->data, (size_t)rep->len);
-  for (i = 0; i < s->len - at - re->len; i++)
-    p[at + rep->len + i] = s->data[at + re->len + i];
-  return r;
-}
-/* matches() is anchored at both ends, as Java defines it: the whole string has
-   to be the pattern, which for a literal pattern is equality. */
-int32_t ty_str_matches(tystr *s, tystr *re) {
-  ty_str_check_literal(re, "String.matches");
-  if (!s || !re) ty_npe();
-  return s->len == re->len && memcmp(s->data, re->data, (size_t)s->len) == 0;
-}
-
 /* -------------------------------------------------------------- char[] */
 
 /* A char is one byte in this runtime, so the two views are element for element:
@@ -2034,64 +1948,6 @@ tystr *ty_str_interned(tystr *s) {
   intern_tab[h] = e;
   intern_used++;
   return s;
-}
-
-/* split with a limit, Java's way. The limit is a count of fields, not of
-   separators: a positive limit stops after that many fields with the rest of
-   the string left whole in the last one, a limit of zero drops the trailing
-   empty fields, and a negative limit keeps every field it finds. */
-tyarr *ty_str_split_limit(tystr *s, tystr *re, int32_t limit) {
-  tyarr *out;
-  int64_t i = 0, field = 0, n = 1, at;
-  ty_str_check_literal(re, "String.split");
-  if (!s || !re) ty_npe();
-  if (limit > 0 && n > limit) n = limit;
-  if (re->len == 0) {
-    /* an empty pattern matches before every character: Java gives one field per
-       character, and with a positive limit it stops at the limit */
-    n = s->len;
-    if (limit > 0 && limit < n) n = limit;
-    if (n == 0) {
-      tyarr *one = ty_array_new(1, 8);
-      one->refs = 1;
-      one->elemcls = TY_STRING;
-      ((void **)one->data)[0] = ty_str_new(s->data, s->len);
-      return one;
-    }
-    out = ty_array_new(n, 8);
-    out->refs = 1;
-    out->elemcls = TY_STRING;
-    for (i = 0; i < n; i++) {
-      int64_t len = (i == n - 1 && limit <= 0) ? s->len - i : 1;
-      ((void **)out->data)[i] = ty_str_new(s->data + i, len);
-    }
-    return out;
-  }
-  while (i + re->len <= s->len) {
-    if (limit <= 0 || n < limit) {
-      if (memcmp(s->data + i, re->data, (size_t)re->len) == 0) { n++; i += re->len; continue; }
-    }
-    i++;
-  }
-  out = ty_array_new(n, 8);
-  out->refs = 1;
-  out->elemcls = TY_STRING;
-  i = 0;
-  at = 0;
-  while (i + re->len <= s->len && (limit <= 0 || field < n - 1)) {
-    if (memcmp(s->data + i, re->data, (size_t)re->len) == 0) {
-      ((void **)out->data)[field++] = ty_str_new(s->data + at, i - at);
-      i += re->len;
-      at = i;
-    } else {
-      i++;
-    }
-  }
-  ((void **)out->data)[field] = ty_str_new(s->data + at, s->len - at);
-  if (limit == 0) {
-    while (out->len > 0 && ((tystr **)out->data)[out->len - 1]->len == 0) out->len--;
-  }
-  return out;
 }
 
 /* -------------------------------------------- StringBuilder/StringBuffer */

@@ -53,19 +53,28 @@ class String extends Object implements Comparable<String> {
   public native String toString()
   public native String replace(char old, char now)
   public native String replace(String old, String now)
-  /* Java's three regex methods, answered for a literal pattern. Teyru has no
-     regular expression engine and will not grow one here, so the C side tests
-     the pattern for metacharacters and calls ty_unimplemented with the method
-     name when it finds one -- a loud exit 70 rather than a silent wrong
-     answer. A literal pattern is by far the common call, and for it these are
-     exact. The search is not anchored for replaceAll/replaceFirst (Java's
-     literal-looking patterns are unanchored too) but matches() is anchored at
-     both ends, as Java defines it. */
-  public native String replaceAll(String re, String rep)
-  public native String replaceFirst(String re, String rep)
-  public native boolean matches(String re)
-  public native String[] split(String re)
-  public native String[] split(String re, int limit)
+  /* Java's five regex methods. These were natively implemented over a literal
+     pattern until lib/21 gave the language an engine; now they are what Java
+     says they are -- Pattern.compile(re) and a Matcher call. `matches` is
+     anchored at both ends, replaceAll/replaceFirst are not, which is exactly
+     what Matcher does; the only thing left here is Java's handling of a
+     trailing empty field in split, which the Matcher overloads cannot express
+     because they work on a match rather than on a partition. */
+  public String replaceAll(String re, String rep) {
+    return Pattern.compile(re).matcher(this).replaceAll(rep)
+  }
+  public String replaceFirst(String re, String rep) {
+    return Pattern.compile(re).matcher(this).replaceFirst(rep)
+  }
+  public boolean matches(String re) {
+    return Pattern.compile(re).matcher(this).matches()
+  }
+  public String[] split(String re) {
+    return split(re, 0)
+  }
+  public String[] split(String re, int limit) {
+    return Pattern.compile(re).split(this, limit)
+  }
 
   public static native String valueOf(Object v)
   public static native String valueOf(char[] v)
