@@ -780,6 +780,13 @@ func (ctx *methodCtx) checkTry(v *ast.Try) {
 	ctx.push()
 	defer ctx.pop()
 	for _, r := range v.Resources {
+		// `try (held)` is Java 9's form: an existing variable (or any
+		// expression) named as the resource. Its expression is not a statement,
+		// so the no-effect rule does not apply to it.
+		if es, ok := r.(*ast.ExprStmt); ok {
+			ctx.checkExpr(es.X, nil)
+			continue
+		}
 		ctx.checkStmt(r)
 		if lv, ok := r.(*ast.LocalVar); ok {
 			for _, vd := range lv.Vars {
