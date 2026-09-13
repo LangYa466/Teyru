@@ -1,0 +1,769 @@
+package teyru
+
+// Networking: TCP sockets, shaped like java.net.
+//
+// The C half lives in internal/runtime/src/tyrt_net.c, which the compiler
+// copies into every build. What that file cannot do is throw: a Teyru exception
+// declared in the prelude has no tyclass the runtime can name -- the compiler
+// installs a fixed list of built-ins into runtime globals at startup, and a
+// class declared in lib/ is not on it -- so every helper there answers with an
+// integer instead. The convention is documented in that file and in
+// internal/runtime/src/tyrt_net.h: a negative result is -errno, a non-negative
+// one is a count, a descriptor or a port, a read that returns 0 has met the end
+// of the stream and a read that returns -EAGAIN has run out of time. Everything
+// in this file exists to turn those integers back into exceptions, so that no
+// caller of Socket ever sees one.
+//
+// Every native method is a `public static native` in `Net`, which is final.
+// That is not tidiness: the compiler replaces a native call with a direct call
+// to its C helper only when the method is static, private, final, or owned by a
+// class with no subclasses, and the generated program repeats the helper's
+// prototype at each call site (see the `proto` field in
+// internal/codegen/native.go). A class that could be subclassed takes the other
+// path -- a stub whose body does not carry the prototype -- and the C would no
+// longer compile. Keeping every native static and in one final class means the
+// constraint can never be broken by subclassing Socket, which is a thing a
+// program may well want to do.
+//
+// Descriptors are plain ints held in a field, and the C takes them as an
+// argument. Nothing in C reads a generated struct, so a field added to Socket
+// cannot silently change what the runtime finds at an offset -- the trap the
+// PrintStream.target field documents.
+//
+// What this is not: there are no threads in the language, so there is no
+// thread-per-connection server here and no pool. Two servers in one process do
+// work, because a socket is a descriptor and nothing about it is global, but a
+// program that accepts on two at once has to take turns. A timed read or accept
+// (setSoTimeout) is what stops that from being a dead end: it is the only way
+// to wait on more than one thing at a time in a program with one thread.
+
+// ---------------------------------------------------------------- exceptions
+//
+// Java's hierarchy, cut down to the part a socket and a file can produce. They
+// extend Exception rather than RuntimeException, as java.io does: a program
+// that talks to the network or the disk is expected to say what it does when
+// the other end is not there.
+
+class IOException extends Exception {
+  public IOException() {
+  }
+  public IOException(String message) {
+    super(message)
+  }
+  public IOException(String message, Throwable cause) {
+    super(message, cause)
+  }
+}
+
+// A socket that failed for a reason that is not specific to connecting,
+// resolving or timing out: a refused connection, a broken pipe, a write to a
+// socket the peer has closed.
+class SocketException extends IOException {
+  public SocketException() {
+  }
+  public SocketException(String message) {
+    super(message)
+  }
+}
+
+// The one that must never be confused with the end of a stream. A server that
+// reads a request under a timeout needs to tell "the client is slow" apart from
+// "the client is gone", because the first is worth waiting for and the second
+// is a connection to close.
+class SocketTimeoutException extends IOException {
+  public SocketTimeoutException() {
+  }
+  public SocketTimeoutException(String message) {
+    super(message)
+  }
+}
+
+class UnknownHostException extends IOException {
+  public UnknownHostException() {
+  }
+  public UnknownHostException(String message) {
+    super(message)
+  }
+}
+
+// Raised by readFully and readLine's callers when the stream ended in the
+// middle of what was being read. read() and read(byte[],int,int) report the
+// same event as -1, which is Java's contract and what a loop checks for.
+class EOFException extends IOException {
+  public EOFException() {
+  }
+  public EOFException(String message) {
+    super(message)
+  }
+}
+
+// ---------------------------------------------------------------- the C surface
+//
+// Every `0`-suffixed method below is implemented in C, in
+// internal/runtime/src/tyrt_net.c, and internal/codegen/native_net.go maps the
+// signature onto the helper. Nothing outside this class calls one, so the
+// status codes never leave this file.
+//
+// The body each one carries does not run. It is there because `native` cannot
+// be used here, and the reason is worth writing down. The compiler implements a
+// prelude class's native method by generating a body that calls the helper
+// directly -- without the prototype the call sites carry (see emitSynthetic in
+// internal/codegen/emit_synth.go, which reads nativeFn.fn and ignores
+// nativeFn.proto). That is fine for every prelude class whose helper tyrt.h
+// declares, and impossible for this layer: tyrt.h is not a file this feature
+// may edit, and the driver copies exactly four runtime files into a build, so a
+// declaration of these helpers exists nowhere the generated program can see it.
+// What the layer needs is the prototype repeated at each call site, which is
+// what nativeFn.proto is for -- and the call site takes that path only when the
+// method is not `native` and so has no generated body.
+//
+// So the body is the price of shipping the C in a file of its own. It throws
+// rather than returning a plausible number: if a call ever reaches it, the
+// compiler has stopped substituting, and a program that says so is worth more
+// than one that quietly binds port 0.
+final class Net {
+  // A descriptor, or -errno. TY_NET_TIMEOUT (-EAGAIN) when the wait expired,
+  // TY_NET_UNKNOWN_HOST when the name did not resolve.
+  public static int listen0(int port, int backlog, boolean reuse) {
+    throw new IllegalStateException("Net.listen0 is implemented in C")
+  }
+  public static int connect0(String host, int port, int timeoutMs) {
+    throw new IllegalStateException("Net.connect0 is implemented in C")
+  }
+  public static int accept0(int fd, int timeoutMs) {
+    throw new IllegalStateException("Net.accept0 is implemented in C")
+  }
+  // The count read, which may be short; 0 at end of stream; negative on failure.
+  public static int read0(int fd, byte[] b, int off, int len) {
+    throw new IllegalStateException("Net.read0 is implemented in C")
+  }
+  // The count written, which is always len or an error: the C loops until the
+  // last byte is out, because a short write there is a truncated response.
+  public static int write0(int fd, byte[] b, int off, int len) {
+    throw new IllegalStateException("Net.write0 is implemented in C")
+  }
+  public static int writeStr0(int fd, String s) {
+    throw new IllegalStateException("Net.writeStr0 is implemented in C")
+  }
+  public static int close0(int fd) {
+    throw new IllegalStateException("Net.close0 is implemented in C")
+  }
+  public static int shutdownWrite0(int fd) {
+    throw new IllegalStateException("Net.shutdownWrite0 is implemented in C")
+  }
+  public static int setTimeout0(int fd, int ms) {
+    throw new IllegalStateException("Net.setTimeout0 is implemented in C")
+  }
+  public static int setReuse0(int fd, boolean on) {
+    throw new IllegalStateException("Net.setReuse0 is implemented in C")
+  }
+  public static int localPort0(int fd) {
+    throw new IllegalStateException("Net.localPort0 is implemented in C")
+  }
+  public static String localAddr0(int fd) {
+    throw new IllegalStateException("Net.localAddr0 is implemented in C")
+  }
+  public static String peerAddr0(int fd) {
+    throw new IllegalStateException("Net.peerAddr0 is implemented in C")
+  }
+  public static String strerror0(int code) {
+    throw new IllegalStateException("Net.strerror0 is implemented in C")
+  }
+  // The message for a status code, as the C spells it. The file layer reports
+  // its failures with the same codes, so this is what turns one into a sentence
+  // for both of them -- and it is the only place a code becomes text.
+  public static String strerror(int code) {
+    return strerror0(code)
+  }
+  public static boolean isTimeout0(int code) {
+    throw new IllegalStateException("Net.isTimeout0 is implemented in C")
+  }
+  public static boolean isUnknownHost0(int code) {
+    throw new IllegalStateException("Net.isUnknownHost0 is implemented in C")
+  }
+  // The way back from bytes to text. String.getBytes is the way out and is
+  // already in the prelude, so only this direction needs anything here. Nothing
+  // is decoded: one byte is one character, which is the identity for ASCII and
+  // for the UTF-8 that rides on top of it, and it is the same convention
+  // String.charAt and String.length already keep.
+  public static String stringFrom(byte[] b, int off, int len) {
+    throw new IllegalStateException("Net.stringFrom is implemented in C")
+  }
+
+  // The exception a code from the runtime means. Returning it rather than
+  // throwing it lets a caller write `throw Net.failure(...)` at the one place
+  // that knows what was being attempted, and keeps the message there too: the
+  // C knows the reason, only the caller knows what the reason is a reason for.
+  public static IOException failure(int code, String what) {
+    String msg = what + ": " + strerror0(code)
+    if (isTimeout0(code)) {
+      return new SocketTimeoutException(msg)
+    }
+    if (isUnknownHost0(code)) {
+      return new UnknownHostException(msg)
+    }
+    return new SocketException(msg)
+  }
+
+  // The form used by everything that has an answer on success: a negative code
+  // becomes the exception above, anything else passes through.
+  public static int ok(int code, String what) {
+    if (code < 0) {
+      throw failure(code, what)
+    }
+    return code
+  }
+
+  public static String stringFrom(byte[] b) {
+    return stringFrom(b, 0, b.length)
+  }
+
+  // The first len bytes of a String as a byte[], which is getBytes without the
+  // rest of the text. A protocol handler that has a header value in hand and an
+  // offset into it wants this more often than it wants the whole string.
+  public static byte[] bytesOf(String s, int off, int len) {
+    byte[] all = s.getBytes()
+    byte[] part = new byte[len]
+    for (int i = 0 : i < len : i++) {
+      part[i] = all[off + i]
+    }
+    return part
+  }
+}
+
+// ---------------------------------------------------------------- ServerSocket
+
+// The listening end. Backlog and the reuse option are constructor arguments, as
+// in Java, because both have to be decided before the bind: SO_REUSEADDR set
+// afterwards has no effect on a socket that is already bound.
+class ServerSocket extends Object implements AutoCloseable {
+  private int fd = -1
+  private int timeout = 0
+  private int port = -1
+
+  public ServerSocket(int port) {
+    this(port, 0, true)
+  }
+
+  public ServerSocket(int port, int backlog) {
+    this(port, backlog, true)
+  }
+
+  // reuse defaults to on in every one of these, which Java does not do. Without
+  // it, a server that is restarted while a connection is still in TIME_WAIT
+  // cannot bind its own port for up to a minute, and the failure looks like
+  // "address already in use" on a port nothing is listening on. The one
+  // behaviour a test suite and a restarting service both need is the one that
+  // should not have to be asked for.
+  public ServerSocket(int port, int backlog, boolean reuse) {
+    this.port = port
+    int r = Net.listen0(port, backlog, reuse)
+    if (r < 0) {
+      throw Net.failure(r, "bind to port " + port)
+    }
+    this.fd = r
+  }
+
+  // Blocks until a client connects, or until the accept timeout expires, which
+  // raises SocketTimeoutException. One connection per call; there is no queue
+  // of accepted sockets in this layer, because the kernel already has one and a
+  // second copy of it would only add a place for descriptors to leak.
+  public Socket accept() {
+    requireOpen()
+    int c = Net.accept0(fd, timeout)
+    if (c < 0) {
+      throw Net.failure(c, "accept on port " + getLocalPort())
+    }
+    return new Socket(c)
+  }
+
+  // Java's ServerSocket.setSoTimeout bounds accept, and this is the same thing
+  // with the same meaning: 0 waits forever. It is what makes a serving loop
+  // testable at all -- a program with no threads cannot be interrupted, so
+  // without a deadline an accept that nobody connects to hangs the process and
+  // there is no way back.
+  public void setSoTimeout(int millis) {
+    if (millis < 0) {
+      throw new IllegalArgumentException("timeout cannot be negative")
+    }
+    timeout = millis
+  }
+
+  public int getSoTimeout() {
+    return timeout
+  }
+
+  public void setReuseAddress(boolean on) {
+    requireOpen()
+    Net.ok(Net.setReuse0(fd, on), "set SO_REUSEADDR")
+  }
+
+  // The port the socket is actually bound to, which for `new ServerSocket(0)`
+  // is the one the kernel picked. That is how a test binds a port it knows is
+  // free without a race against every other process on the machine.
+  public int getLocalPort() {
+    if (fd < 0) {
+      return port
+    }
+    int p = Net.localPort0(fd)
+    if (p < 0) {
+      throw Net.failure(p, "read the local port")
+    }
+    return p
+  }
+
+  public boolean isClosed() {
+    return fd < 0
+  }
+
+  // Closing the listener leaves every accepted connection alone, which is what
+  // Java does and what a server that wants to stop listening while it finishes
+  // answering wants.
+  public void close() {
+    if (fd < 0) {
+      return
+    }
+    int f = fd
+    fd = -1
+    Net.close0(f)
+  }
+
+  private void requireOpen() {
+    if (fd < 0) {
+      throw new SocketException("server socket is closed")
+    }
+  }
+
+  public String toString() {
+    if (fd < 0) {
+      return "ServerSocket[closed,port=" + port + "]"
+    }
+    return "ServerSocket[addr=" + Net.localAddr0(fd) + ",localport=" + getLocalPort() + "]"
+  }
+}
+
+// ---------------------------------------------------------------- Socket
+
+// The connected end. Both constructors that take an address connect
+// immediately, as java.net.Socket does, so a Socket that exists is a Socket
+// that is connected unless it was built from a descriptor.
+class Socket extends Object implements AutoCloseable {
+  private int fd = -1
+  private boolean closed = false
+  private int timeout = 0
+  private SocketInputStream in = null
+  private SocketOutputStream out = null
+
+  // The descriptor form: wraps a socket that is already connected, which is
+  // what ServerSocket.accept hands back. Java has the same constructor for the
+  // same reason (a SocketImpl), and it is the only way for one class in this
+  // package to give another a connected descriptor without a global.
+  public Socket(int fd) {
+    this.fd = fd
+  }
+
+  public Socket(String host, int port) {
+    connect(host, port, -1)
+  }
+
+  public Socket(String host, int port, int connectTimeoutMs) {
+    connect(host, port, connectTimeoutMs)
+  }
+
+  public void connect(String host, int port) {
+    connect(host, port, -1)
+  }
+
+  // A timeout of 0 or less waits without a deadline, which is Java's meaning of
+  // "no timeout" and is what `new Socket(host, port)` asks for. Anything else
+  // bounds the whole connect, DNS lookup included, and raises
+  // SocketTimeoutException when it expires.
+  public void connect(String host, int port, int connectTimeoutMs) {
+    if (closed) {
+      throw new SocketException("socket is closed")
+    }
+    if (fd >= 0) {
+      throw new SocketException("socket is already connected")
+    }
+    int r = Net.connect0(host, port, connectTimeoutMs > 0 ? connectTimeoutMs : -1)
+    if (r < 0) {
+      throw Net.failure(r, "connect to " + host + ":" + port)
+    }
+    fd = r
+    // A timeout set before the connection existed still has to take effect, so
+    // it is applied now that there is a descriptor to apply it to.
+    if (timeout > 0) {
+      Net.ok(Net.setTimeout0(fd, timeout), "set SO_RCVTIMEO")
+    }
+  }
+
+  // The read-side deadline, in Java's units and with Java's meaning: it bounds
+  // one read call, not the whole exchange, and 0 waits forever. It is what
+  // turns a peer that has gone quiet into a SocketTimeoutException instead of a
+  // process that never comes back.
+  public void setSoTimeout(int millis) {
+    if (millis < 0) {
+      throw new IllegalArgumentException("timeout cannot be negative")
+    }
+    timeout = millis
+    if (fd < 0) {
+      return
+    }
+    Net.ok(Net.setTimeout0(fd, millis), "set SO_RCVTIMEO")
+  }
+
+  public int getSoTimeout() {
+    return timeout
+  }
+
+  public void setReuseAddress(boolean on) {
+    requireOpen()
+    Net.ok(Net.setReuse0(fd, on), "set SO_REUSEADDR")
+  }
+
+  // The end of the stream in one direction only. A client that has sent its
+  // whole request and is now waiting for the answer uses this: the FIN tells
+  // the server the request is complete, and the socket stays open for the
+  // reply, which closing it would throw away.
+  public void shutdownOutput() {
+    requireOpen()
+    Net.ok(Net.shutdownWrite0(fd), "shut down the output side")
+  }
+
+  public SocketInputStream getInputStream() {
+    requireOpen()
+    if (in == null) {
+      in = new SocketInputStream(this)
+    }
+    return in
+  }
+
+  public SocketOutputStream getOutputStream() {
+    requireOpen()
+    if (out == null) {
+      out = new SocketOutputStream(this)
+    }
+    return out
+  }
+
+  // Reads for the streams, which have no descriptor of their own and no way to
+  // ask this class for one: the field stays private to Socket and the syscalls
+  // stay in it too, so there is exactly one owner of the descriptor.
+  public int read(byte[] b, int off, int len) {
+    requireOpen()
+    if (b == null) {
+      throw new NullPointerException("buffer")
+    }
+    if (off < 0 || len < 0 || off + len > b.length) {
+      throw new IndexOutOfBoundsException("off=" + off + " len=" + len + " length=" + b.length)
+    }
+    if (len == 0) {
+      return 0
+    }
+    return Net.ok(Net.read0(fd, b, off, len), "read")
+  }
+
+  public int write(byte[] b, int off, int len) {
+    requireOpen()
+    if (b == null) {
+      throw new NullPointerException("buffer")
+    }
+    if (off < 0 || len < 0 || off + len > b.length) {
+      throw new IndexOutOfBoundsException("off=" + off + " len=" + len + " length=" + b.length)
+    }
+    if (len == 0) {
+      return 0
+    }
+    return Net.ok(Net.write0(fd, b, off, len), "write")
+  }
+
+  public int write(String s) {
+    requireOpen()
+    if (s == null) {
+      throw new NullPointerException("text")
+    }
+    return Net.ok(Net.writeStr0(fd, s), "write")
+  }
+
+  public int getLocalPort() {
+    requireOpen()
+    return Net.ok(Net.localPort0(fd), "read the local port")
+  }
+
+  public String getLocalAddress() {
+    requireOpen()
+    String a = Net.localAddr0(fd)
+    if (a == null) {
+      throw new SocketException("read the local address")
+    }
+    return a
+  }
+
+  public String getRemoteAddress() {
+    requireOpen()
+    String a = Net.peerAddr0(fd)
+    if (a == null) {
+      throw new SocketException("read the remote address")
+    }
+    return a
+  }
+
+  public boolean isClosed() {
+    return closed
+  }
+
+  public boolean isConnected() {
+    return fd >= 0 && !closed
+  }
+
+  // Closing the socket closes both streams, as Java's does: they are views of
+  // this descriptor, not owners of it, and a program that writes to a closed
+  // socket should get SocketException rather than a descriptor number that has
+  // since been handed to a file.
+  public void close() {
+    if (closed || fd < 0) {
+      closed = true
+      return
+    }
+    closed = true
+    int f = fd
+    fd = -1
+    Net.close0(f)
+  }
+
+  private void requireOpen() {
+    if (fd < 0 || closed) {
+      throw new SocketException("socket is closed")
+    }
+  }
+
+  public String toString() {
+    if (fd < 0 || closed) {
+      return "Socket[closed]"
+    }
+    return "Socket[addr=" + getRemoteAddress() + ",localport=" + getLocalPort() + "]"
+  }
+}
+
+// ---------------------------------------------------------------- streams
+
+// A view of a socket's bytes rather than a stream of its own, which is why it
+// holds the Socket and not a descriptor.
+//
+// It extends the prelude's InputStream so that it can be passed where one is
+// expected, and it overrides both of that class's methods: read() because a
+// socket is not the console, and readln() because the inherited one reads
+// stdin, and a server that silently read the console would be a very quiet bug
+// indeed. readLine() is the name this class uses; readln() is kept as the
+// override that delegates to it.
+class SocketInputStream extends InputStream {
+  private Socket socket
+  // One buffer for everything: read() and readLine() would otherwise be a
+  // syscall per byte, and a request line arriving in two packets is the normal
+  // case, not the exceptional one.
+  private byte[] buf = new byte[8192]
+  private int pos = 0
+  private int count = 0
+
+  public SocketInputStream(Socket socket) {
+    this.socket = socket
+  }
+
+  // Java's contract, byte for byte: the next byte as 0..255, or -1 at the end
+  // of the stream. A byte is signed in this language, so the masking is what
+  // makes the return value the unsigned one Java promises.
+  public int read() {
+    if (pos == count) {
+      if (!fill()) {
+        return -1
+      }
+    }
+    int v = buf[pos]
+    pos++
+    return v & 255
+  }
+
+  // Java's shape: as many bytes as are ready, up to len, and never more. A
+  // short result is normal and callers loop; the only two other answers are -1
+  // for the end of the stream and an exception for a broken connection or a
+  // timeout. When the buffer is empty the read goes straight into the caller's
+  // array, so a server that reads request bodies by the kilobyte does not pay
+  // for the line buffer it is not using.
+  public int read(byte[] b, int off, int len) {
+    if (b == null) {
+      throw new NullPointerException("buffer")
+    }
+    if (off < 0 || len < 0 || off + len > b.length) {
+      throw new IndexOutOfBoundsException("off=" + off + " len=" + len + " length=" + b.length)
+    }
+    if (len == 0) {
+      return 0
+    }
+    if (pos < count) {
+      int n = count - pos
+      if (n > len) {
+        n = len
+      }
+      for (int i = 0 : i < n : i++) {
+        b[off + i] = buf[pos + i]
+      }
+      pos = pos + n
+      return n
+    }
+    return socket.read(b, off, len)
+  }
+
+  // read(byte[],int,int) until the array is full. The distinction this exists
+  // for: a short read is a normal answer from read() and a fatal one from
+  // readFully, so a caller that needs exactly n bytes -- an HTTP body, a
+  // length-prefixed frame -- says so once instead of writing the loop.
+  public void readFully(byte[] b, int off, int len) {
+    int have = 0
+    while (have < len) {
+      int n = read(b, off + have, len - have)
+      if (n < 0) {
+        throw new EOFException("end of stream after " + have + " of " + len + " bytes")
+      }
+      have = have + n
+    }
+  }
+
+  public byte[] readFully(int len) {
+    byte[] b = new byte[len]
+    readFully(b, 0, len)
+    return b
+  }
+
+  // One line, without its terminator, or null at the end of the stream -- the
+  // same three-way answer Java's BufferedReader gives: a line, null, or an
+  // exception. A terminator is "\n", "\r\n" or a lone "\r", which is what the
+  // grammar of every text protocol that predates the web allows.
+  //
+  // null rather than an exception at the end is deliberate and is why this is
+  // not the prelude's readln(): a server loop is `while ((line = in.readLine())
+  // != null)`, and making the normal end of a connection an exception would
+  // make every loop a try block.
+  public String readLine() {
+    StringBuilder sb = null
+    while (true) {
+      if (pos == count) {
+        if (!fill()) {
+          if (sb == null) {
+            return null
+          }
+          return sb.toString()
+        }
+      }
+      int nl = -1
+      for (int i = pos : i < count : i++) {
+        if (buf[i] == 10) {
+          nl = i
+          break
+        }
+      }
+      if (nl < 0) {
+        if (sb == null) {
+          sb = new StringBuilder()
+        }
+        sb.append(Net.stringFrom(buf, pos, count - pos))
+        pos = count
+        continue
+      }
+      String line
+      if (sb == null) {
+        line = Net.stringFrom(buf, pos, nl - pos)
+      } else {
+        sb.append(Net.stringFrom(buf, pos, nl - pos))
+        line = sb.toString()
+      }
+      pos = nl + 1
+      if (line.endsWith("\r")) {
+        line = line.substring(0, line.length() - 1)
+      }
+      return line
+    }
+  }
+
+  // The prelude's InputStream has readln() and this is a socket, not the
+  // console. Overriding it is not a nicety: without it, `in.readln()` on a
+  // socket would compile, run, and read the terminal.
+  public String readln() {
+    return readLine()
+  }
+
+  public boolean isClosed() {
+    return socket.isClosed()
+  }
+
+  // Closing a stream closes its socket, as in Java. The stream is a view, so
+  // there is nothing here to close that the socket does not own.
+  public void close() {
+    socket.close()
+  }
+
+  // Nothing to do: the C writes every call straight to the socket, so there is
+  // no user-space buffer to push out. Java's socket streams have the same
+  // no-op flush() and for the same reason.
+  public void flush() {
+  }
+
+  // Fills the buffer, returning false at the end of the stream. A short read is
+  // not the end: read() returns what the kernel had, and the next call asks
+  // again. Only a 0 means the peer is done.
+  private boolean fill() {
+    int n = socket.read(buf, 0, buf.length)
+    if (n <= 0) {
+      return false
+    }
+    pos = 0
+    count = n
+    return true
+  }
+}
+
+// The writing side. Every write reaches the socket before it returns: the C
+// loops until the last byte is out, so a short write is not something a caller
+// here has to consider. flush() exists for the shape of the API and does
+// nothing, which is what a socket stream's flush does in Java too.
+class SocketOutputStream extends Object implements AutoCloseable {
+  private Socket socket
+  private byte[] one = new byte[1]
+
+  public SocketOutputStream(Socket socket) {
+    this.socket = socket
+  }
+
+  // Java's OutputStream.write(int) writes the low eight bits and nothing else,
+  // so a byte that arrives as 0..255 or as -128..127 means the same thing here.
+  public void write(int b) {
+    one[0] = (byte) b
+    socket.write(one, 0, 1)
+  }
+
+  public void write(byte[] b) {
+    write(b, 0, b.length)
+  }
+
+  public void write(byte[] b, int off, int len) {
+    socket.write(b, off, len)
+  }
+
+  // Not in java.io, where the same thing is an OutputStreamWriter around this
+  // one. A protocol's bytes are text far more often than not, and a socket that
+  // can write a String without a conversion in the caller is the difference
+  // between one line and three at every call site.
+  public void write(String s) {
+    socket.write(s)
+  }
+
+  public boolean isClosed() {
+    return socket.isClosed()
+  }
+
+  public void close() {
+    socket.close()
+  }
+
+  public void flush() {
+  }
+}

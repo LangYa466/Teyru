@@ -1,9 +1,782 @@
-/* The socket and file-descriptor primitives.
+/* tyrt_net.c - sockets and files, in POSIX calls and nothing else.
  *
- * Kept apart from tyrt.c and tyrt2.c so that the networking code is one file to
- * read, and so that a program which never opens a socket still compiles a
- * translation unit whose functions are never called. Every entry here is
- * reached from a Teyru `native` method through the table in
- * internal/codegen/native_net.go; nothing in the language core depends on it.
+ * The language has no threads, so none of this is written for concurrency: a
+ * descriptor is an int, a server is a loop, and every helper here is a
+ * straight-line conversation with the kernel. What it is written for is being
+ * correct under load, which for a socket layer means four things, all of them
+ * handled below and none of them optional:
+ *
+ *   - a read may return fewer bytes than asked for, and the caller is told how
+ *     many rather than being lied to;
+ *   - a write may accept fewer bytes than given, so it is looped until the last
+ *     byte is out (the classic bug: a response of 100 KB goes out as one
+ *     write() and arrives truncated the moment the peer's window closes);
+ *   - a signal may interrupt any of these, so EINTR is retried inside the loop
+ *     rather than escaping as a spurious failure;
+ *   - a write to a socket whose peer has gone raises SIGPIPE, whose default
+ *     action kills the process, so every send carries MSG_NOSIGNAL instead of
+ *     the runtime touching the process-wide signal disposition.
+ *
+ * Time is the other half. A read that blocks forever cannot be told apart from
+ * a peer that is merely slow, and a server that hangs cannot be tested, so
+ * SO_RCVTIMEO is available through setSoTimeout and reports itself as
+ * TY_NET_TIMEOUT. It is deliberately a code of its own: a timeout returning 0
+ * would be read as end of file by every loop that checks for it, which is the
+ * mistake this file goes out of its way to make impossible.
+ *
+ * The file half is the same shape without the timing: fopen and the FILE API
+ * are avoided on purpose, because their buffering hides both the partial write
+ * and the errno that explains the failure, and because a program that answers
+ * requests cannot afford a stdio lock. open/read/write/stat/opendir are the
+ * whole of it -- no shell, no system(), no path ever reaching a command line.
  */
+
+#define _GNU_SOURCE /* accept4, MSG_NOSIGNAL: both are Linux's, and this file is
+                       compiled on its own, so the feature macro is its own
+                       business rather than a flag the whole program carries */
+
+/* tyrt.h and not tyrt_net.h, which is the header this file has but cannot use.
+   The driver copies exactly one networking file into the directory it builds
+   in -- tyrt_net.c, the one internal/runtime/embed.go embeds -- so a header
+   sitting next to this file in the source tree would not be there at build
+   time and `#include "tyrt_net.h"` would be a fatal error. The declarations
+   this file needs are therefore in it, and tyrt_net.h carries the same ones for
+   C that links *against* the layer. tests/native/net_c_test.c includes both, so
+   the compiler checks the two agree rather than trusting that they do. */
 #include "tyrt.h"
+
+#include <arpa/inet.h>
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <unistd.h>
+
+/* The largest name getaddrinfo is handed from this file. A host name longer
+   than this is not a name any resolver can use. */
+#define TY_HOST_MAX 256
+
+/* accept()'s backlog when the caller does not care. 128 is what Linux's
+   somaxconn clamps to by default anyway, so asking for more changes nothing and
+   asking for less drops connections a burst would otherwise survive. */
+#define TY_BACKLOG_DEFAULT 128
+
+/* The most of a path this file will build out of a prefix, so that a
+   pathological prefix cannot run the template past PATH_MAX. */
+#define TY_PREFIX_MAX 64
+
+/* The result a read, an accept or a connect gives when it ran out of time. It
+   is -EAGAIN because that is what the kernel reports when SO_RCVTIMEO expires
+   on a blocking socket, and because every socket here is blocking outside the
+   one connect that is non-blocking on purpose: an EAGAIN on a read can only
+   mean the timer fired. It must never be confused with the 0 a read returns at
+   end of file, which is the bug this whole convention exists to prevent. */
+#define TY_NET_TIMEOUT (-EAGAIN)
+
+/* The name did not resolve. getaddrinfo has no errno for this -- it returns
+   EAI_* codes of its own -- and Java reports it as an exception type of its
+   own rather than as an I/O failure, so it gets a code of its own here. The
+   value is far below every errno (all of which are under 2000), so the two
+   spaces cannot collide. */
+#define TY_NET_UNKNOWN_HOST (-10001)
+
+/* What a path names. lib/16_file.teyru reads these values, so TY_FILE_NONE
+   must stay 0: it is the answer for a path that is not there, and the answer
+   for a call that failed is negative. */
+#define TY_FILE_NONE 0
+#define TY_FILE_REG 1
+#define TY_FILE_DIR 2
+#define TY_FILE_OTHER 3
+
+/* ---- small helpers ---------------------------------------------------- */
+
+/* The bytes of a Teyru string as a C string, or NULL when it cannot be one.
+   Every path and host name goes through here: a string whose bytes contain a
+   NUL cannot name a file, and silently truncating it at the NUL would open the
+   wrong one. ty_str_new guarantees the terminator, so the length check is a
+   test for an embedded NUL and nothing else. */
+static const char *ty_cstr(tystr *s) {
+  if (!s || !s->data) return NULL;
+  if ((int64_t)strlen(s->data) != s->len) return NULL;
+  return s->data;
+}
+
+/* A byte array is the only array this file reads or writes. The element size is
+   the test: every byte[] the codegen creates has esize 1, and a short[] or an
+   int[] passed here by mistake would otherwise be filled with bytes and read
+   back as numbers. */
+static int ty_is_bytes(tyarr *a) { return a && a->esize == 1; }
+
+/* The reason a function that also returns an object failed. Such a function
+   cannot report it in its return value the way the rest of this file does, and
+   the emitter has no way to hand a C pointer back to Teyru, so the caller
+   passes in a one-element int[] and reads the element afterwards. Writing the
+   element rather than the array is not a detail: the array's header holds the
+   class pointer the collector follows, so `*err = e` on a tyarr * would put an
+   errno where the class pointer belongs and crash the next collection. The
+   check is there for the same reason -- a caller that passed a byte[] or an
+   empty array gets no write at all rather than a corrupted neighbour. */
+static void ty_set_err(tyarr *err, int32_t v) {
+  if (err && err->esize == 4 && err->len >= 1) ((int32_t *)err->data)[0] = v;
+}
+
+/* ---- sockets ---------------------------------------------------------- */
+
+int32_t ty_net_listen(int32_t port, int32_t backlog, int32_t reuse) {
+  if (port < 0 || port > 65535) return -EINVAL;
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return -errno;
+  if (reuse) {
+    int on = 1;
+    /* A failure here is not fatal: without it the bind may still succeed, and
+       refusing to listen because the option was rejected would turn a
+       convenience into a requirement. */
+    (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
+  }
+  struct sockaddr_in a;
+  memset(&a, 0, sizeof a);
+  a.sin_family = AF_INET;
+  a.sin_addr.s_addr = htonl(INADDR_ANY);
+  a.sin_port = htons((uint16_t)port);
+  if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) {
+    int e = errno;
+    (void)close(fd);
+    return -e;
+  }
+  if (listen(fd, backlog > 0 ? backlog : TY_BACKLOG_DEFAULT) < 0) {
+    int e = errno;
+    (void)close(fd);
+    return -e;
+  }
+  return fd;
+}
+
+/* One candidate address, connected and put back into blocking mode. The
+   connect is made non-blocking even when the caller asked for no timeout: it
+   turns an unbounded wait in the kernel into a wait this code can bound, and it
+   is the only way connect can be given a deadline at all. */
+static int32_t ty_connect_one(const struct addrinfo *r, int32_t timeout_ms) {
+  int fd = socket(r->ai_family, r->ai_socktype, r->ai_protocol);
+  if (fd < 0) return -errno;
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+    int e = errno;
+    (void)close(fd);
+    return -e;
+  }
+  if (connect(fd, r->ai_addr, r->ai_addrlen) < 0) {
+    /* EINTR leaves the connect running rather than aborting it, which is why
+       it takes the same path as EINPROGRESS instead of being an error. */
+    if (errno != EINPROGRESS && errno != EINTR) {
+      int e = errno;
+      (void)close(fd);
+      return -e;
+    }
+    struct pollfd p;
+    p.fd = fd;
+    p.events = POLLOUT;
+    p.revents = 0;
+    for (;;) {
+      int pr = poll(&p, 1, timeout_ms < 0 ? -1 : timeout_ms);
+      if (pr < 0) {
+        if (errno == EINTR) continue; /* a signal is not a deadline */
+        int e = errno;
+        (void)close(fd);
+        return -e;
+      }
+      if (pr == 0) {
+        /* The deadline passed with the connection still in flight. The socket
+           is closed rather than handed on: a connection that completes later
+           would otherwise arrive with nobody waiting for it. */
+        (void)close(fd);
+        return TY_NET_TIMEOUT;
+      }
+      break;
+    }
+    /* Pollable for writing is not the same as connected: the answer is in
+       SO_ERROR, which is where the kernel reports a refused or unreachable
+       connection that the non-blocking connect could not return directly. */
+    int soerr = 0;
+    socklen_t slen = sizeof soerr;
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &slen) < 0) {
+      int e = errno;
+      (void)close(fd);
+      return -e;
+    }
+    if (soerr != 0) {
+      (void)close(fd);
+      return -soerr;
+    }
+  }
+  /* Every read and write in this file assumes a blocking socket, so the flag
+     goes back the way it was found. */
+  if (fcntl(fd, F_SETFL, flags) < 0) {
+    int e = errno;
+    (void)close(fd);
+    return -e;
+  }
+  return fd;
+}
+
+int32_t ty_net_connect(tystr *host, int32_t port, int32_t timeout_ms) {
+  const char *name = ty_cstr(host);
+  if (!name || !*name) return -EINVAL;
+  if (strlen(name) >= TY_HOST_MAX) return -ENAMETOOLONG;
+  if (port < 0 || port > 65535) return -EINVAL;
+  char serv[8];
+  snprintf(serv, sizeof serv, "%d", (int)port);
+  struct addrinfo hints;
+  struct addrinfo *res = NULL;
+  memset(&hints, 0, sizeof hints);
+  /* IPv4 only, and not because IPv6 is hard: a listener binds INADDR_ANY, so a
+     name that resolves to ::1 first would reach a server that is right there
+     and get refused. One address family on both sides is what makes
+     `new Socket("localhost", ss.getLocalPort())` work. */
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_protocol = IPPROTO_TCP;
+  if (getaddrinfo(name, serv, &hints, &res) != 0) return TY_NET_UNKNOWN_HOST;
+  int32_t first_err = 0;
+  int32_t fd = -1;
+  for (struct addrinfo *r = res; r; r = r->ai_next) {
+    int32_t c = ty_connect_one(r, timeout_ms);
+    if (c >= 0) {
+      fd = c;
+      break;
+    }
+    /* The first failure is the one reported, because the first address is the
+       one the resolver preferred and therefore the one that explains why the
+       name did not work. */
+    if (first_err == 0) first_err = c;
+  }
+  freeaddrinfo(res);
+  if (fd >= 0) return fd;
+  return first_err != 0 ? first_err : TY_NET_UNKNOWN_HOST;
+}
+
+int32_t ty_net_accept(int32_t fd, int32_t timeout_ms) {
+  if (fd < 0) return -EINVAL;
+  for (;;) {
+    if (timeout_ms >= 0) {
+      /* accept has no timeout of its own that can be relied on -- SO_RCVTIMEO
+         is documented for reads and its effect on accept differs between
+         kernels -- so the wait happens first and the accept is then known to
+         return rather than block. */
+      struct pollfd p;
+      p.fd = fd;
+      p.events = POLLIN;
+      p.revents = 0;
+      int pr = poll(&p, 1, timeout_ms);
+      if (pr < 0) {
+        if (errno == EINTR) continue;
+        return -errno;
+      }
+      if (pr == 0) return TY_NET_TIMEOUT;
+    }
+    int c = accept4(fd, NULL, NULL, SOCK_CLOEXEC);
+    if (c >= 0) return c;
+    if (errno == EINTR) continue;
+    /* A client that gave up between the poll and the accept is not a failure of
+       this server: the connection it abandoned is dropped and the next one is
+       taken. */
+    if (errno == ECONNABORTED) continue;
+    /* Readiness that was already consumed by the time accept ran. With a
+       timeout the poll is re-entered (and will report the deadline); without
+       one there is nothing to wait for, so the accept simply runs again. */
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      if (timeout_ms >= 0) continue;
+      continue;
+    }
+    return -errno;
+  }
+}
+
+int32_t ty_net_read(int32_t fd, tyarr *buf, int32_t off, int32_t len) {
+  if (fd < 0) return -EINVAL;
+  if (!ty_is_bytes(buf)) return -EINVAL;
+  if (off < 0 || len < 0 || (int64_t)off + len > buf->len) return -EINVAL;
+  if (len == 0) return 0; /* read(2) of nothing returns 0, which would read as
+                             end of file: answer it here instead */
+  for (;;) {
+    ssize_t n = read(fd, buf->data + off, (size_t)len);
+    if (n >= 0) return (int32_t)n; /* short is not an error: it is the answer */
+    if (errno == EINTR) continue;
+    return -errno; /* -EAGAIN when SO_RCVTIMEO fired, which the prelude turns
+                      into a timeout rather than into end of file */
+  }
+}
+
+int32_t ty_net_write_all(int32_t fd, tyarr *buf, int32_t off, int32_t len) {
+  if (fd < 0) return -EINVAL;
+  if (!ty_is_bytes(buf)) return -EINVAL;
+  if (off < 0 || len < 0 || (int64_t)off + len > buf->len) return -EINVAL;
+  const char *p = buf->data + off;
+  int32_t done = 0;
+  while (done < len) {
+    ssize_t n = send(fd, p + done, (size_t)(len - done), MSG_NOSIGNAL);
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      return -errno;
+    }
+    if (n == 0) {
+      /* send returning 0 on a stream socket means the peer is gone; reporting
+         it as EPIPE keeps the callers' one error path. */
+      return -EPIPE;
+    }
+    done += (int32_t)n;
+  }
+  return done;
+}
+
+int32_t ty_net_write_str(int32_t fd, tystr *s) {
+  if (fd < 0) return -EINVAL;
+  if (!s) return -EINVAL;
+  int64_t len = s->len;
+  if (len <= 0) return 0;
+  if (len > INT32_MAX) return -EINVAL;
+  const char *p = s->data;
+  int32_t done = 0;
+  while (done < (int32_t)len) {
+    ssize_t n = send(fd, p + done, (size_t)((int32_t)len - done), MSG_NOSIGNAL);
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      return -errno;
+    }
+    if (n == 0) return -EPIPE;
+    done += (int32_t)n;
+  }
+  return done;
+}
+
+int32_t ty_net_shutdown_write(int32_t fd) {
+  if (fd < 0) return -EINVAL;
+  if (shutdown(fd, SHUT_WR) < 0) return -errno;
+  return 0;
+}
+
+int32_t ty_net_close(int32_t fd) {
+  if (fd < 0) return -EINVAL;
+  /* Not retried on EINTR. On Linux the descriptor is released even when the
+     close reports EINTR, and the number can already belong to another
+     descriptor by the time a retry ran, so the second close would close
+     somebody else's. Reporting the failure and forgetting the descriptor is
+     the only safe pair of actions. */
+  if (close(fd) < 0) return -errno;
+  return 0;
+}
+
+int32_t ty_net_set_timeout(int32_t fd, int32_t ms) {
+  if (fd < 0) return -EINVAL;
+  struct timeval tv;
+  tv.tv_sec = 0;
+  tv.tv_usec = 0;
+  if (ms > 0) {
+    tv.tv_sec = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
+    /* A whole zero timeval means "no timeout" to the kernel, so a request for
+       less than a millisecond would silently become an infinite wait. One
+       millisecond is the floor instead. */
+    if (tv.tv_sec == 0 && tv.tv_usec == 0) tv.tv_usec = 1000;
+  }
+  if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) < 0) return -errno;
+  return 0;
+}
+
+int32_t ty_net_set_reuse(int32_t fd, int32_t on) {
+  if (fd < 0) return -EINVAL;
+  int v = on ? 1 : 0;
+  if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &v, sizeof v) < 0) return -errno;
+  return 0;
+}
+
+/* Fills buf with "address:port" for the local (peer == 0) or the remote end.
+   Shared by the two exported helpers so that the port and the address are
+   always rendered the same way. */
+static int ty_addr_text(int32_t fd, int peer, char *buf, size_t n) {
+  struct sockaddr_in a;
+  socklen_t len = sizeof a;
+  memset(&a, 0, sizeof a);
+  if (peer) {
+    if (getpeername(fd, (struct sockaddr *)&a, &len) < 0) return -errno;
+  } else {
+    if (getsockname(fd, (struct sockaddr *)&a, &len) < 0) return -errno;
+  }
+  char ip[INET_ADDRSTRLEN];
+  if (!inet_ntop(AF_INET, &a.sin_addr, ip, sizeof ip)) return -errno;
+  snprintf(buf, n, "%s:%u", ip, (unsigned)ntohs(a.sin_port));
+  return 0;
+}
+
+int32_t ty_net_local_port(int32_t fd) {
+  struct sockaddr_in a;
+  socklen_t len = sizeof a;
+  memset(&a, 0, sizeof a);
+  if (fd < 0) return -EINVAL;
+  if (getsockname(fd, (struct sockaddr *)&a, &len) < 0) return -errno;
+  return (int32_t)ntohs(a.sin_port);
+}
+
+tystr *ty_net_local_addr(int32_t fd) {
+  char buf[64];
+  if (fd < 0) return NULL;
+  if (ty_addr_text(fd, 0, buf, sizeof buf) != 0) return NULL;
+  return ty_str_new(buf, (int64_t)strlen(buf));
+}
+
+tystr *ty_net_peer_addr(int32_t fd) {
+  char buf[64];
+  if (fd < 0) return NULL;
+  if (ty_addr_text(fd, 1, buf, sizeof buf) != 0) return NULL;
+  return ty_str_new(buf, (int64_t)strlen(buf));
+}
+
+tystr *ty_net_strerror(int32_t code) {
+  char buf[256];
+  if (code == TY_NET_TIMEOUT) {
+    /* No errno to quote: nothing failed, time simply ran out. */
+    snprintf(buf, sizeof buf, "timed out");
+  } else if (code == TY_NET_UNKNOWN_HOST) {
+    snprintf(buf, sizeof buf, "name does not resolve");
+  } else if (code < 0) {
+    const char *m = strerror(-code);
+    if (!m || !*m) m = "unknown error";
+    /* The number goes in because the text is localized on some systems and
+       because two failures can share a description; the number cannot. */
+    snprintf(buf, sizeof buf, "%s (errno %d)", m, -code);
+  } else {
+    snprintf(buf, sizeof buf, "no error");
+  }
+  return ty_str_new(buf, (int64_t)strlen(buf));
+}
+
+/* A byte[] as a String. The prelude has no way to build one from bytes -- its
+   only conversions are String.valueOf for the primitives and String(Object) --
+   and a socket that writes a request line back out as an answer needs exactly
+   this. ty_str_new copies the bytes, so the array can be reused or collected
+   the moment this returns and nothing here holds a reference across an
+   allocation. The bytes are not decoded: one byte is one character, which for
+   UTF-8 and for HTTP's own ASCII grammar is the identity. */
+tystr *ty_net_bytes_to_str(tyarr *b, int32_t off, int32_t len) {
+  if (!ty_is_bytes(b)) return NULL;
+  if (off < 0 || len < 0 || (int64_t)off + len > b->len) return NULL;
+  return ty_str_new(b->data + off, (int64_t)len);
+}
+
+int32_t ty_net_is_timeout(int32_t code) { return code == TY_NET_TIMEOUT; }
+
+int32_t ty_net_is_unknown_host(int32_t code) {
+  return code == TY_NET_UNKNOWN_HOST;
+}
+
+/* ---- files ------------------------------------------------------------ */
+
+int32_t ty_file_kind(tystr *path) {
+  const char *p = ty_cstr(path);
+  if (!p || !*p) return -EINVAL;
+  struct stat st;
+  if (stat(p, &st) < 0) {
+    /* "Not there" is an answer to the question that was asked, not a failure
+       of it: File.exists() is the caller and a thrown exception would be
+       wrong. */
+    if (errno == ENOENT || errno == ENOTDIR) return TY_FILE_NONE;
+    return -errno;
+  }
+  if (S_ISREG(st.st_mode)) return TY_FILE_REG;
+  if (S_ISDIR(st.st_mode)) return TY_FILE_DIR;
+  return TY_FILE_OTHER;
+}
+
+int64_t ty_file_size(tystr *path) {
+  const char *p = ty_cstr(path);
+  if (!p || !*p) return -EINVAL;
+  struct stat st;
+  if (stat(p, &st) < 0) return -errno;
+  return (int64_t)st.st_size;
+}
+
+int32_t ty_file_delete(tystr *path) {
+  const char *p = ty_cstr(path);
+  if (!p || !*p) return -EINVAL;
+  struct stat st;
+  if (stat(p, &st) < 0) return -errno;
+  /* unlink refuses a directory and rmdir refuses a file, so which one to call
+     is decided by the type rather than by trying one and falling back. */
+  if (S_ISDIR(st.st_mode)) {
+    if (rmdir(p) < 0) return -errno;
+    return 0;
+  }
+  if (unlink(p) < 0) return -errno;
+  return 0;
+}
+
+int32_t ty_file_mkdirs(tystr *path) {
+  const char *p = ty_cstr(path);
+  if (!p || !*p) return -EINVAL;
+  size_t n = strlen(p);
+  char *buf = (char *)malloc(n + 1);
+  if (!buf) return -ENOMEM;
+  memcpy(buf, p, n + 1);
+  /* A trailing slash would make the final component empty; the loop below
+     would then try to mkdir("") and fail on a path that is perfectly good. */
+  while (n > 1 && buf[n - 1] == '/') buf[--n] = 0;
+  for (char *q = buf + 1;; q++) {
+    if (*q == '/' || *q == 0) {
+      int last = (*q == 0);
+      char save = *q;
+      *q = 0;
+      if (mkdir(buf, 0777) < 0 && errno != EEXIST) {
+        int e = errno;
+        free(buf);
+        return -e;
+      }
+      if (last) break;
+      *q = save;
+    }
+  }
+  free(buf);
+  /* EEXIST is not proof of success: a regular file in the way of a component
+     makes mkdir fail with the same errno. Asking again settles it. */
+  struct stat st;
+  if (stat(p, &st) < 0) return -errno;
+  if (!S_ISDIR(st.st_mode)) return -ENOTDIR;
+  return 0;
+}
+
+/* qsort's comparator. The names are char*, so the void* arguments are pointers
+   to those pointers. */
+static int ty_cmp_names(const void *a, const void *b) {
+  return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+tyarr *ty_file_list(tystr *path, tyarr *err) {
+  if (!err || err->esize != 4 || err->len < 1) return NULL;
+  ty_set_err(err, 0);
+  const char *p = ty_cstr(path);
+  if (!p || !*p) {
+    ty_set_err(err, EINVAL);
+    return NULL;
+  }
+  DIR *d = opendir(p);
+  if (!d) {
+    ty_set_err(err, errno);
+    return NULL;
+  }
+  char **names = NULL;
+  size_t count = 0, cap = 0;
+  struct dirent *ent;
+  errno = 0;
+  while ((ent = readdir(d)) != NULL) {
+    if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+    if (count == cap) {
+      size_t ncap = cap ? cap * 2 : 32;
+      char **nn = (char **)realloc(names, ncap * sizeof *nn);
+      if (!nn) {
+        ty_set_err(err, ENOMEM);
+        goto fail;
+      }
+      names = nn;
+      cap = ncap;
+    }
+    names[count] = strdup(ent->d_name);
+    if (!names[count]) {
+      ty_set_err(err, ENOMEM);
+      goto fail;
+    }
+    count++;
+  }
+  if (errno != 0) {
+    /* readdir reports a failure by returning NULL and setting errno -- but a
+       plain end of directory also leaves errno alone only because it was
+       cleared just above. */
+    ty_set_err(err, errno);
+    goto fail;
+  }
+  closedir(d);
+  d = NULL;
+  /* readdir's order is the filesystem's, which is neither stable between runs
+     nor the same on two machines. A listing a program prints has to be
+     reproducible, so it is sorted here once. */
+  if (count > 1) qsort(names, count, sizeof *names, ty_cmp_names);
+
+  /* The array is the only Teyru object this function makes before it returns
+     it, and ty_str_new allocates once per element -- any one of those
+     allocations can collect. The array is therefore on the shadow stack for
+     the whole loop: nothing else keeps a reference to it, and a collection in
+     the middle of the loop would otherwise free it and hand the next string the
+     same memory. The elements are zeroed by the allocator, so a collection
+     triggered by the third string sees an array with two live elements and
+     three nulls, which is exactly what tracing expects. */
+  tyarr *a = ty_alloc_arr((int64_t)count, 8);
+  a->refs = 1; /* the elements are strings: the collector has to follow them */
+  TY_ROOT_PUSH(a);
+  for (size_t i = 0; i < count; i++) {
+    ((void **)a->data)[i] = ty_str_new(names[i], (int64_t)strlen(names[i]));
+  }
+  TY_ROOT_POP();
+  for (size_t i = 0; i < count; i++) free(names[i]);
+  free(names);
+  return a;
+
+fail:
+  /* The failure code was recorded where the caller will read it; closing and
+     freeing below must not overwrite it with whatever they set errno to. */
+  if (d) closedir(d);
+  for (size_t i = 0; i < count; i++) free(names[i]);
+  free(names);
+  return NULL;
+}
+
+tyarr *ty_file_read_bytes(tystr *path, tyarr *err) {
+  if (!err || err->esize != 4 || err->len < 1) return NULL;
+  ty_set_err(err, 0);
+  const char *p = ty_cstr(path);
+  if (!p || !*p) {
+    ty_set_err(err, EINVAL);
+    return NULL;
+  }
+  int fd = open(p, O_RDONLY);
+  if (fd < 0) {
+    ty_set_err(err, errno);
+    return NULL;
+  }
+  /* The buffer is grown as the file is read rather than sized from stat,
+     because stat's answer is a snapshot and is wrong for a file that grows, a
+     pipe, and anything under /proc. It is plain malloc'd memory: the collector
+     never sees it, so no amount of reading can move it. */
+  size_t cap = 8192, len = 0;
+  char *buf = (char *)malloc(cap);
+  if (!buf) {
+    (void)close(fd);
+    ty_set_err(err, ENOMEM);
+    return NULL;
+  }
+  for (;;) {
+    if (len == cap) {
+      if (cap > (size_t)1 << 30) {
+        free(buf);
+        (void)close(fd);
+        ty_set_err(err, EFBIG);
+        return NULL;
+      }
+      char *nb = (char *)realloc(buf, cap * 2);
+      if (!nb) {
+        free(buf);
+        (void)close(fd);
+        ty_set_err(err, ENOMEM);
+        return NULL;
+      }
+      buf = nb;
+      cap *= 2;
+    }
+    ssize_t n = read(fd, buf + len, cap - len);
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      int e = errno;
+      free(buf);
+      (void)close(fd);
+      ty_set_err(err, e);
+      return NULL;
+    }
+    if (n == 0) break;
+    len += (size_t)n;
+  }
+  (void)close(fd);
+  tyarr *a = ty_alloc_arr((int64_t)len, 1);
+  memcpy(a->data, buf, len);
+  free(buf);
+  return a;
+}
+
+/* The write loop, over a raw buffer so that the bytes and the string entry
+   points share it: a short write is the same bug whichever kind of data hit
+   it. */
+static int32_t ty_write_fd(int fd, const char *data, int64_t len) {
+  int64_t done = 0;
+  while (done < len) {
+    ssize_t n = write(fd, data + done, (size_t)(len - done));
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      return -errno;
+    }
+    if (n == 0) return -EIO; /* a full disk reports itself this way */
+    done += n;
+  }
+  return len > INT32_MAX ? INT32_MAX : (int32_t)len;
+}
+
+int32_t ty_file_write_bytes(tystr *path, tyarr *buf, int32_t off, int32_t len,
+                            int32_t append) {
+  const char *p = ty_cstr(path);
+  if (!p || !*p) return -EINVAL;
+  if (!ty_is_bytes(buf)) return -EINVAL;
+  if (off < 0 || len < 0 || (int64_t)off + len > buf->len) return -EINVAL;
+  int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
+  int fd = open(p, flags, 0666);
+  if (fd < 0) return -errno;
+  int32_t r = ty_write_fd(fd, buf->data + off, len);
+  if (r < 0) {
+    int e = -r;
+    (void)close(fd);
+    return -e;
+  }
+  /* close is where a write error that the kernel buffered finally surfaces, so
+     its failure is reported as the failure of the write rather than thrown
+     away: a full disk is exactly this case. */
+  if (close(fd) < 0) return -errno;
+  return r;
+}
+
+int32_t ty_file_write_str(tystr *path, tystr *s, int32_t append) {
+  const char *p = ty_cstr(path);
+  if (!p || !*p) return -EINVAL;
+  if (!s) return -EINVAL;
+  int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
+  int fd = open(p, flags, 0666);
+  if (fd < 0) return -errno;
+  int32_t r = ty_write_fd(fd, s->data, s->len);
+  if (r < 0) {
+    int e = -r;
+    (void)close(fd);
+    return -e;
+  }
+  if (close(fd) < 0) return -errno;
+  return r;
+}
+
+tystr *ty_file_temp_dir(tystr *prefix) {
+  const char *base = getenv("TMPDIR");
+  if (!base || !*base) base = "/tmp";
+  char pfx[TY_PREFIX_MAX];
+  size_t k = 0;
+  if (prefix && prefix->data) {
+    for (int64_t i = 0; i < prefix->len && k + 1 < sizeof pfx; i++) {
+      char c = prefix->data[i];
+      /* A slash in the prefix would turn the template into a different
+         directory, and mkdtemp would then create it somewhere the caller did
+         not ask for. */
+      pfx[k++] = (c == '/') ? '_' : c;
+    }
+  }
+  pfx[k] = 0;
+  size_t n = strlen(base) + 1 + k + 6 + 1;
+  char *tpl = (char *)malloc(n);
+  if (!tpl) return NULL;
+  snprintf(tpl, n, "%s/%sXXXXXX", base, pfx);
+  /* mkdtemp creates the directory and replaces the X's atomically, which is
+     what stops two programs starting at once from choosing the same name. */
+  if (!mkdtemp(tpl)) {
+    free(tpl);
+    return NULL;
+  }
+  tystr *s = ty_str_new(tpl, (int64_t)strlen(tpl));
+  free(tpl);
+  return s;
+}

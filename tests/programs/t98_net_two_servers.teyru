@@ -1,0 +1,58 @@
+// Two servers at once in one process.
+//
+// Nothing in the layer is global: a socket is a descriptor held in a field, so
+// two listeners coexist the way two open files do. This test is here because
+// the obvious wrong implementation -- a single static "current socket" in the
+// C, or a shared buffer between connections -- would pass every other test in
+// this directory and fail only when a second server existed.
+
+class Main {
+  public static void main(String[] args) {
+    ServerSocket a = new ServerSocket(0)
+    ServerSocket b = new ServerSocket(0)
+    a.setSoTimeout(2000)
+    b.setSoTimeout(2000)
+    System.out.println("two ports: " + (a.getLocalPort() != b.getLocalPort()))
+
+    Socket ca = new Socket("127.0.0.1", a.getLocalPort())
+    Socket cb = new Socket("127.0.0.1", b.getLocalPort())
+    ca.setSoTimeout(2000)
+    cb.setSoTimeout(2000)
+    Socket sa = a.accept()
+    Socket sb = b.accept()
+    sa.setSoTimeout(2000)
+    sb.setSoTimeout(2000)
+
+    // Both writes happen before either read, so the two connections are in
+    // flight at the same time. If one connection's bytes could reach the other
+    // socket, the payloads below would be swapped or mixed.
+    sa.getOutputStream().write("alpha\n")
+    sb.getOutputStream().write("beta\n")
+    System.out.println("a: " + ca.getInputStream().readLine())
+    System.out.println("b: " + cb.getInputStream().readLine())
+
+    // ... and the other direction, on the same two connections.
+    ca.getOutputStream().write("one\n")
+    cb.getOutputStream().write("two\n")
+    System.out.println("sa: " + sa.getInputStream().readLine())
+    System.out.println("sb: " + sb.getInputStream().readLine())
+
+    // The two pairs are on different ports, and each connection names its own.
+    System.out.println("distinct: " + (ca.getLocalPort() != cb.getLocalPort()))
+    System.out.println("same server: " + (sa.getLocalPort() == a.getLocalPort()))
+
+    // Closing one server leaves the other one serving, which is the property
+    // the HTTP server on top of this needs: a server can be stopped without
+    // the process going down with it.
+    ca.close()
+    sa.close()
+    a.close()
+    System.out.println("a closed: " + a.isClosed() + " " + ca.isClosed())
+    sb.getOutputStream().write("still here\n")
+    System.out.println("b alive: " + cb.getInputStream().readLine())
+
+    cb.close()
+    sb.close()
+    b.close()
+  }
+}

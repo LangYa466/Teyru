@@ -1,0 +1,9 @@
+sent: 131072
+server got every byte: true
+client got every byte: true
+took under 10s: true
+long line: true
+long line matches: true
+after: one
+after: two
+after: true

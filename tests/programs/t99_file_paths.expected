@@ -1,0 +1,44 @@
+path: /tmp/teyru/x/y/z.txt
+name: z.txt
+parent: /tmp/teyru/x/y
+parent name: y
+absolute: true
+toString is path: true
+trailing name: x
+trailing parent: /tmp/teyru
+root name: /
+root parent: true
+rel name: b.txt
+rel parent: a
+rel absolute: false
+bare name has no parent: true
+joined: /tmp/teyru/c/d.txt
+joined onto slash: /tmp/c.txt
+child wins: /etc/hosts
+from file: /tmp/e.txt
+separator: /
+join: /tmp/teyru/y.txt
+join trailing: /tmp/y.txt
+is absolute: true false
+equals: true
+hash equal: true
+compare: 0
+not equal to other type: false
+orders: true
+absolute now: true
+ends with path: true
+already absolute unchanged: true
+absolute file: true
+path name: z.txt
+path parent: /tmp/teyru/x/y
+path absolute: true
+path text: /tmp/teyru/x/y/z.txt
+many parts: a/b/c
+resolve: a/b
+resolve path: a/b/c
+toFile: z.txt
+round trip: true
+path equals: true
+path hash: true
+rel path absolute: true
+absolute path unchanged: true
