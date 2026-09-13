@@ -307,6 +307,7 @@ JEP 378 テキストブロック、JEP 361 switch 式、JEP 286 `var`。
 | `java.util` | `List`／`ArrayList`／`LinkedList`、`Set`／`HashSet`／`LinkedHashSet`／`TreeSet`、`Map`／`HashMap`／`LinkedHashMap`／`TreeMap`、`Deque`／`ArrayDeque`、`Arrays`、`Collections`、`Objects`、`Optional`、`StringJoiner` |
 | `java.time` | `LocalDate`／`LocalTime`／`LocalDateTime`／`Instant`／`Duration`／`Period` |
 | `java.io` | `File`、`Path`／`Paths`、`Files` |
+| `java.util.regex` | `Pattern`／`Matcher` |
 | `java.net` | `ServerSocket`、`Socket` とそのストリーム |
 | `com.google.gson` | Gson のツリー API と、コンパイラが生成するオブジェクト束縛（[docs/json.md](docs/json.md)） |
 | フレームワーク | Spring の形をしたコンテナと web 層（[docs/framework.md](docs/framework.md)） |
@@ -330,8 +331,7 @@ teyru get example.com/greeting@v0.1.0
 teyru build ./...
 ```
 
-リフレクション、スレッド、`Stream`、`BigDecimal`、正規表現、タイムゾーンデータ
-ベースは無い。どれも意図的な不在で、理由は
+リフレクション、スレッド、`Stream`、`BigDecimal`、タイムゾーンデータベースは無い。どれも意図的な不在で、理由は
 [docs/language.md](docs/language.md) §11 と §13 に書いてある。
 
 自分のネイティブライブラリは `native` メソッドを宣言して C で実装する:

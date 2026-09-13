@@ -310,6 +310,7 @@ class Main {
 | `java.util` | `List`／`ArrayList`／`LinkedList`、`Set`／`HashSet`／`LinkedHashSet`／`TreeSet`、`Map`／`HashMap`／`LinkedHashMap`／`TreeMap`、`Deque`／`ArrayDeque`、`Arrays`、`Collections`、`Objects`、`Optional`、`StringJoiner` |
 | `java.time` | `LocalDate`／`LocalTime`／`LocalDateTime`／`Instant`／`Duration`／`Period` |
 | `java.io` | `File`、`Path`／`Paths`、`Files` |
+| `java.util.regex` | `Pattern`／`Matcher` |
 | `java.net` | `ServerSocket`、`Socket` 與其輸入輸出串流 |
 | `com.google.gson` | Gson 的樹狀 API，以及由編譯器產生的物件綁定（[docs/json.md](docs/json.md)） |
 | 框架 | Spring 形狀的容器與 web 層（[docs/framework.md](docs/framework.md)） |
@@ -333,8 +334,7 @@ teyru get example.com/greeting@v0.1.0
 teyru build ./...
 ```
 
-沒有反射、沒有執行緒、沒有 `Stream`、沒有 `BigDecimal`、沒有正規表達式、沒有時區
-資料庫——這些缺席都是刻意的，理由記在
+沒有反射、沒有執行緒、沒有 `Stream`、沒有 `BigDecimal`、沒有時區資料庫——這些缺席都是刻意的，理由記在
 [docs/language.md](docs/language.md) §11 與 §13。
 
 需要自己的原生程式庫時，宣告 `native` 方法並用 C 實作：

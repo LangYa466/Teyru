@@ -297,6 +297,7 @@ JEP 395 record、JEP 394 `instanceof` 模式、JEP 409 sealed 类（`sealed`／`
 | `java.util` | `List`／`ArrayList`／`LinkedList`、`Set`／`HashSet`／`LinkedHashSet`／`TreeSet`、`Map`／`HashMap`／`LinkedHashMap`／`TreeMap`、`Deque`／`ArrayDeque`、`Arrays`、`Collections`、`Objects`、`Optional`、`StringJoiner` |
 | `java.time` | `LocalDate`／`LocalTime`／`LocalDateTime`／`Instant`／`Duration`／`Period` |
 | `java.io` | `File`、`Path`／`Paths`、`Files` |
+| `java.util.regex` | `Pattern`／`Matcher` |
 | `java.net` | `ServerSocket`、`Socket` 及其输入输出流 |
 | `com.google.gson` | Gson 的树状 API，以及由编译器生成的对象绑定（[docs/json.md](docs/json.md)） |
 | 框架 | Spring 形状的容器与 web 层（[docs/framework.md](docs/framework.md)） |
@@ -319,8 +320,7 @@ teyru get example.com/greeting@v0.1.0
 teyru build ./...
 ```
 
-没有反射、没有线程、没有 `Stream`、没有 `BigDecimal`、没有正则表达式、没有时区
-数据库——这些缺席都是刻意的，理由记在
+没有反射、没有线程、没有 `Stream`、没有 `BigDecimal`、没有时区数据库——这些缺席都是刻意的，理由记在
 [docs/language.md](docs/language.md) §11 与 §13。
 
 需要自己的原生库时，声明 `native` 方法并用 C 实现：

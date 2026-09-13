@@ -320,6 +320,7 @@ and checked together with every program. Package names follow Java's, so
 | `java.util` | `List`/`ArrayList`/`LinkedList`, `Set`/`HashSet`/`LinkedHashSet`/`TreeSet`, `Map`/`HashMap`/`LinkedHashMap`/`TreeMap`, `Deque`/`ArrayDeque`, `Arrays`, `Collections`, `Objects`, `Optional`, `StringJoiner` |
 | `java.time` | `LocalDate`/`LocalTime`/`LocalDateTime`/`Instant`/`Duration`/`Period` |
 | `java.io` | `File`, `Path`/`Paths`, `Files` |
+| `java.util.regex` | `Pattern`/`Matcher` |
 | `java.net` | `ServerSocket`, `Socket` and their streams |
 | `com.google.gson` | Gson's tree API plus a compiler-generated object binding ([docs/json.md](docs/json.md)) |
 | framework | A Spring-shaped container and web layer ([docs/framework.md](docs/framework.md)) |
@@ -343,8 +344,8 @@ teyru get example.com/greeting@v0.1.0
 teyru build ./...
 ```
 
-There is no reflection, no threading, no `Stream`, no `BigDecimal`, no regular
-expressions and no time zone database. Each absence is deliberate and argued for in
+There is no reflection, no threading, no `Stream`, no `BigDecimal` and no time
+zone database. Each absence is deliberate and argued for in
 [docs/language.md](docs/language.md) §11 and §13.
 
 For your own native library, declare a `native` method and implement it in C:

@@ -1,0 +1,781 @@
+package teyru
+
+// java.util.regex, enough of it to be useful: Pattern.compile, Matcher with
+// matches/find/group/replaceAll, and the syntax Java programs actually write.
+//
+// The engine is a backtracking matcher over a parsed tree. Each node answers
+// "can this match at this position, and if so can the rest?" by calling a
+// continuation with the position it reached -- which is why the language needs
+// lambdas and a functional interface to have a regex engine at all, and why
+// this one is written the way it is rather than with an explicit stack.
+//
+// Deviations from java.util.regex, all of them omissions rather than different
+// answers:
+//
+//   - No possessive quantifiers (a*+), no atomic groups (?>...), no lookahead or
+//     lookbehind, no backreferences, no named groups, no \p{...} classes.
+//     Anything unsupported is refused by Pattern.compile with a message naming
+//     it, rather than silently matching something else.
+//   - Matching is over bytes, because this library's String counts bytes rather
+//     than UTF-16 code units (`docs/language.md` §11). For ASCII -- which is
+//     what the patterns in ordinary code are -- the two are the same thing; for
+//     text outside it, `.` and a character class see one byte at a time where
+//     Java sees one character.
+
+// ---------------------------------------------------------------- syntax tree
+
+// Cont is what a node calls once it has matched: the rest of the pattern, from
+// the position the node reached.
+interface Cont {
+  boolean at(int pos)
+}
+
+// Node is one piece of a compiled pattern.
+abstract class Node {
+  abstract boolean run(MatchState st, int pos, Cont k)
+  abstract void dump(StringBuilder b)
+}
+
+// MatchState carries what the match is being made against.
+class MatchState {
+  public String text
+  public int[] starts
+  public int[] ends
+  public boolean[] set
+
+  public MatchState(String text, int groups) {
+    this.text = text
+    this.starts = new int[groups]
+    this.ends = new int[groups]
+    this.set = new boolean[groups]
+  }
+}
+
+class EmptyNode extends Node {
+  boolean run(MatchState st, int pos, Cont k) { return k.at(pos) }
+  void dump(StringBuilder b) { }
+}
+
+class LitNode extends Node {
+  char ch
+  LitNode(char ch) { this.ch = ch }
+  boolean run(MatchState st, int pos, Cont k) {
+    if (pos >= st.text.length()) {
+      return false
+    }
+    if (st.text.charAt(pos) != ch) {
+      return false
+    }
+    return k.at(pos + 1)
+  }
+  void dump(StringBuilder b) { b.append(ch) }
+}
+
+class AnyNode extends Node {
+  boolean run(MatchState st, int pos, Cont k) {
+    if (pos >= st.text.length()) {
+      return false
+    }
+    // `.` does not match a line terminator unless DOTALL, which is not
+    // implemented -- Java's default is what this is.
+    char c = st.text.charAt(pos)
+    if (c == '\n' || c == '\r') {
+      return false
+    }
+    return k.at(pos + 1)
+  }
+  void dump(StringBuilder b) { b.append('.') }
+}
+
+// CharSet is a character class: ranges, single characters, and the predefined
+// classes (\d and friends) it was built from.
+class CharSet {
+  public boolean negated = false
+  public char[] rangeFrom = new char[8]
+  public char[] rangeTo = new char[8]
+  public int ranges = 0
+  public boolean digit = false
+  public boolean word = false
+  public boolean space = false
+
+  public void addRange(char a, char z) {
+    if (ranges == rangeFrom.length) {
+      char[] nf = new char[ranges * 2]
+      char[] nt = new char[ranges * 2]
+      for (int i = 0 : i < ranges : i++) {
+        nf[i] = rangeFrom[i]
+        nt[i] = rangeTo[i]
+      }
+      rangeFrom = nf
+      rangeTo = nt
+    }
+    rangeFrom[ranges] = a
+    rangeTo[ranges] = z
+    ranges++
+  }
+
+  public boolean contains(char c) {
+    boolean hit = false
+    for (int i = 0 : i < ranges : i++) {
+      if (c >= rangeFrom[i] && c <= rangeTo[i]) {
+        hit = true
+      }
+    }
+    if (!hit && digit && RegexSyntax.isDigit(c)) { hit = true }
+    if (!hit && word && RegexSyntax.isWord(c)) { hit = true }
+    if (!hit && space && RegexSyntax.isSpace(c)) { hit = true }
+    return negated ? !hit : hit
+  }
+}
+
+class ClassNode extends Node {
+  CharSet set
+  ClassNode(CharSet set) { this.set = set }
+  boolean run(MatchState st, int pos, Cont k) {
+    if (pos >= st.text.length()) {
+      return false
+    }
+    if (!set.contains(st.text.charAt(pos))) {
+      return false
+    }
+    return k.at(pos + 1)
+  }
+  void dump(StringBuilder b) { b.append("[class]") }
+}
+
+// ConcatNode matches its children in order, threading the continuation through
+// them: child i's continuation is child i+1, and the last one calls the
+// continuation the whole sequence was given.
+class ConcatNode extends Node {
+  Node[] kids
+  ConcatNode(Node[] kids) { this.kids = kids }
+
+  boolean run(MatchState st, int pos, Cont k) {
+    return step(st, 0, pos, k)
+  }
+
+  private boolean step(MatchState st, int i, int pos, Cont k) {
+    if (i == kids.length) {
+      return k.at(pos)
+    }
+    return kids[i].run(st, pos, (p) -> step(st, i + 1, p, k))
+  }
+
+  void dump(StringBuilder b) {
+    for (Node n : kids) {
+      n.dump(b)
+    }
+  }
+}
+
+class AltNode extends Node {
+  Node[] alts
+  AltNode(Node[] alts) { this.alts = alts }
+
+  boolean run(MatchState st, int pos, Cont k) {
+    for (Node a : alts) {
+      if (a.run(st, pos, k)) {
+        return true
+      }
+    }
+    return false
+  }
+
+  void dump(StringBuilder b) { b.append('|') }
+}
+
+// RepeatNode is *, +, ?, {n}, {n,m} and the lazy forms. The greedy form tries
+// the longest repetition first and gives back one at a time; the lazy form does
+// the opposite. Both are the same loop with the direction reversed.
+class RepeatNode extends Node {
+  Node inner
+  int min
+  int max
+  boolean lazy
+
+  RepeatNode(Node inner, int min, int max, boolean lazy) {
+    this.inner = inner
+    this.min = min
+    this.max = max
+    this.lazy = lazy
+  }
+
+  boolean run(MatchState st, int pos, Cont k) {
+    return rep(st, pos, 0, k)
+  }
+
+  private boolean rep(MatchState st, int pos, int count, Cont k) {
+    boolean more = count < max
+    if (lazy) {
+      if (count >= min && k.at(pos)) {
+        return true
+      }
+      if (more) {
+        return inner.run(st, pos, (p) -> p == pos ? false : rep(st, p, count + 1, k))
+      }
+      return false
+    }
+    if (more) {
+      if (inner.run(st, pos, (p) -> p == pos ? false : rep(st, p, count + 1, k))) {
+        return true
+      }
+    }
+    if (count >= min) {
+      return k.at(pos)
+    }
+    return false
+  }
+
+  void dump(StringBuilder b) { inner.dump(b) }
+}
+
+class GroupNode extends Node {
+  Node inner
+  int index
+  GroupNode(Node inner, int index) {
+    this.inner = inner
+    this.index = index
+  }
+
+  boolean run(MatchState st, int pos, Cont k) {
+    int saveStart = st.starts[index]
+    int saveEnd = st.ends[index]
+    boolean saveSet = st.set[index]
+    boolean ok = inner.run(st, pos, (p) -> {
+      int oldEnd = st.ends[index]
+      boolean oldSet = st.set[index]
+      st.starts[index] = pos
+      st.ends[index] = p
+      st.set[index] = true
+      if (k.at(p)) {
+        return true
+      }
+      st.ends[index] = oldEnd
+      st.set[index] = oldEnd == -1 ? false : oldSet
+      st.starts[index] = saveStart
+      st.set[index] = saveSet
+      return false
+    })
+    if (!ok) {
+      st.starts[index] = saveStart
+      st.ends[index] = saveEnd
+      st.set[index] = saveSet
+    }
+    return ok
+  }
+
+  void dump(StringBuilder b) { inner.dump(b) }
+}
+
+class AnchorStart extends Node {
+  boolean run(MatchState st, int pos, Cont k) {
+    return pos == 0 ? k.at(pos) : false
+  }
+  void dump(StringBuilder b) { b.append('^') }
+}
+
+class AnchorEnd extends Node {
+  boolean run(MatchState st, int pos, Cont k) {
+    return pos == st.text.length() ? k.at(pos) : false
+  }
+  void dump(StringBuilder b) { b.append('$') }
+}
+
+// ---------------------------------------------------------------- syntax
+
+final class RegexSyntax {
+  public static boolean isDigit(char c) { return c >= '0' && c <= '9' }
+  public static boolean isWord(char c) {
+    return isDigit(c) || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+  }
+  public static boolean isSpace(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == 0x0b
+  }
+}
+
+// PatternParser turns a pattern into a tree. It is a recursive-descent parser
+// over the Java grammar's shape: alternation, then concatenation, then a
+// repeated atom.
+class PatternParser {
+  private String src
+  private int pos = 0
+  private int groups = 1
+
+  PatternParser(String src) { this.src = src }
+
+  public int groupCount() { return groups - 1 }
+
+  public Node parse() {
+    Node n = alternate()
+    if (pos < src.length()) {
+      throw new PatternSyntaxException("Unexpected character '" + src.charAt(pos) + "'", src, pos)
+    }
+    return n
+  }
+
+  private Node alternate() {
+    Node first = concat()
+    if (pos >= src.length() || src.charAt(pos) != '|') {
+      return first
+    }
+    ArrayList<Node> alts = new ArrayList<Node>()
+    alts.add(first)
+    while (pos < src.length() && src.charAt(pos) == '|') {
+      pos++
+      alts.add(concat())
+    }
+    return new AltNode((Node[]) alts.toArray())
+  }
+
+  private Node concat() {
+    ArrayList<Node> parts = new ArrayList<Node>()
+    while (pos < src.length()) {
+      char c = src.charAt(pos)
+      if (c == '|' || c == ')') {
+        break
+      }
+      parts.add(repeat())
+    }
+    if (parts.size() == 0) {
+      return new EmptyNode()
+    }
+    if (parts.size() == 1) {
+      return parts.get(0)
+    }
+    return new ConcatNode((Node[]) parts.toArray())
+  }
+
+  private Node repeat() {
+    Node atom = apply()
+    if (pos >= src.length()) {
+      return atom
+    }
+    char c = src.charAt(pos)
+    if (c == '*') {
+      pos++
+      return new RepeatNode(atom, 0, 1 << 30, lazyNext())
+    }
+    if (c == '+') {
+      pos++
+      return new RepeatNode(atom, 1, 1 << 30, lazyNext())
+    }
+    if (c == '?') {
+      pos++
+      return new RepeatNode(atom, 0, 1, lazyNext())
+    }
+    if (c == '{') {
+      int save = pos
+      pos++
+      int lo = number()
+      if (lo < 0) {
+        pos = save
+        return atom
+      }
+      int hi = lo
+      if (pos < src.length() && src.charAt(pos) == ',') {
+        pos++
+        hi = number()
+        if (hi < 0) {
+          hi = 1 << 30
+        }
+      }
+      if (pos >= src.length() || src.charAt(pos) != '}') {
+        throw new PatternSyntaxException("Illegal repetition", src, save)
+      }
+      pos++
+      if (hi < lo) {
+        throw new PatternSyntaxException("Illegal repetition", src, save)
+      }
+      return new RepeatNode(atom, lo, hi, lazyNext())
+    }
+    return atom
+  }
+
+  private boolean lazyNext() {
+    if (pos < src.length() && src.charAt(pos) == '?') {
+      pos++
+      return true
+    }
+    if (pos < src.length() && src.charAt(pos) == '+') {
+      throw new PatternSyntaxException("possessive quantifiers are not supported", src, pos)
+    }
+    return false
+  }
+
+  private int number() {
+    int start = pos
+    int v = 0
+    while (pos < src.length() && RegexSyntax.isDigit(src.charAt(pos))) {
+      v = v * 10 + (src.charAt(pos) - '0')
+      pos++
+    }
+    return pos == start ? -1 : v
+  }
+
+  private Node apply() {
+    char c = src.charAt(pos)
+    if (c == '(') {
+      pos++
+      boolean capture = true
+      if (pos + 1 < src.length() && src.charAt(pos) == '?' && src.charAt(pos + 1) == ':') {
+        pos += 2
+        capture = false
+      } else if (pos < src.length() && src.charAt(pos) == '?') {
+        throw new PatternSyntaxException("(?...) groups other than (?: are not supported", src, pos)
+      }
+      int idx = capture ? groups : -1
+      if (capture) {
+        groups++
+      }
+      Node inner = alternate()
+      if (pos >= src.length() || src.charAt(pos) != ')') {
+        // Java reports an unclosed group at the end of the pattern, and
+        // capitalises it -- the message is part of what a program prints.
+        throw new PatternSyntaxException("Unclosed group", src, src.length())
+      }
+      pos++
+      if (capture) {
+        return new GroupNode(inner, idx)
+      }
+      return inner
+    }
+    if (c == '[') {
+      return charClass()
+    }
+    if (c == '.') {
+      pos++
+      return new AnyNode()
+    }
+    if (c == '^') {
+      pos++
+      return new AnchorStart()
+    }
+    if (c == '$') {
+      pos++
+      return new AnchorEnd()
+    }
+    if (c == '\\') {
+      pos++
+      if (pos >= src.length()) {
+        throw new PatternSyntaxException("Unexpected internal error", src, pos - 1)
+      }
+      char e = src.charAt(pos)
+      pos++
+      return escapeNode(e)
+    }
+    if (c == '*' || c == '+' || c == '?' || c == '{') {
+      throw new PatternSyntaxException("Dangling meta character '" + c + "'", src, pos)
+    }
+    pos++
+    return new LitNode(c)
+  }
+
+  private Node escapeNode(char e) {
+    if (e == 'd' || e == 'D' || e == 'w' || e == 'W' || e == 's' || e == 'S') {
+      CharSet set = new CharSet()
+      if (e == 'd') { set.digit = true }
+      if (e == 'D') {
+        set.digit = true
+        set.negated = true
+      }
+      if (e == 'w') { set.word = true }
+      if (e == 'W') {
+        set.word = true
+        set.negated = true
+      }
+      if (e == 's') { set.space = true }
+      if (e == 'S') {
+        set.space = true
+        set.negated = true
+      }
+      return new ClassNode(set)
+    }
+    if (e == 'n') { return new LitNode('\n') }
+    if (e == 't') { return new LitNode('\t') }
+    if (e == 'r') { return new LitNode('\r') }
+    if (e == 'f') { return new LitNode('\f') }
+    if (e == 'b') {
+      throw new PatternSyntaxException("\\b is not supported", src, pos - 1)
+    }
+    if (RegexSyntax.isDigit(e)) {
+      throw new PatternSyntaxException("backreferences are not supported", src, pos - 1)
+    }
+    return new LitNode(e)
+  }
+
+  private Node charClass() {
+    pos++
+    CharSet set = new CharSet()
+    if (pos < src.length() && src.charAt(pos) == '^') {
+      set.negated = true
+      pos++
+    }
+    boolean first = true
+    while (pos < src.length() && (src.charAt(pos) != ']' || first)) {
+      first = false
+      char lo = classChar()
+      if (lo == 0) {
+        break
+      }
+      if (pos + 1 < src.length() && src.charAt(pos) == '-' && src.charAt(pos + 1) != ']') {
+        pos++
+        char hi = classChar()
+        if (hi == 0) {
+          throw new PatternSyntaxException("Unclosed character class", src, pos)
+        }
+        set.addRange(lo, hi)
+        continue
+      }
+      set.addRange(lo, lo)
+    }
+    if (pos >= src.length()) {
+      throw new PatternSyntaxException("Unclosed character class", src, pos)
+    }
+    pos++
+    return new ClassNode(set)
+  }
+
+  private char classChar() {
+    char c = src.charAt(pos)
+    if (c != '\\') {
+      pos++
+      return c
+    }
+    pos++
+    if (pos >= src.length()) {
+      throw new PatternSyntaxException("trailing backslash in class", src, pos - 1)
+    }
+    char e = src.charAt(pos)
+    pos++
+    Node n = escapeNode(e)
+    if (n instanceof ClassNode) {
+      throw new PatternSyntaxException("\\" + e + " inside a class is not supported", src, pos - 2)
+    }
+    return ((LitNode) n).ch
+  }
+}
+
+// ---------------------------------------------------------------- API
+
+class Pattern {
+  private String regex
+  private Node root
+  private int groups
+
+  private Pattern(String regex, Node root, int groups) {
+    this.regex = regex
+    this.root = root
+    this.groups = groups
+  }
+
+  public static Pattern compile(String regex) {
+    PatternParser p = new PatternParser(regex)
+    // The whole match is group 0, and Java reports it through the same
+    // accessors as the captured groups. Wrapping the parsed tree in a group is
+    // what records where the match started and ended -- without it group(),
+    // start() and end() have nothing to answer with.
+    Node root = new GroupNode(p.parse(), 0)
+    return new Pattern(regex, root, p.groupCount())
+  }
+
+  public static boolean matches(String regex, String input) {
+    return compile(regex).matcher(input).matches()
+  }
+
+  public int groupCount() { return groups }
+
+  public String pattern() { return regex }
+
+  public Matcher matcher(String input) { return new Matcher(this, input) }
+
+  public String toString() { return regex }
+
+  private boolean matchAt(MatchState st, int from, boolean anchored) {
+    if (anchored) {
+      return root.run(st, from, (p) -> p == st.text.length())
+    }
+    for (int i = from : i <= st.text.length() : i++) {
+      if (root.run(st, i, (p) -> true)) {
+        return true
+      }
+    }
+    return false
+  }
+}
+
+class Matcher {
+  private Pattern pat
+  private String input
+  private MatchState st
+  private boolean matched = false
+  private boolean exhausted = false
+  private int searchFrom = 0
+
+  public Matcher(Pattern pat, String input) {
+    this.pat = pat
+    this.input = input
+    this.st = new MatchState(input, pat.groupCount() + 1)
+  }
+
+  public boolean matches() {
+    reset()
+    matched = pat.matchAt(st, 0, true)
+    return matched
+  }
+
+  public boolean lookingAt() {
+    reset()
+    matched = pat.matchAt(st, 0, false)
+    return matched
+  }
+
+  // find moves forward from where the last match ended, which is what makes
+  // repeated find() calls walk a string the way Java's do.
+  public boolean find() {
+    if (exhausted) {
+      return false
+    }
+    matched = pat.matchAt(st, searchFrom, false)
+    if (!matched) {
+      exhausted = true
+      return false
+    }
+    searchFrom = st.ends[0] == st.starts[0] ? st.ends[0] + 1 : st.ends[0]
+    if (st.ends[0] == input.length() && st.starts[0] == input.length()) {
+      exhausted = true
+    }
+    return true
+  }
+
+  public void reset() {
+    matched = false
+    exhausted = false
+    searchFrom = 0
+    for (int i = 0 : i < st.set.length : i++) {
+      st.set[i] = false
+      st.starts[i] = -1
+      st.ends[i] = -1
+    }
+  }
+
+  public int start() { return st.starts[0] }
+  public int end() { return st.ends[0] }
+  public int start(int g) { return st.starts[g] }
+  public int end(int g) { return st.ends[g] }
+  public int groupCount() { return pat.groupCount() }
+
+  public String group() { return group(0) }
+
+  public String group(int g) {
+    if (!matched) {
+      throw new IllegalStateException("No match found")
+    }
+    if (g < 0 || g > pat.groupCount()) {
+      throw new IndexOutOfBoundsException("No group " + g)
+    }
+    if (!st.set[g]) {
+      return null
+    }
+    return input.substring(st.starts[g], st.ends[g])
+  }
+
+  // replaceAll rebuilds the string, taking each match and appending the
+  // replacement with $n put back for a group. A replacement with no match does
+  // nothing, and the scan is linear in the input, not in the number of matches.
+  public String replaceAll(String replacement) {
+    reset()
+    StringBuilder b = new StringBuilder()
+    int last = 0
+    while (find()) {
+      b.append(input.substring(last, st.starts[0]))
+      appendReplacement(b, replacement)
+      last = st.ends[0]
+      if (st.starts[0] == st.ends[0]) {
+        if (last < input.length()) {
+          b.append(input.charAt(last))
+          last++
+          searchFrom = last
+        } else {
+          break
+        }
+      }
+    }
+    b.append(input.substring(last))
+    return b.toString()
+  }
+
+  public String replaceFirst(String replacement) {
+    reset()
+    if (!find()) {
+      return input
+    }
+    StringBuilder b = new StringBuilder()
+    b.append(input.substring(0, st.starts[0]))
+    appendReplacement(b, replacement)
+    b.append(input.substring(st.ends[0]))
+    return b.toString()
+  }
+
+  private void appendReplacement(StringBuilder b, String replacement) {
+    int i = 0
+    while (i < replacement.length()) {
+      char c = replacement.charAt(i)
+      if (c == '\\' && i + 1 < replacement.length()) {
+        b.append(replacement.charAt(i + 1))
+        i += 2
+        continue
+      }
+      if (c == '$' && i + 1 < replacement.length() && RegexSyntax.isDigit(replacement.charAt(i + 1))) {
+        int j = i + 1
+        int g = 0
+        while (j < replacement.length() && RegexSyntax.isDigit(replacement.charAt(j))) {
+          g = g * 10 + (replacement.charAt(j) - '0')
+          j++
+        }
+        String val = group(g)
+        if (val != null) {
+          b.append(val)
+        }
+        i = j
+        continue
+      }
+      b.append(c)
+      i++
+    }
+  }
+
+  public String toString() { return input }
+}
+
+class PatternSyntaxException extends IllegalArgumentException {
+  private String badPattern
+  private int index
+
+  public PatternSyntaxException(String desc, String badPattern, int index) {
+    super(desc)
+    this.badPattern = badPattern
+    this.index = index
+  }
+
+  public String getPattern() { return badPattern }
+  public int getIndex() { return index }
+
+  // Java's getMessage is three lines: the reason and the index, the pattern,
+  // and a caret under the offending character. Matching that shape is what lets
+  // a program's output be compared with javac's rather than only its behaviour.
+  public String getMessage() {
+    StringBuilder b = new StringBuilder()
+    b.append(super.getMessage()).append(" near index ").append(index)
+    b.append("\n").append(badPattern)
+    // The caret is written only when the index is inside the pattern, which is
+    // why an unclosed group -- reported at the end -- has none.
+    if (index >= 0 && index < badPattern.length()) {
+      b.append("\n")
+      for (int i = 0 : i < index : i++) {
+        b.append(' ')
+      }
+      b.append('^')
+    }
+    return b.toString()
+  }
+}
