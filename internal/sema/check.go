@@ -713,12 +713,34 @@ func (ctx *methodCtx) checkSwitch(s *ast.Switch, expr bool) {
 			ctx.errf(cs.Pos, "TY-TYP-0089", "'case null' requires a reference selector")
 		}
 	}
+	// Java allows a switch on a boxed integral type as well as on the primitive,
+	// and unboxes the selector (JLS 14.11). A pattern or a `case null` keeps the
+	// box instead: those cases ask about the box itself, and only the constant
+	// form below is rewritten.
+	boxed := c.boxedSwitchPrim(xt)
 	switch {
 	case hasPattern && ast.IsRef(xt):
 		s.Kind = ast.SwitchType
-	case isIntegralType(xt):
-		// float and double selectors are not integral: they fall through to
-		// the diagnostic below rather than being truncated to int.
+	case hasPattern && isIntegralType(xt):
+		// A primitive selector under a pattern switch (JEP 507): each case asks
+		// whether the value converts exactly to the pattern's type, so a long
+		// selector is legal here even though no constant switch accepts one
+		// (t72_primitive_switch).
+		s.Kind = ast.SwitchInt
+	case boxed != nil:
+		// `switch (Character c)` is a switch on the char the box holds, and a
+		// null box throws NullPointerException when it is opened, exactly as in
+		// Java. Rewriting the selector as the primitive keeps one lowering: the
+		// constant C switch the backend writes for a char selector, whose labels
+		// are already the values the box carries.
+		s.X = ctx.convertWith(s.X, boxed, xt)
+		xt = boxed
+		s.Kind = ast.SwitchInt
+	case isSwitchSelectorType(xt):
+		// byte, short, char and int are the primitives a constant switch may
+		// select on. long is integral but is not one of them, and float and
+		// double are not integral at all: all three fall through to the
+		// diagnostic below rather than being truncated to int.
 		s.Kind = ast.SwitchInt
 	case c.isSubtype(xt, c.strType):
 		s.Kind = ast.SwitchString
@@ -726,7 +748,7 @@ func (ctx *methodCtx) checkSwitch(s *ast.Switch, expr bool) {
 		s.Kind = ast.SwitchEnum
 	default:
 		if xt != nil && !ast.IsError(xt) {
-			ctx.errf(s.Pos, "TY-TYP-0035", "switch selector must be an integral, String or enum type, found %s", xt)
+			ctx.errf(s.Pos, "TY-TYP-0035", "switch selector must be a char, byte, short, int, Character, Byte, Short, Integer, String or enum type, found %s", xt)
 		}
 		s.Kind = ast.SwitchInt
 	}
@@ -811,8 +833,9 @@ func (ctx *methodCtx) checkSwitch(s *ast.Switch, expr bool) {
 	}
 	// A switch expression must be exhaustive (JLS 14.11.2): with no default and
 	// no arms that cover every value it would evaluate to the type's zero
-	// value, a silent wrong answer. An enum selector is decidable here, so it
-	// is checked rather than refused outright like the others.
+	// value, a silent wrong answer. An enum selector and a sealed one are
+	// decidable here, so those are checked rather than refused outright like
+	// the others.
 	if expr && !hasDefault {
 		switch s.Kind {
 		case ast.SwitchInt, ast.SwitchString:
@@ -827,8 +850,86 @@ func (ctx *methodCtx) checkSwitch(s *ast.Switch, expr bool) {
 					}
 				}
 			}
+		case ast.SwitchType:
+			if !ctx.patternsExhaustive(s, xt) {
+				ctx.errf(s.Pos, "TY-TYP-0096", "switch expression does not cover all possible input values")
+			}
 		}
 	}
+}
+
+// patternsExhaustive reports whether the type patterns of a switch expression
+// cover every value of its selector type.
+//
+// A pattern whose type is a supertype of the selector's is total -- every value
+// of the selector matches it -- and covers the whole switch on its own. Failing
+// that the question is answerable only for a sealed selector: the values it can
+// take are its permitted subtypes, and it has to be exhaustive for each of them
+// (JLS 14.11.2). A guarded pattern is not counted, since `when` can fail and so
+// proves nothing about the value it binds: javac rejects the same switch.
+//
+// Constant labels are not counted either. A sealed interface whose permitted
+// subtype is an enum can be switched with constant labels in Java, but a label
+// against an interface selector compares a pointer with a constant in this
+// backend, so such a switch is left to the `default` it should have written.
+func (ctx *methodCtx) patternsExhaustive(s *ast.Switch, xt ast.Type) bool {
+	var pats []ast.Type
+	for _, cs := range s.Cases {
+		if cs.Pattern == nil || cs.Guard != nil || cs.Pattern.Type == nil {
+			continue
+		}
+		pats = append(pats, cs.Pattern.Type.Resolved)
+	}
+	return ctx.patternsCover(pats, xt, map[*ast.Class]bool{})
+}
+
+// patternsCover reports whether pats cover every value of t: some pattern is a
+// supertype of t, or t is sealed and every one of its permitted subtypes is
+// covered in turn. seen breaks a `permits` cycle, which is illegal Java but is
+// not something the sealed-type checks this compiler lacks would have caught.
+func (ctx *methodCtx) patternsCover(pats []ast.Type, t ast.Type, seen map[*ast.Class]bool) bool {
+	c := ctx.c
+	for _, p := range pats {
+		if c.isSubtype(t, p) {
+			return true
+		}
+	}
+	cl, ok := t.(*ast.ClassType)
+	if !ok || cl.Class == nil || !cl.Class.Mods.Has(ast.ModSealed) || seen[cl.Class] {
+		// Nothing is known about the values of a type that is not sealed: only a
+		// default or a total pattern can make such a switch exhaustive.
+		return false
+	}
+	seen[cl.Class] = true
+	permits := c.permittedSubtypes(ctx.env, cl.Class)
+	if len(permits) == 0 {
+		// A sealed type that names no permitted subclass says nothing about the
+		// values it can take, so exhaustiveness cannot be shown for it.
+		return false
+	}
+	for _, pc := range permits {
+		if !ctx.patternsCover(pats, &ast.ClassType{Class: pc}, seen) {
+			return false
+		}
+	}
+	return true
+}
+
+// permittedSubtypes returns the classes a sealed type's permits clause names.
+// A name that does not resolve is left out: the caller can then only answer
+// conservatively, and reporting a bad name belongs to the sealed-type checks
+// this compiler does not have yet (AGENTS.md §10).
+func (c *Checker) permittedSubtypes(env *typeEnv, cl *ast.Class) []*ast.Class {
+	if cl.Decl == nil {
+		return nil
+	}
+	var out []*ast.Class
+	for _, te := range cl.Decl.Permits {
+		if pc := c.lookupClassName(env, te.Name); pc != nil {
+			out = append(out, pc)
+		}
+	}
+	return out
 }
 
 func isEnumType(t ast.Type) bool {
@@ -842,6 +943,30 @@ func isEnumType(t ast.Type) bool {
 func isIntegralType(t ast.Type) bool {
 	p, ok := t.(*ast.PrimType)
 	return ok && p.IsIntegral()
+}
+
+// isSwitchSelectorType reports whether t is a primitive a switch with constant
+// labels may select on: char, byte, short and int (JLS 14.11). long is integral
+// but is not one of them -- Java rejects `switch` on a long selector -- and
+// float and double are not integral at all.
+func isSwitchSelectorType(t ast.Type) bool {
+	p, ok := t.(*ast.PrimType)
+	return ok && p.IsIntegral() && p.Kind != ast.Long
+}
+
+// boxedSwitchPrim returns the primitive a boxed switch selector is unboxed to,
+// or nil when the selector is not one of the four boxes Java allows: Character,
+// Byte, Short and Integer. Long, Float, Double and Boolean are not among them.
+func (c *Checker) boxedSwitchPrim(t ast.Type) *ast.PrimType {
+	p, ok := c.unboxed(t)
+	if !ok {
+		return nil
+	}
+	switch p.Kind {
+	case ast.Byte, ast.Short, ast.Char, ast.Int:
+		return p
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------- expressions

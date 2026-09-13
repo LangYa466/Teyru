@@ -1,0 +1,85 @@
+// Java allows a switch on a boxed integral type -- Character, Byte, Short and
+// Integer -- as well as on the primitive, and unboxes the selector (JLS
+// 14.11): `switch (Character c)` switches on the char the box holds, and a
+// null one throws NullPointerException when it is opened. javac 25 accepts
+// every switch below and prints the same lines.
+//
+// long, float and double are not selectors at all, neither the primitive nor
+// the box (TY-TYP-0035), and the same goes for Boolean.
+
+class Main {
+  static String name(Character c) {
+    return switch (c) {
+      case 'a' -> "a"
+      case 'z' -> "z"
+      default -> "other"
+    }
+  }
+
+  static String small(Byte b) {
+    return switch (b) {
+      case 1 -> "one"
+      case 2 -> "two"
+      default -> "other"
+    }
+  }
+
+  static String mid(Short s) {
+    return switch (s) {
+      case 300 -> "300"
+      default -> "other"
+    }
+  }
+
+  static Integer box(int n) {
+    return n
+  }
+
+  // the selector is the result of a call, so the box is opened once, where the
+  // switch reads it
+  static int number(Integer i) {
+    int out = -1
+    switch (i) {
+      case 0 -> out = 0
+      case 1 -> out = 1
+      default -> out = 9
+    }
+    return out
+  }
+
+  // a box with a `case null` keeps the box rather than being unboxed: that case
+  // asks about the box itself, and Java answers "null" for it
+  static String withNull(Integer i) {
+    return switch (i) {
+      case 1 -> "one"
+      case null -> "null"
+      default -> "other"
+    }
+  }
+
+  static Character pick(int n) {
+    if (n > 0) {
+      return 'z'
+    }
+    return 'n'
+  }
+
+  public static void main(String[] args) {
+    System.out.println(name('a') + name('z') + name('q'))
+    System.out.println(small((byte) 1) + " " + small((byte) 7) + " " + mid((short) 300) + " " + mid((short) 5))
+    System.out.println(number(box(0)) + " " + number(box(1)) + " " + number(box(42)))
+    System.out.println(withNull(1) + " " + withNull(null) + " " + withNull(3))
+    System.out.println(name(pick(1)) + name(pick(-1)))
+
+    try {
+      Character c = null
+      switch (c) {
+        case 'a' -> System.out.println("a")
+        default -> System.out.println("other")
+      }
+      System.out.println("no exception")
+    } catch (NullPointerException e) {
+      System.out.println("null box throws")
+    }
+  }
+}
