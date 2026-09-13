@@ -473,6 +473,10 @@ for (String n : names) {
 | `java.io` | `lib/16` | `File`、`Path`／`Paths`、`Files`（`readString`／`writeString`／`readAllLines`／`exists`／`createDirectories`／`listFiles`） |
 | `java.util.regex` | `lib/21` | `Pattern`／`Matcher`：回溯式比對，支援字面值、`.`、`*`／`+`／`?`／`{n,m}` 與其懶惰形式、字元類別、`\d`／`\w`／`\s`、`^`／`$`、`|`、捕獲與非捕獲群組、`replaceAll`／`replaceFirst`／`split`（含 `limit` 的三種正負號）；不支援的語法（佔有量詞、前後視、反向參考、`\p{...}`）在 `compile` 就被拒絕。`String.matches`／`replaceAll`／`replaceFirst`／`split` 就是這五個方法，不是另一套實作 |
 | `java.net` | `lib/15` | `ServerSocket`、`Socket`、`SocketInputStream`／`SocketOutputStream`；同步阻塞的 POSIX socket，逾時以 `SocketTimeoutException` 回報 |
+| `java.util.stream` | `lib/22` | `Stream`／`IntStream`／`LongStream`／`DoubleStream`、`Collectors`（26 個工廠）、`Collector`、`Spliterator`／`Spliterators`、`StreamSupport`、統計與 `OptionalInt` 家族；中間操作建管線、終端操作才拉，`Collection.stream()` 是入口 |
+| `java.math` | `lib/23` | `BigInteger`（base-2^30 limb、符號與大小）、`BigDecimal`（unscaled value 與 scale）、`MathContext`、`RoundingMode`；演算法照 JDK 翻譯，因為小數位數、除法留下的 scale、進位方式都是可觀察的 |
+| `java.text` | `lib/24` | `NumberFormat`／`DecimalFormat`／`DecimalFormatSymbols`、`DateFormat`／`SimpleDateFormat`、`DateTimeFormatter`、`MessageFormat` |
+| `java.util` 其餘 | `lib/25` | `Properties`、`Random`（逐位元組照 java.util.Random）、`UUID`、`BitSet`、`StringTokenizer`、`Enumeration`、`ArrayOps`（陣列的範圍形式） |
 | `com.google.gson` | `lib/10`、`lib/19` | Gson 的樹狀 API，以及由編譯器產生的物件綁定（見 [docs/json.md](json.md)） |
 | 框架 | `lib/17`、`lib/18` | Spring 形狀的容器與 web 層（見 [docs/framework.md](framework.md)） |
 
@@ -489,9 +493,10 @@ for (String n : names) {
 
 ### 沒有的東西
 
-反射、執行緒、`java.util.concurrent`、時區資料庫。這些缺席都是刻意的：它們要嘛
-需要執行期反射，要嘛需要一份比整個語言還大的資料表（時區），要嘛需要語言本身沒有的
-東西（執行緒）。
+反射、執行緒、`java.util.concurrent`、時區資料庫、`Scanner`、`List.of`／`Map.of`
+這組便利工廠。這些缺席都是刻意的：它們要嘛需要執行期反射，要嘛需要一份比整個語言還大
+的資料表（時區），要嘛需要語言本身沒有的東西（執行緒），要嘛——`Scanner` 就是——
+做半套會比不做更糟。
 
 需要自己的原生程式庫時，`native` 方法可以實作在 C 裡，見
 [docs/native.md](native.md)。
@@ -510,10 +515,17 @@ for (String n : names) {
 10. 同名區域類別：Java 把區域類別限縮在它的區塊（JLS 6.3），所以同一個類別的
     兩個方法可以各宣告一個 `class Local`；Teyru 以簡單名稱透過外圍型別解析，
     這種寫法會回報 `TY-TYP-0001`。
-11. lambda 的型別引數推論從主體回推，但只在**直接**的位置：目標型別是
-    `Fn<String, ? extends R>` 而主體是 `s -> s.length()` 時，`R` 定為 `Integer`。
-    推論不會穿過第二層（`map(...).collect(...)` 這種接龍要靠目標型別或型別見證），
-    也沒有 JLS 18 的完整約束求解。javac 對同樣的程式常常也不需要這些。
+11. 型別引數推論比 javac 弱一層，靠目標型別而不是完整的約束求解（沒有 JLS 18）：
+    - lambda 的型別引數會**從主體回推**：目標是 `Fn<String, ? extends R>` 而主體是
+      `s -> s.length()` 時 `R` 定為 `Integer`。
+    - 引數如果只有唯一一個候選方法，會拿該參數的型別當目標——所以巢狀的泛型呼叫
+      可以推出來。
+    - **有自由型別變數的泛型呼叫，當它是引數、或是一個鏈式呼叫的接收者時，拿不到
+      目標型別**：`sort(xs, naturalOrder())` 與 `comparing(...).thenComparing(...)`
+      需要寫出型別見證（`Comparator.<String>naturalOrder()`）或先放進一個有宣告型別
+      的變數。javac 對這兩種寫法都可以。
+    - 顯式見證屬於它自己的呼叫：`pair(f, Builder.<Integer>make())` 的外層見證不會被
+      內層覆蓋。
 12. **沒有捕獲轉換**：`List<? extends Number>` 在這裡就是 `List<Number>`。Java 靠捕獲
     擋下的寫入（對 `? extends` 的容器 `add`）這裡擋不住；反過來說，Java 靠捕獲才
     能編過的讀取（`list.get(0).doubleValue()`）這裡直接可行。
