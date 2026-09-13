@@ -16,7 +16,7 @@
 hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be converted to int
 ```
 
-`TY-SYN-0001`、`0002`、`0004`–`0010` 由詞法分析器產生（`TY-SYN-0003` 例外：它是剖析器
+`TY-SYN-0001`、`0002`、`0004`–`0011` 由詞法分析器產生（`TY-SYN-0003` 例外：它是剖析器
 在敘述結尾與 `throw` 換行時發出的），`TY-SYN-0100` 之後也由剖析器產生。
 
 ---
@@ -35,6 +35,7 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 | TY-SYN-0008 | `unterminated character literal`／`character literal does not fit in a char` | 字元常值沒有收尾，或超過 U+FFFF。 |
 | TY-SYN-0009 | `malformed integer literal`／`malformed floating-point literal` | 數字格式錯誤（例如 `0x` 後面沒有數字、`1e` 沒有指數）。 |
 | TY-SYN-0010 | `integer literal out of range` | 整數字面值超出可表示的位元數：十進位 `int` 上限 2^31、`long` 上限 2^63，非十進位 `int` 上限 `0xFFFFFFFF`、`long` 上限 `0xFFFFFFFFFFFFFFFF`（界線值會繞成負數）。需要更大的值請加 `L` 後綴。 |
+| TY-SYN-0011 | `invalid escape sequence \%c` | 字串或字元常值裡有 Teyru 不認識的跳脫序列（例如 `\q`）。合法的有 `\n` `\t` `\r` `\b` `\f` `\0` `\\` `\'` `\"`、八進位 `\nnn` 與 `\uXXXX`。 |
 | TY-SYN-0100 | `expected '%s', found %s` | 少了預期的 token（`)`、`]`、`{`、`}`、`:` 等）。 |
 | TY-SYN-0101 | `expected identifier, found %s` | 需要識別字的位置放了別的東西；常見於把關鍵字當名稱使用。 |
 | TY-SYN-0102 | `unexpected %s at top level` | 檔案最上層只允許 package／import／型別宣告，或直接寫成員（隱式類別形式）。 |

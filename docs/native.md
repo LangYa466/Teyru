@@ -145,7 +145,7 @@ int32_t f = me->f_factor;
 
 ## 5. 回呼：從 C 呼叫 Teyru
 
-`--native-header` 也會輸出介面方法的 selector：
+`--native-header` 也會輸出介面方法的 selector（數值由編譯器配置，這裡列出的是目前的樣子）：
 
 ```c
 #define TY_SEL_TRANSFORM_TRANSFORM 5
@@ -182,8 +182,9 @@ System.out.println(Native.apply(t, 4))   // 40
 
 - **沒有自動繫結。** 標頭檔由編譯器產生，實作要自己寫；沒有 C++ 名稱修飾解析、
   沒有結構描述子、沒有記憶體佈局談判。
-- **`native` 方法不能有 body，也不能是建構子。** 建構子請用一般 Teyru 寫，
-  再呼叫 native 方法。
+- **`native` 方法不能有 body。** 建構子可以是 native（`lib/02_string.teyru` 的
+  `String(String original)` 就是），`--native-header` 會一併宣告它：符號是
+  `tyn_<類別>__init__<參數描述子>`，實例建構子的第一個參數是 `void *self`。
 - **GC 不會搬移物件，所以 C 端可以放心保存 `void *`——但只在該物件還活著的時候。**
   若要在 C 端長期持有參照，請用 `ty_gc_register_static` 註冊一個根，
   否則回收器會在下次回收時把物件收走。
