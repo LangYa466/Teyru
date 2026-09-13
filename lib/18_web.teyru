@@ -297,6 +297,29 @@ class WebUtil {
     return -1
   }
 
+  // splitRawLines splits a head on CRLF (or LF), which is what the header
+  // reader needs before the request has been parsed into one.
+  public static List<String> splitRawLines(String head) {
+    List<String> out = new ArrayList<String>()
+    int start = 0
+    while (start <= head.length()) {
+      int nl = indexOfFrom(head, "\n", start)
+      if (nl < 0) {
+        if (start < head.length()) {
+          out.add(head.substring(start))
+        }
+        break
+      }
+      String line = head.substring(start, nl)
+      if (line.endsWith("\r")) {
+        line = line.substring(0, line.length() - 1)
+      }
+      out.add(line)
+      start = nl + 1
+    }
+    return out
+  }
+
   // indexOfFrom is String.indexOf(String, int), which the library does not have
   // yet: searching a suffix and adding the offset back gives the same answer
   // and does not depend on it arriving.
@@ -441,10 +464,16 @@ class Router {
 // thread-per-connection version needs.
 class HttpServer {
   private int port
+  private int boundPort = -1
+  private ServerSocket listener = null
   private Router router
   private ApplicationContext ctx
   private boolean verbose = false
   private int served = 0
+  // readTimeoutMs bounds how long one connection may take to send its request.
+  // Ten seconds is generous for a request that is already written and short
+  // enough that a stalled client does not hold the server for the afternoon.
+  private int readTimeoutMs = 10000
 
   public HttpServer(int port, Router router, ApplicationContext ctx) {
     this.port = port
@@ -457,7 +486,28 @@ class HttpServer {
     return this
   }
 
-  public int getPort() { return port }
+  // getPort answers with the port the server is listening on. Before bind() it
+  // is the port that was asked for; after it, the one the kernel gave, which is
+  // what makes `new HttpServer(0, ...)` useful -- port 0 asks for any free
+  // port, and only the bind knows which.
+  public int getPort() { return boundPort >= 0 ? boundPort : port }
+
+  // bind starts listening. serve and serveIdle call it themselves; a caller
+  // that wants the port before serving -- a test that connects to itself --
+  // calls it first.
+  public void bind() {
+    if (listener == null) {
+      listener = new ServerSocket(port)
+      boundPort = listener.getLocalPort()
+    }
+  }
+
+  public void close() {
+    if (listener != null) {
+      listener.close()
+      listener = null
+    }
+  }
 
   public int getServed() { return served }
 
@@ -471,6 +521,152 @@ class HttpServer {
     if (verbose) {
       System.out.println(line)
     }
+  }
+
+  // serve accepts connections and answers them, one at a time, until the
+  // program ends.
+  //
+  // One at a time is not a limitation of this code but of the language: there
+  // are no threads (docs/language.md §13), so a second client waits for the
+  // first to finish. The shape is the one a thread-per-connection version needs
+  // -- accept, read one request, answer it, close -- so adding threads later
+  // changes where the loop runs, not what it does.
+  public void serve() {
+    bind()
+    try {
+      while (true) {
+        Socket s = listener.accept()
+        serveOne(s)
+      }
+    } finally {
+      close()
+    }
+  }
+
+  // serveIdle is serve with a deadline: it answers connections until none
+  // arrives within idleMillis, then returns how many it answered.
+  //
+  // A program with no threads cannot be interrupted, so an accept that nobody
+  // connects to would hang the process with no way back. Bounding the wait is
+  // what makes a serving loop testable -- and it is the same mechanism Java's
+  // ServerSocket.setSoTimeout gives a server that wants to check its own state
+  // between connections.
+  public int serveIdle(int idleMillis) {
+    bind()
+    listener.setSoTimeout(idleMillis)
+    int answered = 0
+    // The listener stays open across calls: a caller that serves in bursts --
+    // accept what is waiting, do something else, come back -- must not have its
+    // port closed between them, or the next client's connection is refused
+    // before the loop gets a chance to bind again.
+    while (true) {
+      Socket s
+      try {
+        s = listener.accept()
+      } catch (SocketTimeoutException e) {
+        break
+      }
+      serveOne(s)
+      answered++
+    }
+    return answered
+  }
+
+  // serveOne reads one request off a connection, answers it, and closes. A
+  // client that connects and says nothing, or goes away mid-request, is not an
+  // error the server reports: it is a connection that ends.
+  private void serveOne(Socket s) {
+    try {
+      // A client that opens a connection and never finishes a request would
+      // otherwise hold the only thread there is, forever.
+      s.setSoTimeout(readTimeoutMs)
+      String raw = readRequest(s.getInputStream())
+      if (raw == null) {
+        return
+      }
+      HttpResponse res
+      try {
+        res = handle(HttpParser.parse(raw))
+      } catch (IllegalArgumentException e) {
+        // a request the parser refuses is the client's mistake, and the status
+        // that says so is 400
+        res = new HttpResponse()
+        res.status = 400
+        res.body = e.getMessage()
+      }
+      SocketOutputStream out = s.getOutputStream()
+      out.write(res.respond())
+      out.flush()
+    } catch (IOException e) {
+      // a connection that failed is not a reason to stop serving
+    } finally {
+      s.close()
+    }
+  }
+
+  // readRequest reads the head and the body off a stream and renders the
+  // request the parser expects: the lines, a blank line, then the bytes.
+  //
+  // The body is read by length rather than by line, because a body is bytes and
+  // may contain anything -- a line reader would stop at the first CRLF inside
+  // it and hand a truncated document to the handler.
+  private String readRequest(SocketInputStream in) {
+    StringBuilder head = new StringBuilder()
+    while (true) {
+      String line = in.readLine()
+      if (line == null) {
+        // the connection ended before the blank line: nothing to answer, unless
+        // a request line already arrived and the head was simply unterminated
+        return head.length() == 0 ? null : head.toString()
+      }
+      if (line.isEmpty()) {
+        break
+      }
+      head.append(line).append("\r\n")
+    }
+    String headText = head.toString()
+    int len = contentLength(headText)
+    if (len <= 0) {
+      return headText
+    }
+    byte[] buf = new byte[len]
+    int got = 0
+    while (got < len) {
+      int n = in.read(buf, got, len - got)
+      if (n <= 0) {
+        break
+      }
+      got += n
+    }
+    if (got == 0) {
+      return headText
+    }
+    // The head already ends with CRLF -- every line was appended with one --
+    // so a single CRLF more is the blank line that ends it. Adding two, as the
+    // shape "head CRLF CRLF body" suggests, puts one CRLF of the head's into
+    // the body and every POST arrives with a leading blank line.
+    return headText + "\r\n" + Net.stringFrom(buf, 0, got)
+  }
+
+  // contentLength reads Content-Length out of a request head, or -1 when the
+  // header is absent or unreadable. A head is not parsed here: the parser does
+  // that, and this only needs one number out of it before deciding how much to
+  // read.
+  private int contentLength(String head) {
+    for (String line : WebUtil.splitRawLines(head)) {
+      int colon = line.indexOf(":")
+      if (colon <= 0) {
+        continue
+      }
+      if (line.substring(0, colon).trim().toLowerCase().equals("content-length")) {
+        try {
+          return Integer.parseInt(line.substring(colon + 1).trim())
+        } catch (IllegalArgumentException e) {
+          return -1
+        }
+      }
+    }
+    return -1
   }
 
   // handle answers one request. It is separate from the socket loop so that it

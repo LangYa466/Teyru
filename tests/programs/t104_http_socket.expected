@@ -1,0 +1,5 @@
+routes=3
+answered=1 | HTTP/1.1 200 OK | {"name":"pet7","age":70}
+answered=1 | HTTP/1.1 200 OK | q=cat
+answered=1 | HTTP/1.1 200 OK | lookups=1
+answered=1 | HTTP/1.1 404 Not Found | not found: /nope
