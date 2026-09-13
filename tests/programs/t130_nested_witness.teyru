@@ -1,0 +1,37 @@
+/* An explicit type witness on a call that is itself an argument.
+
+   The witness is held in the checker's context while the call it belongs to is
+   being resolved, which includes checking the arguments -- so a call in the
+   argument list that has a witness of its own used to clear the outer one, and
+   a lambda in the same argument list then had its parameter type erased to
+   Object (`cannot find method length() in Object`). It is saved and put back
+   now. Expected output is javac 25's. */
+
+package teyru
+
+interface Fn3<T, R> { R apply(T t) }
+
+class Holder<U> {
+  private U v
+  Holder(U v) { this.v = v }
+  U get() { return v }
+}
+
+class T130 {
+  static <U> Holder<U> make(U v) { return new Holder<U>(v) }
+  static <U, V> String pair(Holder<U> h, Fn3<U, V> f) { return "pair:" + f.apply(h.get()) }
+  static <U, V> String single(Fn3<U, V> f) { return "single" }
+  static <U> String describe(Holder<U> h) { return "holder:" + h.get() }
+
+  public static void main(String[] args) {
+    System.out.println("== the witness survives the argument list ==")
+    System.out.println(T130.<String, Integer>pair(T130.<String>make("abcd"), s -> Integer.valueOf(s.length())))
+    System.out.println(T130.<String, Integer>pair(T130.<String>make("ab"), s -> Integer.valueOf(s.length() * 2)))
+    System.out.println("== and still works the long way round ==")
+    Holder<String> hoisted = T130.<String>make("hello")
+    System.out.println(T130.<String, Integer>pair(hoisted, s -> Integer.valueOf(s.length() + 1)))
+    System.out.println("== a witness with no lambda in sight ==")
+    System.out.println(T130.<String>describe(T130.<String>make("witness")))
+    System.out.println(T130.<String, Integer>single(s -> Integer.valueOf(7)))
+  }
+}

@@ -3069,8 +3069,15 @@ func (ctx *methodCtx) checkCall(v *ast.Call, want ast.Type) {
 		for _, te := range v.TypeArgs {
 			ts = append(ts, ctx.c.resolveType(ctx.env, te))
 		}
+		// Saved and put back rather than cleared: an argument is checked while
+		// this call's witness is in hand, and an argument that is itself a call
+		// with a witness of its own would otherwise clear the outer one --
+		// `pair(f, Builder.<Integer>make())` then bound the lambda's parameter
+		// to Object, because by the time the overload was picked the outer
+		// witness was gone.
+		prev := ctx.pendingTypeArgs
 		ctx.pendingTypeArgs = ts
-		defer func() { ctx.pendingTypeArgs = nil }()
+		defer func() { ctx.pendingTypeArgs = prev }()
 	}
 	if v.ThisCtor {
 		ctx.checkThisCtor(v)

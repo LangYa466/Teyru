@@ -1,0 +1,8 @@
+== the witness survives the argument list ==
+pair:4
+pair:4
+== and still works the long way round ==
+pair:6
+== a witness with no lambda in sight ==
+holder:witness
+single

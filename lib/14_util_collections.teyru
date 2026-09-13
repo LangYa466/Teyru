@@ -140,7 +140,7 @@ class Collections {
     list.sort(new NaturalOrderComparator<T>())
   }
 
-  public static <T> void sort(List<T> list, Comparator<T> c) {
+  public static <T> void sort(List<T> list, Comparator<? super T> c) {
     list.sort(c)
   }
 
