@@ -484,18 +484,16 @@ type (
 		// resolved
 		Method   *Method
 		Static   bool
-		Varargs  int // number of fixed args when packed into array; -1 if not varargs call
 		RecvType Type
 		ThisCtor bool // this(...) / super(...) constructor chaining
 	}
 	New struct {
 		ExprBase
-		Type    *TypeExpr
-		Args    []Expr
-		Body    *ClassDecl
-		Outer   Expr
-		Ctor    *Method
-		Varargs int
+		Type  *TypeExpr
+		Args  []Expr
+		Body  *ClassDecl
+		Outer Expr
+		Ctor  *Method
 	}
 	NewArray struct {
 		ExprBase

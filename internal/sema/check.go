@@ -1898,7 +1898,6 @@ func (c *Checker) resolveCtor(ctx *methodCtx, ct *ast.ClassType, v *ast.New, cl 
 		return nil
 	}
 	ctx.bindArgs(best, score, v.Args, ct)
-	v.Varargs = score.varargs
 	return best
 }
 
