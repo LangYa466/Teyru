@@ -1556,6 +1556,31 @@ func (c *Checker) lombokSneakyThrows(d *ast.MethodDecl) {
 	d.Body = blockOf(t)
 }
 
+// ensureClInit gives a class a static initializer to hang a synthesized field's
+// value on. resolveMembers creates one from a field that declares an
+// initializer, but a synthesized field has no declaration to read, so a value
+// put on InitExpr would never be written.
+func (c *Checker) ensureClInit(cl *ast.Class) {
+	if cl.ClInit == nil {
+		cl.ClInit = &ast.Method{Name: "<clinit>", Owner: cl, Mods: ast.ModStatic,
+			Result: ast.TVoid, Pos: pos(), SynthKind: "clinit"}
+	}
+}
+
+// newObjectExpr builds `new Object()` for a field the checker synthesizes.
+//
+// It cannot go through newObj and the body checker: Lombok runs after the
+// members pass, so nothing type-checks the expression it plants, and the
+// emitter reads a New's type off the node itself -- with none set it emitted a
+// bare NULL, which is how the lock field came out null.
+func (c *Checker) newObjectExpr() *ast.New {
+	ct := &ast.ClassType{Class: c.b.Object}
+	return &ast.New{
+		ExprBase: ast.ExprBase{Pos: pos(), T: ct},
+		Type:     &ast.TypeExpr{Pos: pos(), Name: c.b.Object.Name, Resolved: ct},
+	}
+}
+
 func (c *Checker) lombokSynchronized(cl *ast.Class, d *ast.MethodDecl) {
 	if d.Body == nil {
 		return
@@ -1567,6 +1592,13 @@ func (c *Checker) lombokSynchronized(cl *ast.Class, d *ast.MethodDecl) {
 		if lf == nil {
 			lf = &ast.Field{Name: "__lock$" + cl.Name, Type: c.objType,
 				Mods: ast.ModPrivate | ast.ModStatic | ast.ModFinal, Pos: pos(), Storage: true, Anno: "@Synchronized"}
+			// Lombok writes `private static final Object $LOCK = new Object()`.
+			// The field was left null here, which is not a lock: synchronized
+			// throws NullPointerException on a null monitor (JLS 14.19), and
+			// the block only appeared to work because entering it on address
+			// zero went unchecked.
+			lf.InitExpr = c.newObjectExpr()
+			c.ensureClInit(cl)
 			c.addSynthField(cl, lf)
 		}
 		d.Sym.SyncOn = lf
@@ -1588,6 +1620,9 @@ func (c *Checker) lombokLocked(cl *ast.Class, d *ast.MethodDecl, a *ast.Annotati
 	if lf == nil {
 		lf = &ast.Field{Name: name, Type: c.objType,
 			Mods: ast.ModPrivate | ast.ModStatic | ast.ModFinal, Pos: pos(), Storage: true, Anno: "@Locked"}
+		// the same null monitor @Synchronized had; see lombokSynchronized
+		lf.InitExpr = c.newObjectExpr()
+		c.ensureClInit(cl)
 		c.addSynthField(cl, lf)
 	}
 	d.Body = blockOf(&ast.Sync{Pos: pos(), Lock: id(name), Body: d.Body})
