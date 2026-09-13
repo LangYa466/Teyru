@@ -68,6 +68,76 @@ func TestStringEscapes(t *testing.T) {
 	}
 }
 
+func TestEscapeThatStandsForItself(t *testing.T) {
+	toks, errs := lex(`"a\sb\"c\\d\'e"`)
+	if errs != "" {
+		t.Fatalf("unexpected diagnostics: %s", errs)
+	}
+	got := toks[0].Text
+	want := `a b"c\d'e`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestUnicodeEscapes(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{`"A"`, "A"},
+		{`"\uuu0041"`, "A"},
+		{`"😀"`, "\U0001F600"},
+	}
+	for _, tc := range cases {
+		toks, errs := lex(tc.src)
+		if errs != "" {
+			t.Errorf("%s: unexpected diagnostics: %s", tc.src, errs)
+			continue
+		}
+		if toks[0].Text != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.src, toks[0].Text, tc.want)
+		}
+	}
+}
+
+func TestUnknownEscapeIsRejected(t *testing.T) {
+	for _, src := range []string{`"\q"`, `'\q'`, `"\8"`} {
+		if _, errs := lex(src); !contains(errs, "TY-SYN-0011") {
+			t.Errorf("%s: want TY-SYN-0011, got %q", src, errs)
+		}
+	}
+}
+
+// A text block is de-indented before its escapes are decoded, so the diagnostic
+// has to be mapped back to the source it came from.
+func TestTextBlockEscapePosition(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		code string
+		line int
+		col  int
+	}{
+		{"unknown", "class A {\n  int x = \"\"\"\n    a\\qb\n    \"\"\"\n}\n", "TY-SYN-0011", 3, 7},
+		{"unicode", "class A {\n  int x = \"\"\"\n    a\\uZZZZb\n    \"\"\"\n}\n", "TY-SYN-0005", 3, 8},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &source.Diagnostics{}
+			Lex(source.NewFile("t.teyru", tc.src), d)
+			if len(d.List) != 1 {
+				t.Fatalf("got %d diagnostics, want 1: %s", len(d.List), d.String())
+			}
+			got := d.List[0]
+			if got.Code != tc.code {
+				t.Errorf("code = %s, want %s", got.Code, tc.code)
+			}
+			line, col := got.Pos.File.Position(got.Pos.Off)
+			if line != tc.line || col != tc.col {
+				t.Errorf("position = %d:%d, want %d:%d", line, col, tc.line, tc.col)
+			}
+		})
+	}
+}
+
 func TestTextBlock(t *testing.T) {
 	toks, errs := lex("\"\"\"\n  hello\n  world\n  \"\"\"\n")
 	if errs != "" {
@@ -111,6 +181,44 @@ func TestNumbers(t *testing.T) {
 	}
 	if toks[9].Kind != CharLit || toks[9].Int != 'x' {
 		t.Errorf("char literal wrong: %+v", toks[9])
+	}
+}
+
+func TestIntegerRange(t *testing.T) {
+	ok := []string{
+		"2147483647", "-2147483648", "0", "9223372036854775807L", "-9223372036854775808L",
+		"0x80000000", "0xFFFFFFFF", "037777777777", "0b11111111111111111111111111111111",
+	}
+	for _, src := range ok {
+		if _, errs := lex(src); errs != "" {
+			t.Errorf("%s: unexpected diagnostics: %s", src, errs)
+		}
+	}
+	bad := []string{
+		"2147483648", "-2147483649", "9223372036854775808L", "-9223372036854775809L",
+		"0x100000000", "040000000000", "0b100000000000000000000000000000000",
+	}
+	for _, src := range bad {
+		if _, errs := lex(src); !contains(errs, "TY-SYN-0010") {
+			t.Errorf("%s: want TY-SYN-0010, got %q", src, errs)
+		}
+	}
+	// limit is the smallest value that overflows, so the check has to distinguish
+	// "-" before the literal from a "-" that ends a preceding expression.
+	if _, errs := lex("a - 2147483647"); errs != "" {
+		t.Errorf("2147483647 after a binary minus: unexpected diagnostics: %s", errs)
+	}
+}
+
+func TestTextBlockBlankFirstLine(t *testing.T) {
+	toks, errs := lex("\"\"\"\n  \n    hello\n    \"\"\"\n")
+	if errs != "" {
+		t.Fatalf("unexpected diagnostics: %s", errs)
+	}
+	// The blank first line is shorter than the common indent, so it must be
+	// emptied rather than sliced past its own length.
+	if toks[0].Text != "\nhello\n" {
+		t.Errorf("text block = %q", toks[0].Text)
 	}
 }
 
