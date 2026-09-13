@@ -39,8 +39,13 @@ int32_t ty_object_hash(tyobj *o) {
 
 int32_t ty_object_equals(tyobj *a, tyobj *b) { return a == b; }
 
+/* String.equals(Object): in Java only another String can be equal, so the class
+   is checked before the payload is read as one. An unrelated object carries no
+   length and data fields where a String keeps them, and reading them would
+   compare against whatever bytes follow the object. */
 int32_t ty_str_eq_obj(tystr *a, void *b) {
   if (b == NULL) return a == NULL;
+  if (((tyobj *)b)->cls != TY_STRING) return 0;
   return ty_str_eq(a, (tystr *)b);
 }
 
@@ -58,6 +63,10 @@ int32_t ty_str_tobool(tystr *s) { return s && strcmp(s->data, "true") == 0; }
 /* ---- boxing helpers ---------------------------------------------------- */
 
 tystr *ty_int_tostr(void *o) { return ty_str_of_int(ty_unbox_int(o)); }
+/* Byte.toString and Short.toString are the decimal spelling of the value, so
+   they share the int formatter. */
+tystr *ty_byte_tostr(void *o) { return ty_str_of_int(ty_unbox_byte(o)); }
+tystr *ty_short_tostr(void *o) { return ty_str_of_int(ty_unbox_short(o)); }
 tystr *ty_bool_tostr(void *o) { return ty_str_of_bool(ty_unbox_bool(o)); }
 tystr *ty_char_tostr(void *o) { return ty_str_of_char(ty_unbox_char(o)); }
 tystr *ty_long_tostr(void *o) { return ty_str_of_long(ty_unbox_long(o)); }
@@ -89,6 +98,15 @@ int32_t ty_prim_cmp_int(int32_t a, int32_t b) { return a < b ? -1 : (a > b ? 1 :
 int32_t ty_prim_cmp_long(int64_t a, int64_t b) { return a < b ? -1 : (a > b ? 1 : 0); }
 int32_t ty_prim_cmp_double(double a, double b) { return a < b ? -1 : (a > b ? 1 : 0); }
 int32_t ty_double_compare(double a, double b) { return a < b ? -1 : (a > b ? 1 : 0); }
+/* Long.compareTo and Double.compareTo take the other box as an argument, so the
+   `_obj` forms unbox it first; a null argument raises a NullPointerException,
+   like an intrinsic in Java. */
+int32_t ty_long_compare_obj(void *a, void *b) {
+  return ty_long_compare(ty_unbox_long(a), ty_unbox_long(b));
+}
+int32_t ty_double_compare_obj(void *a, void *b) {
+  return ty_double_compare(ty_unbox_double(a), ty_unbox_double(b));
+}
 int32_t ty_long_hash(void *o) {
   int64_t v = ty_unbox_long(o);
   return (int32_t)(v ^ ((uint64_t)v >> 32));

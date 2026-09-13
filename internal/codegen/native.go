@@ -63,6 +63,16 @@ var nativeTable = map[string]nativeFn{
 	"String.valueOf(Object)": {fn: "ty_str_of_obj"},
 
 	// ---- boxed primitives
+	"Byte.valueOf(B)":  {fn: "ty_box_byte"},
+	"Byte.byteValue()": {fn: "ty_unbox_byte", recv: "void*"},
+	"Byte.hashCode()":  {fn: "ty_unbox_byte", recv: "void*"},
+	"Byte.toString()":  {fn: "ty_byte_tostr", recv: "void*"},
+
+	"Short.valueOf(S)":   {fn: "ty_box_short"},
+	"Short.shortValue()": {fn: "ty_unbox_short", recv: "void*"},
+	"Short.hashCode()":   {fn: "ty_unbox_short", recv: "void*"},
+	"Short.toString()":   {fn: "ty_short_tostr", recv: "void*"},
+
 	"Integer.intValue()":         {fn: "ty_unbox_int", recv: "void*"},
 	"Integer.valueOf(I)":         {fn: "ty_box_int"},
 	"Integer.parseInt(String)":   {fn: "ty_str_toint", recv: "tystr*"},
@@ -83,6 +93,7 @@ var nativeTable = map[string]nativeFn{
 	"Long.toString(J)":       {fn: "ty_str_of_long"},
 	"Long.hashCode()":        {fn: "ty_long_hash", recv: "void*"},
 	"Long.equals(Object)":    {fn: "ty_long_equals", recv: "void*"},
+	"Long.compareTo(Long)":   {fn: "ty_long_compare_obj", recv: "void*"},
 	"Long.compare(J,J)":      {fn: "ty_prim_cmp_long"},
 	"Long.max(J,J)":          {fn: "ty_max_long"},
 	"Long.min(J,J)":          {fn: "ty_min_long"},
@@ -95,6 +106,7 @@ var nativeTable = map[string]nativeFn{
 	"Double.toString(D)":         {fn: "ty_str_of_double"},
 	"Double.hashCode()":          {fn: "ty_double_hash", recv: "void*"},
 	"Double.equals(Object)":      {fn: "ty_double_equals", recv: "void*"},
+	"Double.compareTo(Double)":   {fn: "ty_double_compare_obj", recv: "void*"},
 	"Double.compare(D,D)":        {fn: "ty_double_compare"},
 	"Double.isNaN(D)":            {fn: "ty_isnan"},
 
