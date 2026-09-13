@@ -45,18 +45,19 @@ into `opt`, `llc` or a custom pass; `./teyru emit` prints the generated C.
 
 ## Why it is faster than the JVM
 
-Measured on one machine (Linux x86-64, clang 22, OpenJDK 21 Temurin, best of 5 runs):
+Measured on one machine (AMD Ryzen 7 5700X, Linux x86-64, clang 22.1.8, OpenJDK 21.0.11
+Temurin; produced by `RUNS=5 sh scripts/bench.sh`, best of 5 runs):
 
 | Metric | Teyru (native) | Java (HotSpot) | Difference |
 |---|---|---|---|
-| 100 startups | **0.068 s** (0.68 ms each) | 1.97 s (19.8 ms each) | **~29x faster** |
-| Executable size | **35 KB** | ~200 MB JDK runtime | ~5900x smaller |
-| Peak RSS (hello) | **2.1 MB** | 50.2 MB | **~24x less** |
-| `bench_fib` recursion | **0.0060 s** | 0.0264 s | **4.4x faster** |
-| `bench_loop` loops and integer math | **0.0209 s** | 0.0429 s | **2.1x faster** |
-| `bench_oop` objects and virtual calls | **0.0044 s** | 0.0253 s | **5.8x faster** |
-| `bench_string` string handling | **0.0093 s** | 0.0554 s | **6.0x faster** |
-| `bench_alloc` short-lived allocation | **0.0233 s** | 0.0308 s | **1.3x faster** |
+| 100 startups | **0.064 s** (0.64 ms each) | 1.98 s (19.8 ms each) | **~31x faster** |
+| Executable size | **34.8 KB** | ~346 MB JDK installation | ~10000x smaller |
+| Peak RSS (hello) | **2.1 MB** | 49.8 MB | **~24x less** |
+| `bench_fib` recursion | **0.0057 s** | 0.0260 s | **4.6x faster** |
+| `bench_loop` loops and integer math | **0.0206 s** | 0.0426 s | **2.1x faster** |
+| `bench_oop` objects and virtual calls | **0.0045 s** | 0.0251 s | **5.6x faster** |
+| `bench_string` string handling | **0.0134 s** | 0.0536 s | **4.0x faster** |
+| `bench_alloc` short-lived allocation | **0.0231 s** | 0.0296 s | **1.3x faster** |
 
 **Where the speed comes from:**
 
