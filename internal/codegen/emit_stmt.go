@@ -194,7 +194,10 @@ func (e *Emitter) stmt(s ast.Stmt) {
 	case *ast.Assert:
 		e.line("if (!(%s)) { ty_assertfail(%s); }\n", e.cond(v.Cond), e.assertMsg(v))
 	case *ast.Sync:
-		e.line("{ void* _lock = (void*)%s; ty_sync_enter(_lock);\n", e.refExpr(v.Lock))
+		// Java tests the monitor for null before entering it (JLS 14.19):
+		// `synchronized (null)` throws NullPointerException. Without the test
+		// the block locked on address zero and printed its body.
+		e.line("{ void* _lock = (void*)%s; if (!_lock) ty_npe(); ty_sync_enter(_lock);\n", e.refExpr(v.Lock))
 		e.indent++
 		e.emitBlockInner(v.Body)
 		e.line("ty_sync_exit(_lock);\n")
@@ -1197,6 +1200,31 @@ func switchNeedsChain(s *ast.Switch) bool {
 	return false
 }
 
+// emitSwitchNullCheck writes the null test a reference selector needs.
+//
+// A switch over a String, an enum, a box or any other reference throws
+// NullPointerException when the selector is null and there is no `case null`
+// to take it (JLS 14.11.2) -- a type pattern does not catch null either. The
+// lowering read the null pointer instead: an enum answered with whatever
+// ordinal lay at address zero and fell through to default, so an exhaustive
+// switch expression printed null where javac throws.
+func (e *Emitter) emitSwitchNullCheck(s *ast.Switch, id int) {
+	switch s.Kind {
+	case ast.SwitchEnum, ast.SwitchString:
+		// the selector is a reference by construction
+	default:
+		if !e.isRef(s.X.GetType()) {
+			return
+		}
+		for _, cs := range s.Cases {
+			if cs.Null {
+				return
+			}
+		}
+	}
+	e.line("if (!_s%d) ty_npe();\n", id)
+}
+
 // switchStmt lowers a switch statement or expression. Cases are emitted as
 // labels so that colon-form cases keep Java's fall-through semantics; resultTmp
 // is non-empty for switch expressions and receives the yielded value.
@@ -1233,6 +1261,7 @@ func (e *Emitter) switchStmt(s *ast.Switch, resultTmp string) {
 	switch s.Kind {
 	case ast.SwitchString:
 		e.line("tystr* _s%d = (tystr*)%s;\n", id, e.expr(s.X))
+		e.emitSwitchNullCheck(s, id)
 		e.line("int _k%d = -1;\n", id)
 		for i, cs := range s.Cases {
 			if isDefaultCase(cs) {
@@ -1245,6 +1274,7 @@ func (e *Emitter) switchStmt(s *ast.Switch, resultTmp string) {
 		e.line("switch (_k%d) {\n", id)
 	case ast.SwitchEnum:
 		e.line("%s _s%d = %s;\n", selT, id, e.expr(s.X))
+		e.emitSwitchNullCheck(s, id)
 		e.line("int32_t _e%d = ty_enum_ordinal((void*)_s%d);\n", id, id)
 		e.line("switch (_e%d) {\n", id)
 	default:
@@ -1311,6 +1341,7 @@ func (e *Emitter) switchChain(s *ast.Switch, resultTmp string, id int) {
 	e.resultSlot(resultTmp, id)
 	selT := e.ctype(s.X.GetType())
 	e.line("%s _s%d = %s;\n", selT, id, e.expr(s.X))
+	e.emitSwitchNullCheck(s, id)
 	e.line("int _k%d = -1;\n", id)
 	def := -1
 	n := 0

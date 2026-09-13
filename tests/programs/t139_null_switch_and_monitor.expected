@@ -1,0 +1,17 @@
+== a constant switch over a String ==
+string: NPE
+== an exhaustive switch over an enum ==
+enum: NPE
+== a pattern switch, which does not catch null ==
+pattern: NPE
+== a switch over a box ==
+box: NPE
+== case null is the shape that takes it ==
+case null: null case
+== and nothing changes when the selector is not null ==
+non-null pattern: str:hi
+non-null string: A
+non-null box: one
+== a null monitor ==
+synchronized: NPE
+synchronized: locked
