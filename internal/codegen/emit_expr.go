@@ -45,8 +45,23 @@ func (e *Emitter) tmpRef(x string) string {
 }
 
 // cond renders a boolean condition.
+// cond renders an expression in a boolean context: if, while, do, for, the
+// ternary's test, and assert.
+//
+// A boxed Boolean has to be unboxed here. Everywhere else the target type is
+// known and coerce() does it, but a condition has no declared type to convert
+// to -- `Boolean b = false; if (b)` reached C as a pointer test, and a non-null
+// Boolean is true whatever it holds, so the branch went the wrong way.
 func (e *Emitter) cond(x ast.Expr) string {
-	return e.expr(x)
+	v := e.expr(x)
+	ct, ok := x.GetType().(*ast.ClassType)
+	if !ok {
+		return v
+	}
+	if k, ok := e.prog.Builtins.Unbox[ct.Class]; ok && k == ast.Boolean {
+		return e.unboxCall(v, ct, ast.TBoolean)
+	}
+	return v
 }
 
 // refExpr renders an expression that is being used as an object reference.
