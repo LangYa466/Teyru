@@ -489,9 +489,9 @@ for (String n : names) {
 
 ### 沒有的東西
 
-反射、執行緒、`Stream`／`Spliterator`、`BigDecimal`／`BigInteger`、
-`java.util.concurrent`、時區資料庫、`DateTimeFormatter`、`Properties`。這些缺席
-都是刻意的：它們要嘛需要執行期反射，要嘛需要一份比整個語言還大的資料表。
+反射、執行緒、`java.util.concurrent`、時區資料庫。這些缺席都是刻意的：它們要嘛
+需要執行期反射，要嘛需要一份比整個語言還大的資料表（時區），要嘛需要語言本身沒有的
+東西（執行緒）。
 
 需要自己的原生程式庫時，`native` 方法可以實作在 C 裡，見
 [docs/native.md](native.md)。
@@ -524,7 +524,7 @@ for (String n : names) {
 - `sealed` 的 `permits` 子句沒有被驗證：沒有 `permits` 的 sealed 型別在
   switch 窮盡性上被視為不可判定而要求 `default`；switch **陳述式**的窮盡性
   仍從寬
-- 反射、執行緒、檔案與網路 I/O
+- 反射、執行緒（檔案與網路 I/O 有，見 `java.io`／`java.net`）
 - 與 Java 生態互通（JAR、JDK 類別庫、JNI）
 - 識別字中的 Unicode 逸出（`\u0041` 不能拼出識別字）
 - 泛型建構子的顯式型別引數 `new <T>Foo(...)`
@@ -534,8 +534,9 @@ for (String n : names) {
 - 模組系統的語意（`import module X` 會被剖析後忽略，執行期沒有模組系統；`module-info` 不支援）
 - 陣列的執行期元素型別一律是 `teyru.Array`，所以 `String[].class` 與
   `int[].class` 是同一個物件（Java 是兩個）
-- 標準程式庫缺口：`String.lines()`（需要 `Stream`）、`String.join(...)`、
-  `String.format(...)`、`List.of(...)`、`java.util.Arrays`、
-  `Comparator.comparingInt(...)` 家族
+- 標準程式庫缺口：`List.of(...)`／`Map.of(...)` 這組便利工廠、
+  `Comparator.comparingInt(...)` 家族、`String.lines()`；`String.format` 的
+  `%t`／`%T`（日期時間轉換）也未實作，遇到會以 `ty_unimplemented` 停止而不是
+  印出看起來合理的東西
 - 無法解析的完整限定名稱（例如 `java.util.Arrays.sort(x)`）會回報
   `cannot find symbol java`——訊息指向鏈的第一段而不是整條路徑
