@@ -31,7 +31,11 @@ func (c *Checker) subst(t ast.Type, b map[*ast.TypeVar]ast.Type) ast.Type {
 	}
 	switch v := t.(type) {
 	case *ast.TypeVarType:
-		if r, ok := b[v.Var]; ok {
+		// A nil entry is how inference records "still open", not "replace me
+		// with nothing": substituting one in erases the variable, and a
+		// wildcard whose bound was a variable becomes `? extends nil`, which
+		// no inference can read back. Only a settled binding substitutes.
+		if r, ok := b[v.Var]; ok && r != nil {
 			return r
 		}
 		return t
@@ -67,6 +71,49 @@ func (c *Checker) subst(t ast.Type, b map[*ast.TypeVar]ast.Type) ast.Type {
 			return v
 		}
 		return &ast.WildcardType{Bound: nb, Super: v.Super}
+	}
+	return t
+}
+
+// wildToBound replaces every wildcard inside t with its bound: `? extends B`
+// and `? super B` both become B, and a bare `?` becomes Object, leaving the
+// rest of the type alone.
+//
+// Java gets to the same place through capture conversion. `List<? extends
+// Number> xs; xs.get(0)` has type CAP#1, and CAP#1's upper bound is Number, so
+// `.intValue()` on it resolves. Without the capture step a wildcard reaches
+// member lookup as itself and nothing resolves -- `Fn<? super String, R>` was
+// unusable as a lambda target because its parameter type came out as `? super
+// String` and `.length()` was looked for on that.
+func (c *Checker) wildToBound(t ast.Type) ast.Type {
+	switch v := t.(type) {
+	case *ast.WildcardType:
+		if v.Bound == nil {
+			return c.objType
+		}
+		return c.wildToBound(v.Bound)
+	case *ast.ClassType:
+		if len(v.Args) == 0 {
+			return v
+		}
+		changed := false
+		args := make([]ast.Type, len(v.Args))
+		for i, a := range v.Args {
+			args[i] = c.wildToBound(a)
+			if args[i] != a {
+				changed = true
+			}
+		}
+		if !changed {
+			return v
+		}
+		return &ast.ClassType{Class: v.Class, Args: args}
+	case *ast.ArrayType:
+		e := c.wildToBound(v.Elem)
+		if e == v.Elem {
+			return v
+		}
+		return &ast.ArrayType{Elem: e}
 	}
 	return t
 }

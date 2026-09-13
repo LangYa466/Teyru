@@ -2395,7 +2395,7 @@ func (ctx *methodCtx) pickOverload(recv *ast.ClassType, cands []*ast.Method, arg
 			}
 		}
 		if best.method != nil {
-			ctx.checkInferred(best.method, best.targs, args)
+			ctx.checkInferred(best.method, best, args)
 			return best.method, best
 		}
 	}
@@ -2407,9 +2407,27 @@ func (ctx *methodCtx) pickOverload(recv *ast.ClassType, cands []*ast.Method, arg
 // handing that to the C backend ends in an error about generated code rather
 // than about the program. An argument that is not a lambda always reports its
 // own type, so only a lambda (or method reference) can leave a hole.
-func (ctx *methodCtx) checkInferred(m *ast.Method, targs map[*ast.TypeVar]ast.Type, args []ast.Expr) {
+func (ctx *methodCtx) checkInferred(m *ast.Method, s ovScore, args []ast.Expr) {
 	if len(m.TypeParams) == 0 {
 		return
+	}
+	targs := s.targs
+	// A lambda is the one argument that cannot say what it is until its body
+	// has been checked, and the overload is picked before that happens: `pick(s
+	// -> s.length() * 2)` against `R pick(Fn<? super String, ? extends R>)`
+	// still has R open at this point. Checking the lambda against the parameter
+	// type now is what lets the body answer -- the functional interface it
+	// turns out to be is `Fn<String, Integer>`, and the variable is the
+	// wildcard's bound inside that.
+	for i, a := range args {
+		lam, ok := a.(*ast.Lambda)
+		if !ok || lam.GetType() != nil || i >= len(s.instArgs) || s.instArgs[i] == nil {
+			continue
+		}
+		ctx.checkExpr(lam, s.instArgs[i])
+		if act := ctx.lambdaActual(lam); act != nil {
+			ctx.c.inferTypeArg(s.instArgs[i], act, targs)
+		}
 	}
 	missing := false
 	for _, tv := range m.TypeParams {
@@ -2725,6 +2743,15 @@ func (c *Checker) inferTypeArg(param, arg ast.Type, bind map[*ast.TypeVar]ast.Ty
 			return &ast.ArrayType{Elem: c.inferTypeArg(p.Elem, at.Elem, bind)}
 		}
 		return param
+	case *ast.WildcardType:
+		// The free variable is the wildcard's bound: `Fn<? super String,
+		// ? extends R>` against `Fn<String, Integer>` settles R = Integer.
+		// `? super B` constrains the argument to be a supertype of B and says
+		// nothing about a variable of its own, so there is nothing to bind.
+		if p.Bound == nil || p.Super {
+			return param
+		}
+		return c.inferTypeArg(p.Bound, arg, bind)
 	}
 	return param
 }
@@ -2846,6 +2873,35 @@ func (ctx *methodCtx) bindArgs(m *ast.Method, s ovScore, args []ast.Expr, recv *
 			ctx.convertTo(a, pt)
 		}
 	}
+}
+
+// lambdaActual is the functional interface a lambda actually turned out to be.
+// Its parameter types are the ones the target handed it, but its result comes
+// from its own body -- which is the only place a type variable the target left
+// open can be read off. A body that is a block says nothing here, so such a
+// lambda reports nothing and leaves the variable to be settled elsewhere.
+func (ctx *methodCtx) lambdaActual(lam *ast.Lambda) ast.Type {
+	ct, ok := lam.GetType().(*ast.ClassType)
+	if !ok || len(ct.Args) != len(lam.Params)+1 {
+		return nil
+	}
+	body, ok := lam.Body.(ast.Expr)
+	if !ok || body.GetType() == nil || ast.IsError(body.GetType()) {
+		return nil
+	}
+	res := body.GetType()
+	if util.IsPrim(res) {
+		res = ctx.c.boxed(res)
+	}
+	actual := &ast.ClassType{Class: ct.Class}
+	for _, p := range lam.Params {
+		if p.Sym == nil || p.Sym.Type == nil {
+			return nil
+		}
+		actual.Args = append(actual.Args, p.Sym.Type)
+	}
+	actual.Args = append(actual.Args, res)
+	return actual
 }
 
 func (ctx *methodCtx) checkCall(v *ast.Call, want ast.Type) {
@@ -3052,7 +3108,7 @@ func (ctx *methodCtx) checkUnqualifiedCall(v *ast.Call, want ast.Type) {
 				v.Recv = ctx.implicitThis(v.Pos)
 			}
 		}
-		v.SetType(ctx.c.subst(m.Result, s.targs))
+		v.SetType(ctx.c.wildToBound(ctx.c.subst(m.Result, s.targs)))
 		return
 	}
 	// static imports
@@ -3064,7 +3120,7 @@ func (ctx *methodCtx) checkUnqualifiedCall(v *ast.Call, want ast.Type) {
 			}
 			v.Method = m
 			v.Static = true
-			v.SetType(ctx.c.subst(m.Result, s.targs))
+			v.SetType(ctx.c.wildToBound(ctx.c.subst(m.Result, s.targs)))
 			return
 		}
 	}
@@ -3161,7 +3217,7 @@ func (ctx *methodCtx) checkMethodCall(v *ast.Call, rt ast.Type, want ast.Type) {
 			}
 			v.Method = m
 			v.Static = true
-			v.SetType(ctx.c.subst(m.Result, s.targs))
+			v.SetType(ctx.c.wildToBound(ctx.c.subst(m.Result, s.targs)))
 			return
 		}
 		ctx.errf(v.Pos, "TY-TYP-0076", "cannot find method %s(%s) in %s", v.Name, argTypes(v.Args), cl.Name)
@@ -3224,7 +3280,11 @@ func (ctx *methodCtx) checkMethodCall(v *ast.Call, rt ast.Type, want ast.Type) {
 			res = ctx.c.subst(res, bindings(m.Owner, sup.Args))
 		}
 	}
-	v.SetType(res)
+	// after the receiver's arguments are in, not before: `E get(int)` on a
+	// `List<? extends Number>` is only a wildcard once E has been replaced by
+	// what the receiver said, and a wildcard is not a type anything can be
+	// done with.
+	v.SetType(ctx.c.wildToBound(res))
 	if !v.Static && !ctx.accessibleInstance(m, rt) {
 		ctx.errf(v.Pos, "TY-TYP-0079", "%s has %s access in %s", m.Name, visName(m.Mods), m.Owner.Name)
 	}
@@ -3586,7 +3646,7 @@ func (ctx *methodCtx) checkLambda(lam *ast.Lambda, want ast.Type) {
 	bind := bindings(ct.Class, ct.Args)
 	params := make([]ast.Type, len(sam.Params))
 	for i, p := range sam.Params {
-		params[i] = c.subst(p, bind)
+		params[i] = c.wildToBound(c.subst(p, bind))
 	}
 	if len(lam.Params) != len(params) {
 		ctx.errf(lam.Pos, "TY-TYP-0084", "lambda has %d parameters but %s requires %d", len(lam.Params), sam.Name, len(params))
@@ -3606,7 +3666,7 @@ func (ctx *methodCtx) checkLambda(lam *ast.Lambda, want ast.Type) {
 	cl.LocalOwner = ctx.m
 	cl.Lambda = lam
 	lam.Class = cl
-	m := &ast.Method{Name: sam.Name, Owner: cl, Mods: ast.ModPublic, Result: c.subst(sam.Result, bind), Params: params, Lambda: lam, SynthKind: "lambda"}
+	m := &ast.Method{Name: sam.Name, Owner: cl, Mods: ast.ModPublic, Result: c.wildToBound(c.subst(sam.Result, bind)), Params: params, Lambda: lam, SynthKind: "lambda"}
 	cl.Methods[m.Name] = append(cl.Methods[m.Name], m)
 	c.addCtor(cl, &ast.Method{Name: "<init>", IsCtor: true, Owner: cl, Mods: ast.ModPublic, Result: ast.TVoid, SynthKind: "lambda-ctor"})
 	// check the body in the lambda's scope
@@ -3716,9 +3776,9 @@ func (ctx *methodCtx) checkMethodRef(mr *ast.MethodRef, want ast.Type) {
 	bind := bindings(ct.Class, ct.Args)
 	params := make([]ast.Type, len(sam.Params))
 	for i, p := range sam.Params {
-		params[i] = c.subst(p, bind)
+		params[i] = c.wildToBound(c.subst(p, bind))
 	}
-	res := c.subst(sam.Result, bind)
+	res := c.wildToBound(c.subst(sam.Result, bind))
 	// build an equivalent lambda
 	lam := &ast.Lambda{ExprBase: ast.ExprBase{Pos: mr.Pos}, Iface: sam}
 	for i := range params {

@@ -1,0 +1,69 @@
+/* Wildcards in a type argument, used as a type. Java capture-converts
+   `Fn<? super String, ? extends Integer>` to a fresh variable whose upper bound
+   is String / Integer, so a lambda written against it sees String and its
+   result is usable as Integer. Teyru used to hand the wildcard itself to member
+   lookup, where nothing resolves: `x.length()` was looked for on `? super
+   String`. Expected output is javac 25's for this same program. */
+
+package teyru
+
+interface Fn<T, R> { R apply(T t) }
+interface Cmp<T> { int compare(T a, T b) }
+
+class Bag<T> {
+  List<T> items = new ArrayList<T>()
+  void add(T t) { items.add(t) }
+  T first() { return items.get(0) }
+}
+
+class T112 {
+  static <R> R pick(Fn<? super String, ? extends R> f) { return f.apply("hello") }
+  static <T> void sort(List<T> xs, Cmp<? super T> c) {
+    for (int i = 0 : i < xs.size() : i++) {
+      for (int j = i + 1 : j < xs.size() : j++) {
+        if (c.compare(xs.get(j), xs.get(i)) < 0) {
+          T tmp = xs.get(i)
+          xs.set(i, xs.get(j))
+          xs.set(j, tmp)
+        }
+      }
+    }
+  }
+  static int sizeOf(Bag<? extends Number> b) { return b.items.size() }
+
+  public static void main(String[] args) {
+    System.out.println("== super/extends as a lambda target ==")
+    Fn<? super String, ? extends Integer> len = s -> s.length()
+    System.out.println(len.apply("abcd"))
+    Fn<String, Integer> twice = s -> s.length() * 2
+    System.out.println(pick(twice))
+    Fn<String, String> shout = s -> s.toUpperCase()
+    System.out.println(pick(shout))
+    System.out.println("== a comparator over ? super T ==")
+    List<String> xs = new ArrayList<String>()
+    xs.add("pear")
+    xs.add("apple")
+    xs.add("fig")
+    sort(xs, (a, b) -> a.length() - b.length())
+    System.out.println(xs)
+    sort(xs, (a, b) -> a.compareTo(b))
+    System.out.println(xs)
+    System.out.println("== reading through ? extends ==")
+    Bag<Integer> ints = new Bag<Integer>()
+    ints.add(3)
+    ints.add(9)
+    System.out.println(sizeOf(ints))
+    List<? extends Number> ns = ints.items
+    Number n = ns.get(0)
+    System.out.println(n.intValue() + 1)
+    System.out.println(ns.get(1).doubleValue())
+    System.out.println("== nested and bare ==")
+    List<List<String>> nested = new ArrayList<List<String>>()
+    List<String> inner = new ArrayList<String>()
+    inner.add("x")
+    nested.add(inner)
+    for (List<String> l : nested) { System.out.println(l.get(0)) }
+    Bag<?> anything = ints
+    System.out.println(anything.items.size())
+  }
+}
