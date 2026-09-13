@@ -227,8 +227,83 @@ func (c *Checker) synthHandler(reg *ast.Class, env *typeEnv, r routeSpec, n int)
 	for _, p := range r.params {
 		args = append(args, c.paramExpr(p))
 	}
-	m.Body = blockOf(returnOf(callNamed(recv, r.method.Name, args...)))
+	call := callNamed(recv, r.method.Name, args...)
+
+	// A handler answers with a response the server can write, so what the
+	// method returns becomes the body: a String is the body as it stands, and
+	// anything else is serialized -- which is what @RestController means in
+	// Spring, where the same method would have returned an object and let the
+	// message converter decide.
+	body := c.responseBody(r, call)
+	m.Body = blockOf(body...)
 	return m
+}
+
+// responseBody builds the statements that turn a handler method's result into
+// the response the server writes.
+func (c *Checker) responseBody(r routeSpec, call ast.Expr) []ast.Stmt {
+	rt := c.erasure(r.returns)
+	if ct, ok := rt.(*ast.ClassType); ok && ct.Class != nil {
+		switch ct.Class.Name {
+		case "HttpResponse":
+			// the method built its own response, which is how an endpoint sets
+			// a status other than 200 or a header of its own
+			return []ast.Stmt{returnOf(call)}
+		case "void":
+			return []ast.Stmt{exprStmtOf(call), returnOf(newEmptyResponse())}
+		}
+	}
+	if rt == ast.TVoid || rt == nil {
+		return []ast.Stmt{exprStmtOf(call), returnOf(newEmptyResponse())}
+	}
+	// a String is the body as it stands; the response is built with its type
+	if ct, ok := rt.(*ast.ClassType); ok && ct.Class != nil && ct.Class.Special == "String" {
+		return []ast.Stmt{
+			&ast.LocalVar{Pos: pos(), Type: &ast.TypeExpr{Pos: pos(), Name: "HttpResponse"},
+				Vars: []*ast.VarDeclarator{{Pos: pos(), Name: "res", Init: newEmptyResponse()}}},
+			exprStmtOf(assignTo(sel(id("res"), "body"), call)),
+			returnOf(id("res")),
+		}
+	}
+	// Everything else is JSON, which is what a @RestController answers with.
+	// The writer is the one the Gson binding generated for the class, so a
+	// controller's return type is bound by the same pass that binds any other
+	// class -- and a type with no mapping is reported at the mapping rather than
+	// at the first request.
+	cl := ct2(rt)
+	pair := c.jsonAdapterFor(cl, r.method.Pos)
+	if cl == nil || pair == nil {
+		c.errf(r.method.Pos, "TY-TYP-0111",
+			"%s answers with %s, which has no JSON mapping; return a String or HttpResponse, or a class the binding can walk",
+			r.method.Name, r.returns)
+		return []ast.Stmt{exprStmtOf(call), returnOf(newEmptyResponse())}
+	}
+	return []ast.Stmt{
+		&ast.LocalVar{Pos: pos(),
+			Type: &ast.TypeExpr{Pos: pos(), Name: cl.Full, Resolved: &ast.ClassType{Class: cl}},
+			Vars: []*ast.VarDeclarator{{Pos: pos(), Name: "out", Init: call}}},
+		&ast.LocalVar{Pos: pos(), Type: &ast.TypeExpr{Pos: pos(), Name: "HttpResponse"},
+			Vars: []*ast.VarDeclarator{{Pos: pos(), Name: "res", Init: newEmptyResponse()}}},
+		exprStmtOf(assignTo(sel(id("res"), "contentType"), strLit("application/json; charset=utf-8"))),
+		exprStmtOf(assignTo(sel(id("res"), "body"),
+			callNamed(callNamed(id(cl.Full), pair.writer.Name, id("out")), "toString"))),
+		returnOf(id("res")),
+	}
+}
+
+// ct2 is the class of a reference type, which the callers above have already
+// established is one.
+func ct2(t ast.Type) *ast.Class {
+	ct, _ := t.(*ast.ClassType)
+	if ct == nil || ct.Class == nil {
+		return nil
+	}
+	return ct.Class
+}
+
+// newEmptyResponse builds `new HttpResponse()`.
+func newEmptyResponse() ast.Expr {
+	return &ast.New{ExprBase: ast.ExprBase{Pos: pos()}, Type: &ast.TypeExpr{Pos: pos(), Name: "HttpResponse"}}
 }
 
 // stringMapType is Map<String, String>, the parameters a handler is handed.

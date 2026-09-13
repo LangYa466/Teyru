@@ -179,6 +179,11 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 | TY-TYP-0096 | `switch expression does not cover all possible input values` | switch **運算式**必須窮盡：`int`／`String` 選擇子一定要有 `default`，列舉選擇子要涵蓋每一個常數。switch 陳述式不受此限。 |
 | TY-TYP-0097 | `native methods %s and %s both need the C symbol %s` | 兩個多載 native 方法編碼後得到同一個 C 符號（例如類別名 `AI` 與 `int[]`）。改名或改參數型別。 |
 | TY-TYP-0098 | `non-static %s cannot be referenced from a static context` | lambda 主體用到撰寫處的 `this`（含未限定的實例方法呼叫、裸欄位名與 `super`），但 lambda 寫在 static 方法或 static 初始化區塊裡，沒有實例可捕獲。Java 同樣拒絕。 |
+| TY-TYP-0108 | `%s is a prelude class; it has no generated JSON binding` | 對前置類別（String、JsonObject…）要求產生 JSON 綁定。 |
+| TY-TYP-0109 | `two fields of %s both map to the JSON name %s` | 兩個欄位經 `@SerializedName` 後同名。 |
+| TY-TYP-0112 | `%s is bound from JSON but has no no-argument constructor; ...` | Gson 用 Unsafe 繞過建構子配置物件，Teyru 沒有，所以從 JSON 讀取的類別需要一個無參建構子。 |
+| TY-TYP-0111 | `%s answers with %s, which has no JSON mapping; ...` | controller 方法的回傳型別沒有 JSON 映射（陣列、List…）。改回傳 String 或 HttpResponse，或是一個綁定走得完的類別。 |
+| TY-TYP-0110 | `%s has no JSON mapping for its type %s` | 欄位型別沒有 JSON 映射。Gson 在執行期才拋，這裡在綁定的那一行就報。 |
 | TY-TYP-0100 | `two beans are named %s: %s and %s` | 兩個 bean 取了同一個名字（`@Component("x")` 或 `@Bean("x")`）。 |
 | TY-TYP-0101 | `%s is declared by the framework and cannot be redefined` | `__TeyruFramework` 是容器註冊用的合成類別，名字被保留。 |
 | TY-TYP-0102 | `@Bean method %s ...` | `@Bean` 方法必須不是 static、且回傳型別是一個類別（基本型別會裝箱）。 |
