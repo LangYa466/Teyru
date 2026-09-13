@@ -81,9 +81,33 @@ int32_t ty_long_equals(void *a, void *b) {
   if (b == NULL) return 0;
   return ty_unbox_long(a) == ty_unbox_long(b);
 }
+/* Java's doubleToLongBits and floatToIntBits: the bit pattern with every NaN
+   collapsed to one value and the sign of zero kept. Double.equals,
+   Double.hashCode and Double.compare are all defined through it, so the two
+   zeros differ, NaN equals NaN, and equal values hash alike. */
+static int64_t dbl_bits(double d) {
+  if (d != d) return (int64_t)0x7ff8000000000000LL;
+  int64_t b;
+  memcpy(&b, &d, 8);
+  return b;
+}
+static int32_t flt_bits(float f) {
+  if (f != f) return (int32_t)0x7fc00000;
+  int32_t b;
+  memcpy(&b, &f, 4);
+  return b;
+}
 int32_t ty_double_equals(void *a, void *b) {
   if (b == NULL) return 0;
-  return ty_unbox_double(a) == ty_unbox_double(b);
+  return dbl_bits(ty_unbox_double(a)) == dbl_bits(ty_unbox_double(b));
+}
+int32_t ty_float_equals(void *a, void *b) {
+  if (b == NULL) return 0;
+  return flt_bits(ty_unbox_float(a)) == flt_bits(ty_unbox_float(b));
+}
+int32_t ty_char_equals(void *a, void *b) {
+  if (b == NULL) return 0;
+  return ty_unbox_char(a) == ty_unbox_char(b);
 }
 int32_t ty_bool_equals(void *a, void *b) {
   if (b == NULL) return 0;
@@ -97,7 +121,21 @@ int32_t ty_long_compare(int64_t a, int64_t b) { return a < b ? -1 : (a > b ? 1 :
 int32_t ty_prim_cmp_int(int32_t a, int32_t b) { return a < b ? -1 : (a > b ? 1 : 0); }
 int32_t ty_prim_cmp_long(int64_t a, int64_t b) { return a < b ? -1 : (a > b ? 1 : 0); }
 int32_t ty_prim_cmp_double(double a, double b) { return a < b ? -1 : (a > b ? 1 : 0); }
-int32_t ty_double_compare(double a, double b) { return a < b ? -1 : (a > b ? 1 : 0); }
+/* Java's Double.compare/Float.compare: the numeric order first, and only for
+   values that compare equal numerically (the two zeros, NaN) the bit order,
+   which puts -0.0 below 0.0 and NaN above everything. */
+int32_t ty_double_compare(double a, double b) {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  int64_t x = dbl_bits(a), y = dbl_bits(b);
+  return x == y ? 0 : (x < y ? -1 : 1);
+}
+int32_t ty_float_compare(float a, float b) {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  int32_t x = flt_bits(a), y = flt_bits(b);
+  return x == y ? 0 : (x < y ? -1 : 1);
+}
 /* Long.compareTo and Double.compareTo take the other box as an argument, so the
    `_obj` forms unbox it first; a null argument raises a NullPointerException,
    like an intrinsic in Java. */
@@ -107,24 +145,27 @@ int32_t ty_long_compare_obj(void *a, void *b) {
 int32_t ty_double_compare_obj(void *a, void *b) {
   return ty_double_compare(ty_unbox_double(a), ty_unbox_double(b));
 }
+int32_t ty_float_compare_obj(void *a, void *b) {
+  return ty_float_compare(ty_unbox_float(a), ty_unbox_float(b));
+}
+int32_t ty_char_compare_obj(void *a, void *b) {
+  uint16_t x = ty_unbox_char(a), y = ty_unbox_char(b);
+  return x < y ? -1 : (x > y ? 1 : 0);
+}
 int32_t ty_long_hash(void *o) {
   int64_t v = ty_unbox_long(o);
   return (int32_t)(v ^ ((uint64_t)v >> 32));
 }
 int32_t ty_dhash_bits(double d) {
-  int64_t bits;
-  if (d == 0.0) bits = 0;
-  else memcpy(&bits, &d, 8);
+  int64_t bits = dbl_bits(d);
   return (int32_t)(bits ^ ((uint64_t)bits >> 32));
 }
 int32_t ty_double_hash(void *o) { return ty_dhash_bits(ty_unbox_double(o)); }
+int32_t ty_float_hash(void *o) { return flt_bits(ty_unbox_float(o)); }
+int32_t ty_char_hash(void *o) { return (int32_t)ty_unbox_char(o); }
 int32_t ty_long_toint(void *o) { return (int32_t)ty_unbox_long(o); }
 
-int32_t ty_fhash_bits(float f) {
-  int32_t bits;
-  memcpy(&bits, &f, 4);
-  return bits;
-}
+int32_t ty_fhash_bits(float f) { return flt_bits(f); }
 
 /* ---- math -------------------------------------------------------------- */
 
