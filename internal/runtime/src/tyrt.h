@@ -71,13 +71,14 @@ void ty_uncaught(void *e) __attribute__((noreturn));
 
 /* Preallocated exception classes (filled by generated code at startup). */
 extern tyclass *TY_NPE, *TY_AIOOBE, *TY_ARITH, *TY_CCE, *TY_NEGARR, *TY_ASSERT,
-    *TY_ILLARG, *TY_ILLSTATE, *TY_NOSUCHELEM, *TY_UNSUP;
+    *TY_ILLARG, *TY_ILLSTATE, *TY_NOSUCHELEM, *TY_UNSUP, *TY_ARRAYSTORE;
 
 void *ty_npe(void);
 void *ty_aioobe(int64_t idx, int64_t len);
 void *ty_arith(const char *msg);
 void *ty_cce(tyclass *from, tyclass *to);
 void *ty_negarr(void);
+void *ty_arraystore(void);
 void *ty_assertfail(const char *msg);
 
 /* ---- allocation / GC -------------------------------------------------- */

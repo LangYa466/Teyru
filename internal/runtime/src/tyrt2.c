@@ -158,9 +158,16 @@ void ty_exit(int32_t code) { exit(code); }
 
 void ty_arraycopy(void *src, int32_t spos, void *dst, int32_t dpos, int32_t len) {
   tyarr *a = (tyarr *)src, *b = (tyarr *)dst;
-  if (!a || !b || spos < 0 || dpos < 0 || len < 0 || spos + len > a->len || dpos + len > b->len) {
-    ty_throw((tyobj *)ty_aioobe(0, a ? a->len : 0));
+  if (!a || !b) ty_throw((tyobj *)ty_npe());
+  /* written so that a negative length or a huge index cannot wrap the sum */
+  if (spos < 0 || dpos < 0 || len < 0 || spos > a->len - len || dpos > b->len - len) {
+    ty_throw((tyobj *)ty_aioobe(spos < 0 ? spos : dpos, a->len));
   }
+  /* Java requires the two arrays to have the same element type: copying a
+     long[] into a byte[] is an ArrayStoreException. Without this test the copy
+     below would take its byte count from the source element size and write
+     past the end of the destination. */
+  if (a->esize != b->esize || a->refs != b->refs) ty_throw((tyobj *)ty_arraystore());
   memmove((char *)b->data + (size_t)dpos * b->esize, (char *)a->data + (size_t)spos * a->esize,
           (size_t)len * a->esize);
 }

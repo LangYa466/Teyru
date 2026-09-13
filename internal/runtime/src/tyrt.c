@@ -22,7 +22,7 @@ tyclass *TY_BOX[9] = {0};
 tyclass *TY_OBJECT = NULL;
 
 tyclass *TY_NPE, *TY_AIOOBE, *TY_ARITH, *TY_CCE, *TY_NEGARR, *TY_ASSERT;
-tyclass *TY_ILLARG, *TY_ILLSTATE, *TY_NOSUCHELEM, *TY_UNSUP;
+tyclass *TY_ILLARG, *TY_ILLSTATE, *TY_NOSUCHELEM, *TY_UNSUP, *TY_ARRAYSTORE;
 
 /* ------------------------------------------------------------------ GC */
 
@@ -410,6 +410,10 @@ void *ty_cce(tyclass *from, tyclass *to) {
   char buf[256];
   snprintf(buf, sizeof buf, "class %s cannot be cast to class %s", from ? from->name : "?", to ? to->name : "?");
   ty_throw(make_ex(TY_CCE, buf));
+  return NULL;
+}
+void *ty_arraystore(void) {
+  ty_throw(make_ex(TY_ARRAYSTORE, "array element type mismatch"));
   return NULL;
 }
 void *ty_negarr(void) {

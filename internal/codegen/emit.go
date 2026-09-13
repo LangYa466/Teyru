@@ -677,6 +677,7 @@ func (e *Emitter) entry() string {
 		{"TY_NEGARR", e.prog.Builtins.NegArr}, {"TY_ASSERT", e.prog.Builtins.Assertion},
 		{"TY_ILLARG", e.prog.Builtins.IllArg}, {"TY_ILLSTATE", e.prog.Builtins.IllState},
 		{"TY_NOSUCHELEM", e.prog.Builtins.NoSuchElem}, {"TY_UNSUP", e.prog.Builtins.Unsup},
+		{"TY_ARRAYSTORE", e.prog.Builtins.ArrayStore},
 	} {
 		if cl, ok := pair[1].(*ast.Class); ok && cl != nil {
 			fmt.Fprintf(&b, "  %s = &cls_%s;\n", pair[0], mangle(cl.Full))
