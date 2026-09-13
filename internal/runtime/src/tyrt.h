@@ -265,6 +265,13 @@ int32_t ty_double_hash(void *o);
 int32_t ty_long_toint(void *o);
 int32_t ty_dhash_bits(double d);
 int32_t ty_fhash_bits(float f);
+/* the six java.lang.Number conversions, for any boxed numeric receiver */
+int32_t ty_num_int(void *o);
+int64_t ty_num_long(void *o);
+double ty_num_double(void *o);
+float ty_num_float(void *o);
+int8_t ty_num_byte(void *o);
+int16_t ty_num_short(void *o);
 int32_t ty_abs_int(int32_t v);
 int64_t ty_abs_long(int64_t v);
 double ty_abs_double(double v);

@@ -293,7 +293,7 @@ JEP 395 record、JEP 394 `instanceof` 模式、JEP 409 sealed 类（`sealed`／`
 
 `Object`、`String`、`StringBuilder`、`Math`、`System`、`PrintStream`、
 `Iterable`／`Iterator`、`Comparable`、`AutoCloseable`、`Cloneable`、`Enum`、`Record`、
-八种原生包装类（`Byte`／`Short`／`Integer`／`Long`／`Float`／`Double`／`Character`／`Boolean`）、
+八种原生包装类（`Byte`／`Short`／`Integer`／`Long`／`Float`／`Double`／`Character`／`Boolean`）与它们的父类 `Number`、
 集合（`List`／`ArrayList`／`Map`／`HashMap`），以及 `Throwable` 家族（`Exception`、`RuntimeException`、`NullPointerException`、
 `ArrayIndexOutOfBoundsException`、`ArithmeticException`、`ClassCastException`、
 `IllegalArgumentException`、`IllegalStateException`、`IndexOutOfBoundsException`、

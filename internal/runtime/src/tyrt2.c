@@ -258,6 +258,51 @@ int32_t ty_long_toint(void *o) { return (int32_t)ty_unbox_long(o); }
 
 int32_t ty_fhash_bits(float f) { return flt_bits(f); }
 
+/* ---- Number conversions ------------------------------------------------- */
+/* Java's Number declares six conversions and every numeric wrapper implements
+   all of them, narrowing the way Java narrows: `Integer.byteValue()` is
+   `(byte) this.intValue()`. The receiver is always a box whose kind can be read
+   from its class, so one helper per target type serves every wrapper. */
+static int32_t num_kind(void *o) {
+  if (!o) return 0;
+  tyclass *c = ((tyobj *)o)->cls;
+  if (!(c->flags & 4)) return 0; /* not a box */
+  for (int32_t i = 1; i <= 8; i++) {
+    if (c == TY_BOX[i]) return i;
+  }
+  return 0;
+}
+
+static int64_t num_int64(void *o) {
+  switch (num_kind(o)) {
+  case 1: return ((tyboolbox *)o)->v;
+  case 2: return ((tybytebox *)o)->v;
+  case 3: return ((tyshortbox *)o)->v;
+  case 4: return ((tycharbox *)o)->v;
+  case 5: return ((tyintbox *)o)->v;
+  case 6: return ((tylongbox *)o)->v;
+  case 7: return (int64_t)((tyfloatbox *)o)->v;
+  case 8: return (int64_t)((tydoublebox *)o)->v;
+  }
+  return 0;
+}
+
+static double num_double(void *o) {
+  switch (num_kind(o)) {
+  case 7: return (double)((tyfloatbox *)o)->v;
+  case 8: return ((tydoublebox *)o)->v;
+  }
+  return (double)num_int64(o);
+}
+
+int32_t ty_num_int(void *o) { return (int32_t)num_int64(o); }
+int64_t ty_num_long(void *o) { return num_int64(o); }
+double ty_num_double(void *o) { return num_double(o); }
+float ty_num_float(void *o) { return (float)num_double(o); }
+int8_t ty_num_byte(void *o) { return (int8_t)num_int64(o); }
+int16_t ty_num_short(void *o) { return (int16_t)num_int64(o); }
+
+
 /* ---- math -------------------------------------------------------------- */
 
 int32_t ty_abs_int(int32_t v) { return v < 0 ? -v : v; }

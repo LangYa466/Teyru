@@ -427,6 +427,7 @@ try {
 | `Math` | `PI`、`abs`、`max`、`min`、`sqrt`、`pow`、`floor`、`ceil`、`round`、`random` |
 | `System` | `out`、`err`、`currentTimeMillis`、`nanoTime`、`exit`、`arraycopy` |
 | `PrintStream` | `print`／`println`（String／Object／int／long／double／boolean／char／無參數） |
+| `Number` | `Byte`、`Short`、`Integer`、`Long`、`Float`、`Double` 的共同父類別，六個轉換 `intValue`／`longValue`／`doubleValue`／`floatValue`／`byteValue`／`shortValue`（窄化依 Java 規則） |
 | 包裝類別 | `Byte`、`Short`、`Integer`、`Long`、`Float`、`Double`、`Character`、`Boolean`：`valueOf`、`parseXxx`、`xxxValue`、`compareTo`、`equals`、`hashCode`、`toString` |
 | 介面 | `Cloneable`、`Comparable<T>`、`AutoCloseable`、`Iterable<T>`、`Iterator<T>` |
 | `Enum<E>` | `ordinal`、`name`、`compareTo`、`toString`、`hashCode`、`equals` |
