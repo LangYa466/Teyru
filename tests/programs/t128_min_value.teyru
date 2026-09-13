@@ -1,0 +1,36 @@
+/* Negating the most negative value.
+
+   C leaves `-INT64_MIN` undefined and a compiler may fold it to anything --
+   clang turns it into 0, so `-Long.MIN_VALUE` printed 0 and Math.abs of the same
+   value printed 0 too. Java defines both: the result wraps back to the value
+   itself. Integer negation goes through an unsigned value here, which is
+   defined for every input. Expected output is javac 25's. */
+
+package teyru
+
+class T128 {
+  public static void main(String[] args) {
+    long v = Long.MIN_VALUE
+    System.out.println("raw long: " + Long.MIN_VALUE)
+    System.out.println("raw int: " + Integer.MIN_VALUE)
+    System.out.println("raw byte: " + Byte.MIN_VALUE)
+    System.out.println("raw short: " + Short.MIN_VALUE)
+    System.out.println("neg long: " + (-Long.MIN_VALUE))
+    System.out.println("abs long: " + Math.abs(Long.MIN_VALUE))
+    System.out.println("abs int: " + Math.abs(Integer.MIN_VALUE))
+    System.out.println("neg int: " + (-Integer.MIN_VALUE))
+    System.out.println("neg byte: " + (-Byte.MIN_VALUE))
+    System.out.println("neg short: " + (-Short.MIN_VALUE))
+    System.out.println("neg var: " + (-v))
+    System.out.println("zero minus: " + (0L - v))
+    System.out.println("abs normal: " + Math.abs(-7L) + " " + Math.abs(7))
+    System.out.println("neg normal: " + (-7L) + " " + (-7))
+    long n = Long.MAX_VALUE
+    System.out.println("neg max: " + (-n))
+    System.out.println("abs max: " + Math.abs(n))
+    int k = Integer.MIN_VALUE
+    int negk = -k
+    System.out.println("negk: " + negk)
+    System.out.println("times minus one: " + (k * -1))
+  }
+}

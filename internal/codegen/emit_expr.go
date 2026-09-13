@@ -745,6 +745,16 @@ func (e *Emitter) unaryInner(v *ast.Unary) string {
 	case "+":
 		return "(" + x + ")"
 	case "-":
+		// Negating the most negative value is undefined in C and a compiler
+		// may fold it away -- clang turns `-INT64_MIN` into 0 where Java says
+		// it wraps to itself. Integer negation goes through an unsigned value
+		// instead, where every input is defined.
+		if p, ok := xt.(*ast.PrimType); ok && p.IsIntegral() {
+			if p.Kind == ast.Long {
+				return "((int64_t)(0ull - (uint64_t)(" + x + ")))"
+			}
+			return "((int32_t)(0u - (uint32_t)(" + x + ")))"
+		}
 		return "(-(" + x + "))"
 	case "!":
 		if _, ok := xt.(*ast.PrimType); !ok {
@@ -1054,6 +1064,13 @@ func (e *Emitter) binary(v *ast.Binary) string {
 	// count of `<<` and `>>` is masked before it is emitted
 	if v.Op == "<<" || v.Op == ">>" {
 		y = shiftCount(y, v.OpType)
+		// A shift takes its width from its left operand in C, and the operand
+		// may have been written as a literal with no suffix of its own -- the
+		// inlined value of a constant field, say. Naming the width here is what
+		// keeps `MASK << 63` a long shift rather than an int one.
+		if ast.IsPrim(v.OpType, ast.Long) {
+			x = "(int64_t)" + x
+		}
 	}
 	return "(" + x + " " + v.Op + " " + y + ")"
 }

@@ -305,8 +305,13 @@ int16_t ty_num_short(void *o) { return (int16_t)num_int64(o); }
 
 /* ---- math -------------------------------------------------------------- */
 
-int32_t ty_abs_int(int32_t v) { return v < 0 ? -v : v; }
-int64_t ty_abs_long(int64_t v) { return v < 0 ? -v : v; }
+/* Java's abs wraps at the most negative value: abs(Integer.MIN_VALUE) is
+   Integer.MIN_VALUE, not a positive number there is no room for. C's negation
+   of that value is undefined and a compiler may fold it to anything -- clang
+   turns `-INT64_MIN` into 0 -- so the negation goes through an unsigned value,
+   where it is defined for every input and wraps the way Java says. */
+int32_t ty_abs_int(int32_t v) { return v < 0 ? (int32_t)(0u - (uint32_t)v) : v; }
+int64_t ty_abs_long(int64_t v) { return v < 0 ? (int64_t)(0ull - (uint64_t)v) : v; }
 double ty_abs_double(double v) { return fabs(v); }
 int32_t ty_max_int(int32_t a, int32_t b) { return a > b ? a : b; }
 int32_t ty_min_int(int32_t a, int32_t b) { return a < b ? a : b; }
