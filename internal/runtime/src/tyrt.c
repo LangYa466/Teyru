@@ -571,28 +571,12 @@ void *ty_checkcast(void *o, tyclass *c) {
   return ty_cce(((tyobj *)o)->cls, c);
 }
 
-void *ty_itab(void *p, int32_t sel) {
-  tyobj *o = (tyobj *)p;
-  if (!o) ty_npe();
-  /* The interface maps are sparse: one entry per selector the class answers
-     for, sorted by selector, so a class pays for what it implements instead of
-     for every selector the program declares. The old dense tables were 4.4 KB
-     of .data each and every class carried one, which put 792 KB of interface
-     tables into a hello world. A scan over a handful of cache-resident entries
-     costs less than the cache miss the dense table took. The class's own map
-     first, then its superclasses', for interfaces a superclass implements. */
-  tyclass *c = o->cls;
-  for (tyclass *k = c; k; k = k->super) {
-    for (int32_t i = 0; i < k->isel; i++) {
-      if (k->imap[i].sel == sel) {
-        if (k->imap[i].fn) return k->imap[i].fn;
-        break; /* no implementation here; the superclasses may have one */
-      }
-    }
-  }
-  /* no implementation: fail as a catchable error rather than calling NULL */
+/* The cold half of interface dispatch: no class in the chain answers for the
+   selector, so there is no function to call. ty_itab in tyrt.h is the inline
+   half and calls this; it is noreturn, which is what lets the inline version
+   fall off the end without a value. */
+void ty_itab_slow(void) {
   ty_throw((tyobj *)ty_make_ex(TY_UNSUP, "no implementation for this interface method"));
-  return NULL;
 }
 
 /* ------------------------------------------------------------------ strings */

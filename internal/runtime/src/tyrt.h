@@ -166,7 +166,36 @@ int32_t ty_str_toint(tystr *s);
 /* ---- interfaces / casts ---------------------------------------------- */
 /* Declared before the arrays: the array store test below calls ty_instanceof
    for the values whose class is not the one the array promised. */
-void *ty_itab(void *o, int32_t sel);
+void ty_itab_slow(void) __attribute__((noreturn));
+
+/* Interface dispatch.
+ *
+ * The per-class map is sparse: one entry per selector the class answers for,
+ * sorted by selector, so a class pays for what it implements rather than for
+ * every selector the program declares. The dense table this replaced was one
+ * slot per selector -- 4.4 KB of .data per class, 792 KB in a hello world.
+ *
+ * It is inline because nearly every call site passes a selector the compiler
+ * folded to a constant, and then this is a compare against that constant
+ * instead of a loop: a class that answers for one method, which is most of
+ * them, costs one load of the map and one of the entry. Out of line it was a
+ * call plus the loop's bookkeeping, and 2,000,000 dispatches in bench_oop
+ * were 20% slower than the indexed load it replaced. bench_oop is back to
+ * where it was with this. */
+static inline void *ty_itab(void *p, int32_t sel) {
+  tyobj *o = (tyobj *)p;
+  if (!o) ty_npe();
+  for (tyclass *k = o->cls; k; k = k->super) {
+    tymap *m = k->imap;
+    for (int32_t i = 0, n = k->isel; i < n; i++) {
+      if (m[i].sel == sel) return m[i].fn;
+    }
+  }
+  /* No class in the chain answers for the selector. There is no function to
+     call, so this never comes back: it throws a catchable error. */
+  ty_itab_slow();
+}
+
 int32_t ty_instanceof(void *o, tyclass *c);
 void *ty_checkcast(void *o, tyclass *c);
 
