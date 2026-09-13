@@ -1,0 +1,665 @@
+package teyru
+
+// java.time, the part a program actually uses: dates, times, and the durations
+// between them.
+//
+// The arithmetic is the proleptic Gregorian calendar's, carried out on the
+// epoch day -- the number of days since 1970-01-01 -- because that is the one
+// representation in which month lengths, leap years and the day of the week all
+// fall out of arithmetic instead of tables. Converting to and from the civil
+// date uses Howard Hinnant's well-known algorithm, which is exact for every
+// year the calendar has.
+//
+// Deviations from java.time, all because there is no zone database here:
+//
+//   - `now()` reads the system clock as UTC. Java's LocalDate.now() uses the
+//     default zone, so a program in UTC+8 gets a different day for eight hours
+//     of every day. There is no zone id, no offset and no daylight saving.
+//   - No DateTimeFormatter, no parsing, no ChronoUnit/ChronoField, no
+//     TemporalAdjuster. Formatting is toString, which is ISO-8601 in Java too.
+//   - Instants carry milliseconds, not nanoseconds: the clock the runtime reads
+//     is System.currentTimeMillis.
+
+// ---------------------------------------------------------------- enums
+
+enum DayOfWeek {
+  MONDAY,
+  TUESDAY,
+  WEDNESDAY,
+  THURSDAY,
+  FRIDAY,
+  SATURDAY,
+  SUNDAY:
+  // Java numbers these 1..7 with Monday first, which is what getValue answers.
+  public int getValue() { return ordinal() + 1 }
+
+  public DayOfWeek plus(int days) {
+    int n = 7
+    return values()[Math.floorMod(ordinal() + days, n)]
+  }
+
+  public static DayOfWeek of(int dayOfWeek) {
+    if (dayOfWeek < 1 || dayOfWeek > 7) {
+      throw new IllegalArgumentException("Invalid value for DayOfWeek: " + dayOfWeek)
+    }
+    return values()[dayOfWeek - 1]
+  }
+}
+
+enum Month {
+  JANUARY,
+  FEBRUARY,
+  MARCH,
+  APRIL,
+  MAY,
+  JUNE,
+  JULY,
+  AUGUST,
+  SEPTEMBER,
+  OCTOBER,
+  NOVEMBER,
+  DECEMBER:
+  public int getValue() { return ordinal() + 1 }
+
+  public int length(boolean leapYear) {
+    if (this == FEBRUARY) {
+      return leapYear ? 29 : 28
+    }
+    if (this == APRIL || this == JUNE || this == SEPTEMBER || this == NOVEMBER) {
+      return 30
+    }
+    return 31
+  }
+
+  public static Month of(int month) {
+    if (month < 1 || month > 12) {
+      throw new IllegalArgumentException("Invalid value for Month: " + month)
+    }
+    return values()[month - 1]
+  }
+}
+
+// ---------------------------------------------------------------- helpers
+
+// TimeMath is the calendar arithmetic the three date types share. It is a class
+// rather than free functions because every method in Teyru belongs to a class.
+final class TimeMath {
+  public static final int SECONDS_PER_DAY = 86400
+  public static final long MILLIS_PER_DAY = 86400000L
+
+  public static boolean isLeapYear(long year) {
+    return (year % 4 == 0) && ((year % 100 != 0) || (year % 400 == 0))
+  }
+
+  // daysFromCivil is Hinnant's civil_from_days, inverted: the epoch day of a
+  // proleptic Gregorian date. It shifts the year so that March starts it, which
+  // is what makes the leap day the last day of the year and removes every
+  // special case from the month-length arithmetic.
+  public static long daysFromCivil(long y, int m, int d) {
+    long yy = y
+    if (m <= 2) {
+      yy = yy - 1
+    }
+    long era = (yy >= 0 ? yy : yy - 399) / 400
+    long yoe = yy - era * 400
+    long doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1
+    long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    return era * 146097 + doe - 719468
+  }
+
+  // civilFromDays answers with {year, month, day} for an epoch day.
+  public static long[] civilFromDays(long z) {
+    long zz = z + 719468
+    long era = (zz >= 0 ? zz : zz - 146096) / 146097
+    long doe = zz - era * 146097
+    long yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    long y = yoe + era * 400
+    long doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    long mp = (5 * doy + 2) / 153
+    long d = doy - (153 * mp + 2) / 5 + 1
+    long m = mp + (mp < 10 ? 3 : -9)
+    long[] out = new long[3]
+    out[0] = y + (m <= 2 ? 1 : 0)
+    out[1] = m
+    out[2] = d
+    return out
+  }
+
+  public static int daysInMonth(int year, int month) {
+    return Month.of(month).length(isLeapYear(year))
+  }
+
+  // dayOfWeekFromEpochDay: 1970-01-01 was a Thursday, which is 4 in Java's
+  // Monday-is-1 numbering.
+  public static DayOfWeek dayOfWeek(long epochDay) {
+    return DayOfWeek.of((int) Math.floorMod(epochDay + 3, 7) + 1)
+  }
+
+  // fraction renders the sub-second part the way java.time does: three digits
+  // when it is whole milliseconds, six when it is whole microseconds, nine
+  // otherwise. Trimming trailing zeros instead would print 01:02:03.5 where
+  // Java prints 01:02:03.500.
+  public static String fraction(int nanos) {
+    if (nanos % 1000000 == 0) {
+      return pad(nanos / 1000000, 3)
+    }
+    if (nanos % 1000 == 0) {
+      return pad(nanos / 1000, 6)
+    }
+    return pad(nanos, 9)
+  }
+
+  public static String pad(long v, int width) {
+    String s = Long.toString(v)
+    while (s.length() < width) {
+      s = "0" + s
+    }
+    return s
+  }
+}
+
+// ---------------------------------------------------------------- dates
+
+class LocalDate implements Comparable<LocalDate> {
+  private long year
+  private int month
+  private int day
+  private long epochDay
+
+  private LocalDate(long y, int m, int d, long epoch) {
+    this.year = y
+    this.month = m
+    this.day = d
+    this.epochDay = epoch
+  }
+
+  public static LocalDate of(int year, int month, int day) {
+    Month m = Month.of(month)
+    int len = m.length(TimeMath.isLeapYear(year))
+    if (day < 1 || day > len) {
+      throw new IllegalArgumentException("Invalid date: " + year + "-" + month + "-" + day)
+    }
+    return new LocalDate(year, month, day, TimeMath.daysFromCivil(year, month, day))
+  }
+
+  public static LocalDate of(int year, Month month, int day) {
+    return of(year, month.getValue(), day)
+  }
+
+  public static LocalDate ofEpochDay(long epochDay) {
+    long[] c = TimeMath.civilFromDays(epochDay)
+    return new LocalDate(c[0], (int) c[1], (int) c[2], epochDay)
+  }
+
+  // now reads the system clock as UTC -- see the file header for why.
+  public static LocalDate now() {
+    return ofEpochDay(Math.floorDiv(System.currentTimeMillis(), TimeMath.MILLIS_PER_DAY))
+  }
+
+  public int getYear() { return (int) year }
+  public int getMonthValue() { return month }
+  public Month getMonth() { return Month.of(month) }
+  public int getDayOfMonth() { return day }
+  public DayOfWeek getDayOfWeek() { return TimeMath.dayOfWeek(epochDay) }
+  public long toEpochDay() { return epochDay }
+  public int lengthOfMonth() { return TimeMath.daysInMonth((int) year, month) }
+  public int lengthOfYear() { return TimeMath.isLeapYear(year) ? 366 : 365 }
+  public boolean isLeapYear() { return TimeMath.isLeapYear(year) }
+
+  public LocalDate plusDays(long days) { return ofEpochDay(epochDay + days) }
+  public LocalDate minusDays(long days) { return ofEpochDay(epochDay - days) }
+
+  public LocalDate plusMonths(long months) {
+    long total = year * 12 + (month - 1) + months
+    long y = Math.floorDiv(total, 12)
+    int m = (int) Math.floorMod(total, 12) + 1
+    int d = day
+    int len = TimeMath.daysInMonth((int) y, m)
+    if (d > len) {
+      d = len
+    }
+    return LocalDate.of((int) y, m, d)
+  }
+
+  public LocalDate minusMonths(long months) { return plusMonths(-months) }
+
+  public LocalDate plusYears(long years) {
+    int y = (int) (year + years)
+    int d = day
+    int len = TimeMath.daysInMonth(y, month)
+    if (d > len) {
+      d = len
+    }
+    return LocalDate.of(y, month, d)
+  }
+
+  public LocalDate minusYears(long years) { return plusYears(-years) }
+
+  public boolean isBefore(LocalDate other) { return epochDay < other.epochDay }
+  public boolean isAfter(LocalDate other) { return epochDay > other.epochDay }
+  public boolean isEqual(LocalDate other) { return epochDay == other.epochDay }
+
+  public boolean equals(Object o) {
+    if (this == o) {
+      return true
+    }
+    if (o instanceof LocalDate == false) {
+      return false
+    }
+    LocalDate other = (LocalDate) o
+    return epochDay == other.epochDay
+  }
+
+  public int hashCode() { return (int) (epochDay ^ (epochDay >>> 32)) }
+
+  public int compareTo(LocalDate other) {
+    if (epochDay < other.epochDay) {
+      return -1
+    }
+    return epochDay > other.epochDay ? 1 : 0
+  }
+
+  // toString is ISO-8601, and for years outside 0000..9999 Java writes a sign,
+  // which is why the year is not padded to four digits here.
+  public String toString() {
+    return year + "-" + TimeMath.pad(month, 2) + "-" + TimeMath.pad(day, 2)
+  }
+}
+
+class LocalTime implements Comparable<LocalTime> {
+  private int hour
+  private int minute
+  private int second
+  private int nano
+  private long secondOfDay
+
+  private LocalTime(int h, int m, int s, int n) {
+    this.hour = h
+    this.minute = m
+    this.second = s
+    this.nano = n
+    this.secondOfDay = (long) h * 3600 + (long) m * 60 + s
+  }
+
+  public static LocalTime of(int hour, int minute) { return of(hour, minute, 0, 0) }
+
+  public static LocalTime of(int hour, int minute, int second) { return of(hour, minute, second, 0) }
+
+  public static LocalTime of(int hour, int minute, int second, int nano) {
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59 || nano < 0) {
+      throw new IllegalArgumentException("Invalid time")
+    }
+    return new LocalTime(hour, minute, second, nano)
+  }
+
+  public static LocalTime ofSecondOfDay(long secondOfDay) {
+    long s = Math.floorMod(secondOfDay, TimeMath.SECONDS_PER_DAY)
+    return new LocalTime((int) (s / 3600), (int) ((s % 3600) / 60), (int) (s % 60), 0)
+  }
+
+  // now reads the system clock as UTC, like LocalDate.now.
+  public static LocalTime now() {
+    long millis = Math.floorMod(System.currentTimeMillis(), TimeMath.MILLIS_PER_DAY)
+    long s = millis / 1000
+    return new LocalTime((int) (s / 3600), (int) ((s % 3600) / 60), (int) (s % 60), (int) ((millis % 1000) * 1000000))
+  }
+
+  public int getHour() { return hour }
+  public int getMinute() { return minute }
+  public int getSecond() { return second }
+  public int getNano() { return nano }
+  public long toSecondOfDay() { return secondOfDay }
+
+  public LocalTime plusHours(long hours) { return ofSecondOfDay(secondOfDay + hours * 3600) }
+  public LocalTime plusMinutes(long minutes) { return ofSecondOfDay(secondOfDay + minutes * 60) }
+  public LocalTime plusSeconds(long seconds) { return ofSecondOfDay(secondOfDay + seconds) }
+  public LocalTime minusHours(long hours) { return plusHours(-hours) }
+  public LocalTime minusMinutes(long minutes) { return plusMinutes(-minutes) }
+  public LocalTime minusSeconds(long seconds) { return plusSeconds(-seconds) }
+
+  public boolean isBefore(LocalTime other) { return secondOfDay < other.secondOfDay }
+  public boolean isAfter(LocalTime other) { return secondOfDay > other.secondOfDay }
+
+  public boolean equals(Object o) {
+    if (this == o) {
+      return true
+    }
+    if (o instanceof LocalTime == false) {
+      return false
+    }
+    LocalTime other = (LocalTime) o
+    return secondOfDay == other.secondOfDay && nano == other.nano
+  }
+
+  public int hashCode() { return (int) (secondOfDay * 31 + nano) }
+
+  public int compareTo(LocalTime other) {
+    if (secondOfDay < other.secondOfDay) {
+      return -1
+    }
+    if (secondOfDay > other.secondOfDay) {
+      return 1
+    }
+    return nano - other.nano
+  }
+
+  // toString omits the parts that are zero, the way Java does: 12:30, not
+  // 12:30:00; and 12:30:05.5 rather than 12:30:05.500000000.
+  public String toString() {
+    StringBuilder b = new StringBuilder()
+    b.append(TimeMath.pad(hour, 2)).append(":").append(TimeMath.pad(minute, 2))
+    if (second > 0 || nano > 0) {
+      b.append(":").append(TimeMath.pad(second, 2))
+    }
+    if (nano > 0) {
+      b.append(".").append(TimeMath.fraction(nano))
+    }
+    return b.toString()
+  }
+}
+
+class LocalDateTime implements Comparable<LocalDateTime> {
+  private LocalDate date
+  private LocalTime time
+
+  private LocalDateTime(LocalDate d, LocalTime t) {
+    this.date = d
+    this.time = t
+  }
+
+  public static LocalDateTime of(LocalDate date, LocalTime time) { return new LocalDateTime(date, time) }
+
+  public static LocalDateTime of(int year, int month, int day, int hour, int minute) {
+    return new LocalDateTime(LocalDate.of(year, month, day), LocalTime.of(hour, minute))
+  }
+
+  public static LocalDateTime of(int year, int month, int day, int hour, int minute, int second) {
+    return new LocalDateTime(LocalDate.of(year, month, day), LocalTime.of(hour, minute, second))
+  }
+
+  public static LocalDateTime now() { return new LocalDateTime(LocalDate.now(), LocalTime.now()) }
+
+  public LocalDate toLocalDate() { return date }
+  public LocalTime toLocalTime() { return time }
+
+  public LocalDateTime plusDays(long days) { return new LocalDateTime(date.plusDays(days), time) }
+  public LocalDateTime plusHours(long hours) { return new LocalDateTime(date, time.plusHours(hours)) }
+  public LocalDateTime plusMinutes(long minutes) { return new LocalDateTime(date, time.plusMinutes(minutes)) }
+  public LocalDateTime plusSeconds(long seconds) { return new LocalDateTime(date, time.plusSeconds(seconds)) }
+
+  public boolean isBefore(LocalDateTime other) {
+    if (date.isBefore(other.date)) {
+      return true
+    }
+    return date.isEqual(other.date) && time.isBefore(other.time)
+  }
+
+  public boolean isAfter(LocalDateTime other) {
+    if (date.isAfter(other.date)) {
+      return true
+    }
+    return date.isEqual(other.date) && time.isAfter(other.time)
+  }
+
+  public boolean equals(Object o) {
+    if (this == o) {
+      return true
+    }
+    if (o instanceof LocalDateTime == false) {
+      return false
+    }
+    LocalDateTime other = (LocalDateTime) o
+    return date.equals(other.date) && time.equals(other.time)
+  }
+
+  public int hashCode() { return date.hashCode() * 31 + time.hashCode() }
+
+  public int compareTo(LocalDateTime other) {
+    int c = date.compareTo(other.date)
+    return c != 0 ? c : time.compareTo(other.time)
+  }
+
+  public String toString() { return date.toString() + "T" + time.toString() }
+}
+
+// ---------------------------------------------------------------- instants
+
+class Instant implements Comparable<Instant> {
+  private long seconds
+  private int millis
+
+  private Instant(long seconds, int millis) {
+    this.seconds = seconds
+    this.millis = millis
+  }
+
+  public static Instant ofEpochMilli(long epochMilli) {
+    return new Instant(Math.floorDiv(epochMilli, 1000), (int) Math.floorMod(epochMilli, 1000))
+  }
+
+  public static Instant ofEpochSecond(long epochSecond) { return new Instant(epochSecond, 0) }
+
+  public static Instant now() { return ofEpochMilli(System.currentTimeMillis()) }
+
+  public long getEpochSecond() { return seconds }
+  public int getNano() { return millis * 1000000 }
+  public long toEpochMilli() { return seconds * 1000 + millis }
+
+  public Instant plusSeconds(long s) { return ofEpochMilli(toEpochMilli() + s * 1000) }
+  public Instant plusMillis(long ms) { return ofEpochMilli(toEpochMilli() + ms) }
+  public Instant minusSeconds(long s) { return plusSeconds(-s) }
+
+  public boolean isBefore(Instant other) { return toEpochMilli() < other.toEpochMilli() }
+  public boolean isAfter(Instant other) { return toEpochMilli() > other.toEpochMilli() }
+
+  public boolean equals(Object o) {
+    if (this == o) {
+      return true
+    }
+    if (o instanceof Instant == false) {
+      return false
+    }
+    return toEpochMilli() == ((Instant) o).toEpochMilli()
+  }
+
+  public int hashCode() { return (int) (toEpochMilli() ^ (toEpochMilli() >>> 32)) }
+
+  public int compareTo(Instant other) {
+    long a = toEpochMilli()
+    long b = other.toEpochMilli()
+    if (a < b) {
+      return -1
+    }
+    return a > b ? 1 : 0
+  }
+
+  public String toString() {
+    long day = Math.floorDiv(seconds, (long) TimeMath.SECONDS_PER_DAY)
+    long s = Math.floorMod(seconds, (long) TimeMath.SECONDS_PER_DAY)
+    LocalDate d = LocalDate.ofEpochDay(day)
+    // Instant always writes the seconds -- 00:00:00Z, not 00:00Z -- because it
+    // is an instant and not a time of day, so the seconds field is part of the
+    // value rather than something to leave out when it is zero.
+    StringBuilder b = new StringBuilder()
+    b.append(d.toString()).append("T")
+    b.append(TimeMath.pad(s / 3600, 2)).append(":")
+    b.append(TimeMath.pad((s % 3600) / 60, 2)).append(":")
+    b.append(TimeMath.pad(s % 60, 2))
+    if (millis != 0) {
+      b.append(".").append(TimeMath.fraction(millis * 1000000))
+    }
+    b.append("Z")
+    return b.toString()
+  }
+}
+
+// ---------------------------------------------------------------- amounts
+
+// Duration is a length of time in seconds and a sub-second remainder.
+class Duration implements Comparable<Duration> {
+  private long seconds
+  private int nanos
+
+  private Duration(long seconds, int nanos) {
+    this.seconds = seconds
+    this.nanos = nanos
+  }
+
+  public static Duration ofSeconds(long seconds) { return new Duration(seconds, 0) }
+
+  public static Duration ofMillis(long millis) {
+    return new Duration(Math.floorDiv(millis, 1000), (int) (Math.floorMod(millis, 1000) * 1000000))
+  }
+
+  public static Duration ofMinutes(long minutes) { return ofSeconds(minutes * 60) }
+  public static Duration ofHours(long hours) { return ofSeconds(hours * 3600) }
+  public static Duration ofDays(long days) { return ofSeconds(days * TimeMath.SECONDS_PER_DAY) }
+  public static Duration between(Instant from, Instant to) { return ofMillis(to.toEpochMilli() - from.toEpochMilli()) }
+  public static Duration zero() { return ofSeconds(0) }
+
+  public long getSeconds() { return seconds }
+  public int getNano() { return nanos }
+  public long toMillis() { return seconds * 1000 + nanos / 1000000 }
+  public long toSeconds() { return seconds }
+  public long toMinutes() { return seconds / 60 }
+  public long toHours() { return seconds / 3600 }
+  public long toDays() { return seconds / TimeMath.SECONDS_PER_DAY }
+
+  public Duration plus(Duration other) { return ofMillis(toMillis() + other.toMillis()) }
+  public Duration minus(Duration other) { return ofMillis(toMillis() - other.toMillis()) }
+  public Duration multipliedBy(long n) { return ofMillis(toMillis() * n) }
+  public Duration negated() { return ofMillis(-toMillis()) }
+  public boolean isZero() { return seconds == 0 && nanos == 0 }
+  public boolean isNegative() { return seconds < 0 }
+
+  public boolean equals(Object o) {
+    if (this == o) {
+      return true
+    }
+    if (o instanceof Duration == false) {
+      return false
+    }
+    Duration other = (Duration) o
+    return seconds == other.seconds && nanos == other.nanos
+  }
+
+  public int hashCode() { return (int) (seconds * 31 + nanos) }
+
+  public int compareTo(Duration other) {
+    if (seconds < other.seconds) {
+      return -1
+    }
+    if (seconds > other.seconds) {
+      return 1
+    }
+    return nanos - other.nanos
+  }
+
+  // toString is ISO-8601's duration form, and Java's details are its own: the
+  // hours are total hours (two days is PT48H, never P2D), the fraction is
+  // trimmed rather than padded (PT1.5S, not PT1.500S), and a negative duration
+  // signs every component it prints, so -3661s is PT-1H-1M-1S rather than
+  // -PT1H1M1S or PT-1H1M1S.
+  public String toString() {
+    if (isZero()) {
+      return "PT0S"
+    }
+    long total = toMillis()
+    boolean negative = total < 0
+    long abs = negative ? -total : total
+    long absSeconds = abs / 1000
+    long msPart = abs % 1000
+    long hours = absSeconds / 3600
+    long minutes = (absSeconds % 3600) / 60
+    long secs = absSeconds % 60
+    String sign = negative ? "-" : ""
+    StringBuilder b = new StringBuilder("PT")
+    if (hours > 0) {
+      b.append(sign).append(hours).append("H")
+    }
+    if (minutes > 0) {
+      b.append(sign).append(minutes).append("M")
+    }
+    if (secs > 0 || msPart > 0) {
+      b.append(sign).append(secs)
+      if (msPart > 0) {
+        String f = TimeMath.pad(msPart, 3)
+        while (f.endsWith("0")) {
+          f = f.substring(0, f.length() - 1)
+        }
+        b.append(".").append(f)
+      }
+      b.append("S")
+    }
+    return b.toString()
+  }
+}
+
+// Period is a number of years, months and days, which is what "two months
+// later" means on a calendar -- as opposed to Duration, which is a fixed number
+// of seconds and cannot express it.
+class Period {
+  private int years
+  private int months
+  private int days
+
+  private Period(int years, int months, int days) {
+    this.years = years
+    this.months = months
+    this.days = days
+  }
+
+  public static Period of(int years, int months, int days) { return new Period(years, months, days) }
+  public static Period ofDays(int days) { return new Period(0, 0, days) }
+  public static Period ofMonths(int months) { return new Period(0, months, 0) }
+  public static Period ofYears(int years) { return new Period(years, 0, 0) }
+
+  public static Period between(LocalDate from, LocalDate to) {
+    long months = (to.getYear() * 12L + to.getMonthValue()) - (from.getYear() * 12L + from.getMonthValue())
+    LocalDate anchor = from.plusMonths(months)
+    if (anchor.isAfter(to)) {
+      months = months - 1
+      anchor = from.plusMonths(months)
+    }
+    long days = to.toEpochDay() - anchor.toEpochDay()
+    return new Period((int) (months / 12), (int) (months % 12), (int) days)
+  }
+
+  public int getYears() { return years }
+  public int getMonths() { return months }
+  public int getDays() { return days }
+  public boolean isZero() { return years == 0 && months == 0 && days == 0 }
+
+  public LocalDate addTo(LocalDate date) { return date.plusYears(years).plusMonths(months).plusDays(days) }
+  public LocalDate subtractFrom(LocalDate date) { return date.minusYears(years).minusMonths(months).minusDays(days) }
+
+  public boolean equals(Object o) {
+    if (this == o) {
+      return true
+    }
+    if (o instanceof Period == false) {
+      return false
+    }
+    Period other = (Period) o
+    return years == other.years && months == other.months && days == other.days
+  }
+
+  public int hashCode() { return (years * 31 + months) * 31 + days }
+
+  public String toString() {
+    if (isZero()) {
+      return "P0D"
+    }
+    StringBuilder b = new StringBuilder("P")
+    if (years != 0) {
+      b.append(years).append("Y")
+    }
+    if (months != 0) {
+      b.append(months).append("M")
+    }
+    if (days != 0) {
+      b.append(days).append("D")
+    }
+    return b.toString()
+  }
+}
