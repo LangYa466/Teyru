@@ -1,0 +1,2055 @@
+package teyru
+
+/* Gson's tree API (com.google.gson), so a Java file that walks a JSON document
+   with JsonParser/JsonObject/JsonArray ports over unchanged.
+
+   The shapes and the observable behaviour follow Gson 2.10.1, including the
+   details that are easy to get wrong:
+
+   - JsonNull extends JsonElement, not JsonPrimitive (Gson changed this in 2.10),
+     so isJsonPrimitive() is false for it and getAsString() throws.
+   - A parsed number keeps the literal it was written with. The parser stores a
+     JsonLazyNumber holding the source text, so "1e5" comes back out as 1e5 and
+     "1.00" as 1.00 -- never as 100000.0 or 1.0.
+   - Escaping follows Gson's JsonWriter replacement table exactly: " and \ are
+     escaped, the five short forms \b \t \n \f \r are used, every other byte
+     below 0x20 becomes \u00xx with lower-case hex, / is NOT escaped, non-ASCII
+     is emitted as UTF-8 rather than as \u escapes (only U+2028 and U+2029 are
+     escaped), and the HTML-sensitive characters < > & = ' are escaped only when
+     the writer is htmlSafe. That last flag is the whole difference between
+     JsonElement.toString() (htmlSafe false) and a default Gson.toJson tree
+     write (htmlSafe true), and both directions are exercised by t93_json.
+   - Pretty printing indents by two spaces, writes ": " after a name, and keeps
+     {} and [] on one line -- empty containers are the case most writers get
+     wrong.
+
+   Deviations from Gson, all deliberate and all visible in tests:
+
+   - JsonParser.parseString is strict (RFC 8259). Gson parses in lenient mode,
+     so it accepts {a:1}, 'single quotes', 01, +1, .5, 1., NaN, [1,] and a bare
+     "-"; this parser rejects all of them with JsonSyntaxException, rejects an
+     empty document instead of returning JsonNull, and always rejects trailing
+     data (Gson skips that check when the document is exactly `null`).
+   - JsonObject.entrySet() returns a List<JsonMember> and keySet() a
+     List<String>: the standard library has no Set and Map declares no nested
+     Entry, so the two names Gson returns collection types for return the
+     ordered lists this library does have. JsonMember.getKey/getValue mirror
+     Map.Entry.
+   - fromJson(String, Class) is not here. `JsonObject.class` has type Object in
+     this language and a generic method whose body casts to its own type
+     variable does not compile at the C level, so Gson's signature could be
+     written but never called; fromJson(String) returning JsonElement is the
+     usable form of the same thing.
+   - Gson's reflective binding (fromJson into a user class) is absent: there is
+     no reflection. Numbers beyond long, getAsBigDecimal, getAsBigInteger and
+     the lenient reader are absent for the same kind of reason; each is called
+     out where it would have lived.
+
+   One compiler quirk is worked around rather than left to the caller: a
+   primitive argument does not select the overload it should. With four
+   constructors taking Boolean, Number, String and Character, `new
+   JsonPrimitive('x')` runs the Boolean one (the first declared) with a
+   Character as its argument, and `new JsonPrimitive(5)` does too. The
+   constructors therefore store their argument by its runtime class -- see
+   stored() below -- so the value held is the one Gson's constructor would have
+   held even though the parameter's declared type is wrong. A callback to a
+   user's own class with overloads like these needs the same treatment. */
+
+/* com.google.gson.JsonParseException. NumberFormatException does not exist in
+   this standard library, so the numeric accessors below throw
+   IllegalArgumentException where Gson throws NumberFormatException: a handler
+   that catches IllegalArgumentException (NumberFormatException's parent) keeps
+   working, one that names NumberFormatException does not compile. */
+class JsonParseException extends RuntimeException {
+  public JsonParseException() {
+  }
+
+  public JsonParseException(String message) {
+    super(message)
+  }
+
+  public JsonParseException(Throwable cause) {
+    super(cause)
+  }
+}
+
+class JsonSyntaxException extends JsonParseException {
+  public JsonSyntaxException() {
+  }
+
+  public JsonSyntaxException(String message) {
+    super(message)
+  }
+
+  public JsonSyntaxException(Throwable cause) {
+    super(cause)
+  }
+}
+
+/* com.google.gson.JsonElement. The four isJson* predicates are plain
+   instanceof, as in Gson, and the four getAsJson* narrowings throw
+   IllegalStateException carrying the rendered element, which is Gson's
+   message format ("Not a JSON Object: {...}") -- it is why toString has to
+   work on every element, including a partially built one.
+
+   Every accessor whose body always throws ends with an unreachable return.
+   Java accepts a body that cannot complete normally (JLS 14.21), but this
+   checker only accepts a literal trailing return statement: a method ending in
+   `throw` is reported as TY-TYP-0020 "missing return statement". The dead
+   statement is what makes the body legal; the throw above it is what runs. */
+abstract class JsonElement {
+  public abstract JsonElement deepCopy()
+
+  public boolean isJsonObject() {
+    return this instanceof JsonObject
+  }
+
+  public boolean isJsonArray() {
+    return this instanceof JsonArray
+  }
+
+  public boolean isJsonPrimitive() {
+    return this instanceof JsonPrimitive
+  }
+
+  public boolean isJsonNull() {
+    return this instanceof JsonNull
+  }
+
+  public JsonObject getAsJsonObject() {
+    if (isJsonObject()) {
+      return (JsonObject) this
+    }
+    throw new IllegalStateException("Not a JSON Object: " + this)
+    return null
+  }
+
+  public JsonArray getAsJsonArray() {
+    if (isJsonArray()) {
+      return (JsonArray) this
+    }
+    throw new IllegalStateException("Not a JSON Array: " + this)
+    return null
+  }
+
+  public JsonPrimitive getAsJsonPrimitive() {
+    if (isJsonPrimitive()) {
+      return (JsonPrimitive) this
+    }
+    throw new IllegalStateException("Not a JSON Primitive: " + this)
+    return null
+  }
+
+  public JsonNull getAsJsonNull() {
+    if (isJsonNull()) {
+      return (JsonNull) this
+    }
+    throw new IllegalStateException("Not a JSON Null: " + this)
+    return null
+  }
+
+  // Gson puts the class's simple name in these UnsupportedOperationException
+  // messages. Class exposes only getName() here, and that is qualified
+  // ("teyru.JsonObject"), so the last dot is cut by hand to keep the message
+  // byte-for-byte what Java would print.
+  public boolean getAsBoolean() {
+    throw new UnsupportedOperationException(simpleName(this))
+    return false
+  }
+
+  public Number getAsNumber() {
+    throw new UnsupportedOperationException(simpleName(this))
+    return null
+  }
+
+  public String getAsString() {
+    throw new UnsupportedOperationException(simpleName(this))
+    return null
+  }
+
+  public double getAsDouble() {
+    throw new UnsupportedOperationException(simpleName(this))
+    return 0.0
+  }
+
+  public float getAsFloat() {
+    throw new UnsupportedOperationException(simpleName(this))
+    return 0.0f
+  }
+
+  public long getAsLong() {
+    throw new UnsupportedOperationException(simpleName(this))
+    return 0L
+  }
+
+  public int getAsInt() {
+    throw new UnsupportedOperationException(simpleName(this))
+    return 0
+  }
+
+  public short getAsShort() {
+    throw new UnsupportedOperationException(simpleName(this))
+    return (short) 0
+  }
+
+  public byte getAsByte() {
+    throw new UnsupportedOperationException(simpleName(this))
+    return (byte) 0
+  }
+
+  public char getAsCharacter() {
+    throw new UnsupportedOperationException(simpleName(this))
+    return (char) 0
+  }
+
+  /* The compact rendering, which is what every element prints as. Gson builds
+     it with a fresh JsonWriter whose indent is null and whose htmlSafe is
+     false, and so serializeNulls stays at the writer's own default of true --
+     which is why {"a":null} survives toString() but disappears from
+     new Gson().toJson(...), whose serializeNulls is false. */
+  public String toString() {
+    StringBuilder sb = new StringBuilder()
+    JsonWriter writer = new JsonWriter(sb)
+    JsonWriter.write(this, writer)
+    return sb.toString()
+  }
+
+  private static String simpleName(Object o) {
+    String name = o.getClass().getName()
+    int dot = -1
+    for (int i = 0 : i < name.length() : i++) {
+      if (name.charAt(i) == '.') {
+        dot = i
+      }
+    }
+    if (dot < 0) {
+      return name
+    }
+    return name.substring(dot + 1, name.length())
+  }
+}
+
+/* com.google.gson.JsonObject. Members keep insertion order, as they do in
+   Gson's LinkedTreeMap, and re-adding an existing name replaces the value
+   without moving the member: {"a":1,"b":2} plus a=3 prints a first. */
+class JsonObject extends JsonElement {
+  private JsonMembers members
+
+  public JsonObject() {
+    members = new JsonMembers()
+  }
+
+  public JsonElement deepCopy() {
+    JsonObject copy = new JsonObject()
+    for (int i = 0 : i < members.size() : i++) {
+      copy.members.put(members.keyAt(i), members.valueAt(i).deepCopy())
+    }
+    return copy
+  }
+
+  // A null value is stored as JsonNull.INSTANCE, never as a null member: a
+  // JsonObject cannot hold a Java null, which is what makes the null-friendlier
+  // readers trip over it.
+  public void add(String property, JsonElement value) {
+    members.put(property, JsonNull.orNull(value))
+  }
+
+  public void addProperty(String property, String value) {
+    if (value == null) {
+      add(property, null)
+      return
+    }
+    add(property, new JsonPrimitive(value))
+  }
+
+  public void addProperty(String property, Number value) {
+    if (value == null) {
+      add(property, null)
+      return
+    }
+    add(property, new JsonPrimitive(value))
+  }
+
+  public void addProperty(String property, Boolean value) {
+    if (value == null) {
+      add(property, null)
+      return
+    }
+    add(property, new JsonPrimitive(value))
+  }
+
+  public void addProperty(String property, Character value) {
+    if (value == null) {
+      add(property, null)
+      return
+    }
+    add(property, new JsonPrimitive(value))
+  }
+
+  public JsonElement remove(String property) {
+    return members.remove(property)
+  }
+
+  public List<JsonMember> entrySet() {
+    ArrayList<JsonMember> out = new ArrayList<JsonMember>(members.size() > 0 ? members.size() : 1)
+    for (int i = 0 : i < members.size() : i++) {
+      out.add(new JsonMember(members.keyAt(i), members.valueAt(i)))
+    }
+    return out
+  }
+
+  public List<String> keySet() {
+    ArrayList<String> out = new ArrayList<String>(members.size() > 0 ? members.size() : 1)
+    for (int i = 0 : i < members.size() : i++) {
+      out.add(members.keyAt(i))
+    }
+    return out
+  }
+
+  public int size() {
+    return members.size()
+  }
+
+  public boolean isEmpty() {
+    return members.isEmpty()
+  }
+
+  public boolean has(String memberName) {
+    return members.has(memberName)
+  }
+
+  public JsonElement get(String memberName) {
+    return members.get(memberName)
+  }
+
+  public JsonPrimitive getAsJsonPrimitive(String memberName) {
+    return (JsonPrimitive) members.get(memberName)
+  }
+
+  public JsonArray getAsJsonArray(String memberName) {
+    return (JsonArray) members.get(memberName)
+  }
+
+  public JsonObject getAsJsonObject(String memberName) {
+    return (JsonObject) members.get(memberName)
+  }
+
+  // Gson compares the backing maps, so member order is not part of equality.
+  public boolean equals(Object o) {
+    if (o == this) {
+      return true
+    }
+    if (!(o instanceof JsonObject)) {
+      return false
+    }
+    return members.sameAs(((JsonObject) o).members)
+  }
+
+  public int hashCode() {
+    return members.hash()
+  }
+}
+
+/* One member of a JsonObject, standing in for Java's Map.Entry<String,
+   JsonElement> (see the header). */
+class JsonMember {
+  private String key
+  private JsonElement value
+
+  public JsonMember(String key, JsonElement value) {
+    this.key = key
+    this.value = value
+  }
+
+  public String getKey() {
+    return key
+  }
+
+  public JsonElement getValue() {
+    return value
+  }
+
+  public String toString() {
+    return key + "=" + value
+  }
+}
+
+/* The ordered name -> element map behind JsonObject. Gson's LinkedTreeMap is a
+   hash map over a doubly linked list; this is the same idea in the shape the
+   rest of the library uses (parallel arrays plus an open-addressed index), with
+   the entries kept dense so that printing walks them in insertion order. */
+class JsonMembers {
+  private String[] keys
+  private JsonElement[] values
+  private int count
+  private int[] index
+  private int mask
+
+  public JsonMembers() {
+    keys = new String[8]
+    values = new JsonElement[8]
+    index = new int[16]
+    mask = 15
+    clearIndex()
+  }
+
+  public int size() {
+    return count
+  }
+
+  public boolean isEmpty() {
+    return count == 0
+  }
+
+  public String keyAt(int i) {
+    return keys[i]
+  }
+
+  public JsonElement valueAt(int i) {
+    return values[i]
+  }
+
+  public boolean has(String key) {
+    return find(key) >= 0
+  }
+
+  public JsonElement get(String key) {
+    int slot = find(key)
+    if (slot < 0) {
+      return null
+    }
+    return values[slot]
+  }
+
+  public void put(String key, JsonElement value) {
+    int slot = find(key)
+    if (slot >= 0) {
+      values[slot] = value
+      return
+    }
+    if (count == keys.length) {
+      grow()
+    }
+    if ((count + 1) * 4 >= index.length * 3) {
+      reindex(index.length * 2)
+    }
+    keys[count] = key
+    values[count] = value
+    place(key, count)
+    count++
+  }
+
+  public JsonElement remove(String key) {
+    int slot = find(key)
+    if (slot < 0) {
+      return null
+    }
+    JsonElement old = values[slot]
+    for (int i = slot : i < count - 1 : i++) {
+      keys[i] = keys[i + 1]
+      values[i] = values[i + 1]
+    }
+    count--
+    keys[count] = null
+    values[count] = null
+    // every position after the hole moved, so the index is rebuilt rather than
+    // patched: removal is rare and this keeps one code path correct
+    clearIndex()
+    for (int i = 0 : i < count : i++) {
+      place(keys[i], i)
+    }
+    return old
+  }
+
+  // JsonObject.equals ignores order; so does this.
+  public boolean sameAs(JsonMembers other) {
+    if (other.size() != count) {
+      return false
+    }
+    for (int i = 0 : i < count : i++) {
+      if (!other.has(keys[i])) {
+        return false
+      }
+      if (!values[i].equals(other.get(keys[i]))) {
+        return false
+      }
+    }
+    return true
+  }
+
+  /* An order-insensitive hash to match sameAs. The accumulation is done in a
+     long against a prime modulus: combining 32-bit hashes in int arithmetic
+     would overflow, and signed overflow is not defined by the C the compiler
+     emits, so the hashes are kept inside a range where no multiplication can
+     leave it. The numbers themselves are not Java's -- only the contract is. */
+  public int hash() {
+    long h = 0
+    for (int i = 0 : i < count : i++) {
+      long member = ((long) keys[i].hashCode()) * 31L + (long) values[i].hashCode()
+      h = (h + member) % 1000000007L
+    }
+    return (int) h
+  }
+
+  public String toString() {
+    StringBuilder sb = new StringBuilder()
+    sb.append("{")
+    for (int i = 0 : i < count : i++) {
+      if (i > 0) {
+        sb.append(", ")
+      }
+      sb.append(keys[i]).append("=").append(values[i])
+    }
+    sb.append("}")
+    return sb.toString()
+  }
+
+  private int find(String key) {
+    if (key == null) {
+      // Gson's LinkedTreeMap fails on a null key too, but with a bare
+      // NullPointerException from inside compareTo; say what went wrong
+      throw new NullPointerException("null property name")
+    }
+    int probe = slotOf(key)
+    for (int i = 0 : i < index.length : i++) {
+      int position = index[probe]
+      if (position < 0) {
+        return -1
+      }
+      if (key.equals(keys[position])) {
+        return position
+      }
+      probe = (probe + 1) & mask
+    }
+    return -1
+  }
+
+  private int slotOf(String key) {
+    return (key.hashCode() & 0x7fffffff) & mask
+  }
+
+  // The index stores the position of the member at each slot, so a second name
+  // that hashes to an occupied slot has to take the next free one: writing over
+  // the slot would lose the member already there.
+  private void place(String key, int position) {
+    int probe = slotOf(key)
+    while (index[probe] >= 0) {
+      probe = (probe + 1) & mask
+    }
+    index[probe] = position
+  }
+
+  private void clearIndex() {
+    for (int i = 0 : i < index.length : i++) {
+      index[i] = -1
+    }
+  }
+
+  private void grow() {
+    String[] biggerKeys = new String[keys.length * 2]
+    JsonElement[] biggerValues = new JsonElement[values.length * 2]
+    for (int i = 0 : i < count : i++) {
+      biggerKeys[i] = keys[i]
+      biggerValues[i] = values[i]
+    }
+    keys = biggerKeys
+    values = biggerValues
+  }
+
+  private void reindex(int size) {
+    index = new int[size]
+    mask = size - 1
+    clearIndex()
+    for (int i = 0 : i < count : i++) {
+      place(keys[i], i)
+    }
+  }
+}
+
+/* com.google.gson.JsonArray, including Iterable<JsonElement> so that
+   `for (JsonElement e : array)` works the way it does in Java. */
+class JsonArray extends JsonElement implements Iterable<JsonElement> {
+  private ArrayList<JsonElement> elements
+
+  public JsonArray() {
+    elements = new ArrayList<JsonElement>()
+  }
+
+  public JsonArray(int capacity) {
+    elements = new ArrayList<JsonElement>(capacity)
+  }
+
+  public JsonElement deepCopy() {
+    JsonArray copy = new JsonArray(elements.size())
+    for (int i = 0 : i < elements.size() : i++) {
+      copy.elements.add(elements.get(i).deepCopy())
+    }
+    return copy
+  }
+
+  public void add(Boolean bool) {
+    if (bool == null) {
+      elements.add(JsonNull.INSTANCE)
+      return
+    }
+    elements.add(new JsonPrimitive(bool))
+  }
+
+  public void add(Character character) {
+    if (character == null) {
+      elements.add(JsonNull.INSTANCE)
+      return
+    }
+    elements.add(new JsonPrimitive(character))
+  }
+
+  public void add(Number number) {
+    if (number == null) {
+      elements.add(JsonNull.INSTANCE)
+      return
+    }
+    elements.add(new JsonPrimitive(number))
+  }
+
+  public void add(String string) {
+    if (string == null) {
+      elements.add(JsonNull.INSTANCE)
+      return
+    }
+    elements.add(new JsonPrimitive(string))
+  }
+
+  public void add(JsonElement element) {
+    elements.add(JsonNull.orNull(element))
+  }
+
+  public void addAll(JsonArray array) {
+    for (int i = 0 : i < array.size() : i++) {
+      elements.add(array.get(i))
+    }
+  }
+
+  public JsonElement set(int index, JsonElement element) {
+    return elements.set(index, JsonNull.orNull(element))
+  }
+
+  public boolean remove(JsonElement element) {
+    return elements.remove(element)
+  }
+
+  public JsonElement remove(int index) {
+    return elements.removeAt(index)
+  }
+
+  public boolean contains(JsonElement element) {
+    return elements.contains(element)
+  }
+
+  public int size() {
+    return elements.size()
+  }
+
+  public boolean isEmpty() {
+    return elements.isEmpty()
+  }
+
+  public Iterator<JsonElement> iterator() {
+    return elements.iterator()
+  }
+
+  public JsonElement get(int i) {
+    return elements.get(i)
+  }
+
+  /* Gson lets an array stand in for its single element in every getAs*
+     conversion and refuses loudly otherwise, which is what tells a caller that
+     [1,2] is not the number 1. */
+  private JsonElement single() {
+    if (elements.size() == 1) {
+      return elements.get(0)
+    }
+    throw new IllegalStateException("Array must have size 1, but has size " + elements.size())
+    return null
+  }
+
+  public Number getAsNumber() {
+    return single().getAsNumber()
+  }
+
+  public String getAsString() {
+    return single().getAsString()
+  }
+
+  public boolean getAsBoolean() {
+    return single().getAsBoolean()
+  }
+
+  public double getAsDouble() {
+    return single().getAsDouble()
+  }
+
+  public float getAsFloat() {
+    return single().getAsFloat()
+  }
+
+  public long getAsLong() {
+    return single().getAsLong()
+  }
+
+  public int getAsInt() {
+    return single().getAsInt()
+  }
+
+  public short getAsShort() {
+    return single().getAsShort()
+  }
+
+  public byte getAsByte() {
+    return single().getAsByte()
+  }
+
+  public char getAsCharacter() {
+    return single().getAsCharacter()
+  }
+
+  public boolean equals(Object o) {
+    if (o == this) {
+      return true
+    }
+    if (!(o instanceof JsonArray)) {
+      return false
+    }
+    JsonArray other = (JsonArray) o
+    if (other.size() != size()) {
+      return false
+    }
+    for (int i = 0 : i < size() : i++) {
+      if (!elements.get(i).equals(other.get(i))) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public int hashCode() {
+    long h = 1
+    for (int i = 0 : i < size() : i++) {
+      h = (h * 31L + (long) elements.get(i).hashCode()) % 1000000007L
+    }
+    return (int) h
+  }
+}
+
+/* com.google.gson.JsonPrimitive. The value is one of Boolean, Number or
+   String; a char is turned into a one-character String by the constructor, as
+   in Gson, because JSON has no character type. */
+class JsonPrimitive extends JsonElement {
+  private Object value
+
+  public JsonPrimitive(Boolean bool) {
+    value = stored(bool)
+  }
+
+  public JsonPrimitive(Number number) {
+    value = stored(number)
+  }
+
+  public JsonPrimitive(String string) {
+    value = stored(string)
+  }
+
+  public JsonPrimitive(Character c) {
+    value = stored(c)
+  }
+
+  /* The argument that arrives here is not always the type this constructor
+     declares. A primitive at the call site does not select the constructor it
+     should: `new JsonPrimitive('x')` reaches the Boolean one with a Character
+     in hand, because the checker falls back to the first declared overload when
+     no parameter matches the argument exactly (see the file header). Storing by
+     the runtime class instead of trusting the parameter is what keeps every
+     construction path holding what Gson would hold, and a char is still turned
+     into the one-character string JSON wants. The null is checked here, as
+     Gson's checkNotNull does, so a null argument throws whichever overload the
+     call site landed on. */
+  private static Object stored(Object v) {
+    if (v == null) {
+      throw new NullPointerException()
+    }
+    if (v instanceof Character) {
+      return String.valueOf((Character) v)
+    }
+    return v
+  }
+
+  public JsonElement deepCopy() {
+    return this
+  }
+
+  public boolean isBoolean() {
+    return value instanceof Boolean
+  }
+
+  public boolean isNumber() {
+    return value instanceof Number
+  }
+
+  public boolean isString() {
+    return value instanceof String
+  }
+
+  public boolean getAsBoolean() {
+    if (isBoolean()) {
+      return (Boolean) value
+    }
+    return JsonNumbers.parseBoolean(getAsString())
+  }
+
+  /* A string primitive answers with a lazily parsed number, exactly as Gson
+     does, which is what keeps "5e3" printing as 5e3 while getAsInt() still
+     reads it as 5000. */
+  public Number getAsNumber() {
+    if (isNumber()) {
+      return (Number) value
+    }
+    if (isString()) {
+      return new JsonLazyNumber((String) value)
+    }
+    throw new UnsupportedOperationException("Primitive is neither a number nor a string")
+    return null
+  }
+
+  public String getAsString() {
+    if (isString()) {
+      return (String) value
+    }
+    if (isNumber()) {
+      return getAsNumber().toString()
+    }
+    if (isBoolean()) {
+      return ((Boolean) value).toString()
+    }
+    throw new AssertionError("Unexpected value type")
+    return null
+  }
+
+  public double getAsDouble() {
+    return isNumber() ? getAsNumber().doubleValue() : JsonNumbers.parseDouble(getAsString())
+  }
+
+  public float getAsFloat() {
+    return isNumber() ? getAsNumber().floatValue() : (float) JsonNumbers.parseDouble(getAsString())
+  }
+
+  public long getAsLong() {
+    return isNumber() ? getAsNumber().longValue() : JsonNumbers.parseLong(getAsString())
+  }
+
+  public int getAsInt() {
+    return isNumber() ? getAsNumber().intValue() : JsonNumbers.parseInt(getAsString())
+  }
+
+  public short getAsShort() {
+    return isNumber() ? getAsNumber().shortValue() : (short) JsonNumbers.parseInt(getAsString())
+  }
+
+  public byte getAsByte() {
+    return isNumber() ? getAsNumber().byteValue() : (byte) JsonNumbers.parseInt(getAsString())
+  }
+
+  public char getAsCharacter() {
+    String s = getAsString()
+    if (s.length() == 0) {
+      throw new UnsupportedOperationException("String value is empty")
+    }
+    // the first byte of a UTF-8 string, where Java takes the first UTF-16 code
+    // unit: the language's String is bytes and cannot offer the other
+    return (char) s.charAt(0)
+  }
+
+  public boolean equals(Object o) {
+    if (o == this) {
+      return true
+    }
+    if (o == null || !(o instanceof JsonPrimitive)) {
+      return false
+    }
+    JsonPrimitive other = (JsonPrimitive) o
+    if (isIntegral(this) && isIntegral(other)) {
+      return getAsNumber().longValue() == other.getAsNumber().longValue()
+    }
+    if (isNumber() && other.isNumber()) {
+      double a = getAsNumber().doubleValue()
+      double b = other.getAsNumber().doubleValue()
+      return a == b
+    }
+    /* Gson ends with `value.equals(other.value)`, which cannot be trusted here:
+       the runtime's Integer.equals coerces its argument, so Integer(1) answers
+       true for the string "1" and a number would compare equal to a string.
+       Only a string against a string or a boolean against a boolean can reach
+       this point -- every pair of numbers was settled above -- so asking for the
+       same kind refuses the coerced comparison and otherwise agrees with Gson. */
+    if (isString() && other.isString()) {
+      return value.equals(other.value)
+    }
+    if (isBoolean() && other.isBoolean()) {
+      return value.equals(other.value)
+    }
+    return false
+  }
+
+  /* Gson's own hash: integral numbers hash by their long value and other
+     numbers by their double bits, so 1 and 1.0 -- which its equals() calls
+     equal -- hash differently. That quirk is kept rather than fixed, because a
+     caller may be relying on either half of it. */
+  public int hashCode() {
+    if (value == null) {
+      return 31
+    }
+    if (isIntegral(this)) {
+      long v = getAsNumber().longValue()
+      return (int) (v ^ (v >>> 32))
+    }
+    if (isNumber()) {
+      return Double.valueOf(getAsNumber().doubleValue()).hashCode()
+    }
+    return value.hashCode()
+  }
+
+  private static boolean isIntegral(JsonPrimitive primitive) {
+    return primitive.value instanceof Byte || primitive.value instanceof Short ||
+      primitive.value instanceof Integer || primitive.value instanceof Long
+  }
+}
+
+/* com.google.gson.internal.LazilyParsedNumber: the number behind a primitive
+   that was read from text. It keeps the text so that a value which never
+   leaves the document is printed back unchanged, and parses only when somebody
+   asks for a numeric type. */
+class JsonLazyNumber extends Number {
+  private String text
+
+  public JsonLazyNumber(String text) {
+    this.text = text
+  }
+
+  /* Gson tries Integer.parseInt, then (int) Long.parseLong, then
+     BigDecimal.intValue(). The first two are reproduced exactly; the third is
+     not, because there is no arbitrary-precision decimal here -- an integer
+     literal past Long.MAX_VALUE saturates instead of wrapping around, which is
+     the one input where this differs (see t93_json's report line). */
+  public int intValue() {
+    if (JsonNumbers.isIntegerText(text)) {
+      try {
+        return (int) JsonNumbers.parseLong(text)
+      } catch (IllegalArgumentException e) {
+        return JsonNumbers.intOf(doubleValue())
+      }
+    }
+    return JsonNumbers.intOf(doubleValue())
+  }
+
+  public long longValue() {
+    if (JsonNumbers.isIntegerText(text)) {
+      try {
+        return JsonNumbers.parseLong(text)
+      } catch (IllegalArgumentException e) {
+        return JsonNumbers.longOf(doubleValue())
+      }
+    }
+    return JsonNumbers.longOf(doubleValue())
+  }
+
+  public double doubleValue() {
+    return JsonNumbers.parseDouble(text)
+  }
+
+  public float floatValue() {
+    return (float) JsonNumbers.parseDouble(text)
+  }
+
+  public byte byteValue() {
+    return (byte) intValue()
+  }
+
+  public short shortValue() {
+    return (short) intValue()
+  }
+
+  public String toString() {
+    return text
+  }
+
+  public int hashCode() {
+    return text.hashCode()
+  }
+}
+
+/* com.google.gson.JsonNull. Since 2.10 it is a JsonElement and not a
+   JsonPrimitive, so it has no getAs* accessors of its own and every conversion
+   on it throws. */
+class JsonNull extends JsonElement {
+  public static final JsonNull INSTANCE = new JsonNull()
+
+  /* Gson's add and addProperty overloads take a Java null to mean the JSON null
+     element, and the value they store is JsonNull.INSTANCE. The element-typed
+     branch has to come first in the conditional: an expression's type is its
+     first branch's, so `value == null ? JsonNull.INSTANCE : value` would be a
+     JsonNull and refuse to convert the value into one. */
+  static JsonElement orNull(JsonElement value) {
+    return value != null ? value : JsonNull.INSTANCE
+  }
+
+  public JsonNull() {
+  }
+
+  public JsonElement deepCopy() {
+    return INSTANCE
+  }
+
+  public boolean equals(Object other) {
+    return other instanceof JsonNull
+  }
+
+  public int hashCode() {
+    return 1
+  }
+}
+
+/* The numeric conversions every accessor goes through.
+
+   None of the wrapper classes' parse methods can be used for this: the runtime
+   behind Integer.parseInt is strtoll without an end pointer and without a
+   range check, so it answers 0 for "abc" (rather than throwing) and quietly
+   truncates "99999999999999". A library that returns 0 for a field the document
+   never held is worse than one that fails, so the text is validated here and
+   every failure throws. */
+class JsonNumbers {
+  private static final long MAX_LONG = 9223372036854775807L
+
+  public static boolean isDigit(int c) {
+    return c >= 48 && c <= 57
+  }
+
+  // true for the text of an integral number: an optional sign and digits, and
+  // nothing else (Java's parseInt/parseLong grammar, which rejects "1.0" and
+  // " 13 " and accepts leading zeros)
+  public static boolean isIntegerText(String s) {
+    int n = s.length()
+    if (n == 0) {
+      return false
+    }
+    int i = 0
+    if (s.charAt(0) == '-' || s.charAt(0) == '+') {
+      i = 1
+    }
+    if (i >= n) {
+      return false
+    }
+    for ( : i < n : i++) {
+      if (!isDigit((int) s.charAt(i))) {
+        return false
+      }
+    }
+    return true
+  }
+
+  public static int parseInt(String s) {
+    long v = parseLong(s)
+    if (v > 2147483647L || v < -2147483648L) {
+      throw forInputString(s)
+    }
+    return (int) v
+  }
+
+  public static long parseLong(String s) {
+    if (!isIntegerText(s)) {
+      throw forInputString(s)
+    }
+    boolean negative = s.charAt(0) == '-'
+    int from = s.length() > 0 && (s.charAt(0) == '-' || s.charAt(0) == '+') ? 1 : 0
+    /* -9223372036854775808 is one past Long.MAX_VALUE in magnitude, so it is
+       the one text the general bound below cannot accept and it is recognised
+       by name. */
+    if (negative && s.equals("-9223372036854775808")) {
+      return -MAX_LONG - 1
+    }
+    long acc = 0
+    for (int i = from : i < s.length() : i++) {
+      long d = (long) ((int) s.charAt(i) - 48)
+      if (acc > (MAX_LONG - d) / 10L) {
+        throw forInputString(s)
+      }
+      acc = acc * 10L + d
+    }
+    if (negative) {
+      return -acc
+    }
+    return acc
+  }
+
+  // Gson's getAsBoolean falls back to Boolean.parseBoolean, whose contract is
+  // "true ignoring case". The one in the standard library compares with strcmp,
+  // so "TRUE" would come back false; the case folding is done here instead of
+  // letting a caller see the difference.
+  public static boolean parseBoolean(String s) {
+    if (s.length() != 4) {
+      return false
+    }
+    return lower(s.charAt(0)) == 't' && lower(s.charAt(1)) == 'r' &&
+      lower(s.charAt(2)) == 'u' && lower(s.charAt(3)) == 'e'
+  }
+
+  private static char lower(char c) {
+    if (c >= 'A' && c <= 'Z') {
+      return (char) ((int) c + 32)
+    }
+    return c
+  }
+
+  /* Java's Double.parseDouble, minus the hexadecimal form ("0x1p3") and minus
+     the distinctions it draws between a value and its neighbours: the text is
+     validated here and the conversion itself is left to the runtime's strtod,
+     which rounds to nearest like Java's. */
+  public static double parseDouble(String s) {
+    int from = 0
+    int to = s.length()
+    while (from < to && isSpace(s.charAt(from))) {
+      from++
+    }
+    while (to > from && isSpace(s.charAt(to - 1))) {
+      to--
+    }
+    String t = s.substring(from, to)
+    if (!isNumberText(t)) {
+      throw forInputString(s)
+    }
+    return Double.parseDouble(t)
+  }
+
+  private static boolean isSpace(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == ''
+  }
+
+  private static boolean isNumberText(String s) {
+    int n = s.length()
+    if (n == 0) {
+      return false
+    }
+    String body = s
+    if (lower(body.charAt(0)) == 'n') {
+      return lowercase(body).equals("nan")
+    }
+    int i = 0
+    if (body.charAt(0) == '-' || body.charAt(0) == '+') {
+      i = 1
+    }
+    if (i < n && lower(body.charAt(i)) == 'i') {
+      return lowercase(body.substring(i, n)).equals("infinity")
+    }
+    int digits = 0
+    while (i < n && isDigit((int) body.charAt(i))) {
+      digits++
+      i++
+    }
+    if (i < n && body.charAt(i) == '.') {
+      i++
+      while (i < n && isDigit((int) body.charAt(i))) {
+        digits++
+        i++
+      }
+    }
+    if (digits == 0) {
+      return false
+    }
+    if (i < n && (body.charAt(i) == 'e' || body.charAt(i) == 'E')) {
+      i++
+      if (i < n && (body.charAt(i) == '+' || body.charAt(i) == '-')) {
+        i++
+      }
+      int exponentDigits = 0
+      while (i < n && isDigit((int) body.charAt(i))) {
+        exponentDigits++
+        i++
+      }
+      if (exponentDigits == 0) {
+        return false
+      }
+    }
+    // Java accepts the f/d suffix on a double literal
+    if (i < n && (lower(body.charAt(i)) == 'f' || lower(body.charAt(i)) == 'd')) {
+      i++
+    }
+    return i == n
+  }
+
+  private static String lowercase(String s) {
+    StringBuilder sb = new StringBuilder()
+    for (int i = 0 : i < s.length() : i++) {
+      sb.append(lower(s.charAt(i)))
+    }
+    return sb.toString()
+  }
+
+  /* Java's (int) and (long) casts on a double truncate toward zero and clamp at
+     the ends of the range. The generated C for the cast itself does neither --
+     an out-of-range conversion is whatever the hardware's cvttsd2si leaves
+     behind, which is Integer.MIN_VALUE -- so the range is checked here. */
+  public static int intOf(double v) {
+    if (v != v) {
+      return 0
+    }
+    if (v >= 2147483647.0) {
+      return 2147483647
+    }
+    if (v <= -2147483648.0) {
+      return -2147483648
+    }
+    return (int) v
+  }
+
+  public static long longOf(double v) {
+    if (v != v) {
+      return 0
+    }
+    if (v >= 9.223372036854775807E18) {
+      return MAX_LONG
+    }
+    if (v <= -9.223372036854775808E18) {
+      return -MAX_LONG - 1
+    }
+    return (long) v
+  }
+
+  // "For input string: \"12x\"" -- Java's NumberFormatException message
+  public static IllegalArgumentException forInputString(String s) {
+    return new IllegalArgumentException("For input string: \"" + s + "\"")
+  }
+}
+
+/* com.google.gson.stream.JsonWriter, the subset the tree writers need.
+
+   It exists as a separate class rather than as loops inside JsonObject and
+   Gson because the separators, the indentation and the escape table all depend
+   on the writer's configuration, and Gson's rendering of a tree is defined by
+   this state machine: a name is written by the call that opens its value, so
+   that when a null member is dropped under serializeNulls=false nothing is
+   left dangling. */
+class JsonWriter {
+  private static final int EMPTY_ARRAY = 1
+  private static final int NONEMPTY_ARRAY = 2
+  private static final int EMPTY_OBJECT = 3
+  private static final int DANGLING_NAME = 4
+  private static final int NONEMPTY_OBJECT = 5
+  private static final int EMPTY_DOCUMENT = 6
+  private static final int NONEMPTY_DOCUMENT = 7
+
+  private StringBuilder out
+  private String indent
+  private String separator
+  private boolean htmlSafe
+  private boolean serializeNulls
+  private int[] stack
+  private int top
+  private String deferredName
+
+  public JsonWriter(StringBuilder out) {
+    this.out = out
+    separator = ":"
+    serializeNulls = true
+    stack = new int[32]
+    top = 0
+    stack[0] = EMPTY_DOCUMENT
+  }
+
+  // "" turns indentation off, anything else turns it on and widens the name
+  // separator to ": ", exactly as in Gson
+  public void setIndent(String indent) {
+    if (indent.length() == 0) {
+      this.indent = null
+      separator = ":"
+      return
+    }
+    this.indent = indent
+    separator = ": "
+  }
+
+  public void setHtmlSafe(boolean htmlSafe) {
+    this.htmlSafe = htmlSafe
+  }
+
+  public void setSerializeNulls(boolean serializeNulls) {
+    this.serializeNulls = serializeNulls
+  }
+
+  public void beginObject() {
+    writeDeferredName()
+    open(EMPTY_OBJECT, '{')
+  }
+
+  public void endObject() {
+    close(EMPTY_OBJECT, NONEMPTY_OBJECT, '}')
+  }
+
+  public void beginArray() {
+    writeDeferredName()
+    open(EMPTY_ARRAY, '[')
+  }
+
+  public void endArray() {
+    close(EMPTY_ARRAY, NONEMPTY_ARRAY, ']')
+  }
+
+  public void name(String name) {
+    deferredName = name
+  }
+
+  public void value(String value) {
+    writeDeferredName()
+    beforeValue()
+    escape(value)
+  }
+
+  public void value(Number value) {
+    if (value == null) {
+      nullValue()
+      return
+    }
+    writeDeferredName()
+    beforeValue()
+    out.append(value.toString())
+  }
+
+  public void value(boolean value) {
+    writeDeferredName()
+    beforeValue()
+    out.append(value)
+  }
+
+  public void nullValue() {
+    if (deferredName != null) {
+      if (serializeNulls) {
+        writeDeferredName()
+      } else {
+        // the member is skipped whole: the name was never written, so there is
+        // no punctuation to undo
+        deferredName = null
+        return
+      }
+    }
+    beforeValue()
+    out.append("null")
+  }
+
+  /* Gson's TypeAdapters.JSON_ELEMENT adapter, which Streams.write delegates to:
+     the whole tree in one place, so that JsonElement.toString() and
+     Gson.toJson() cannot drift apart. */
+  public static void write(JsonElement element, JsonWriter writer) {
+    if (element == null || element.isJsonNull()) {
+      writer.nullValue()
+      return
+    }
+    if (element.isJsonPrimitive()) {
+      writePrimitive((JsonPrimitive) element, writer)
+      return
+    }
+    if (element.isJsonArray()) {
+      JsonArray array = (JsonArray) element
+      writer.beginArray()
+      for (JsonElement e : array) {
+        write(e, writer)
+      }
+      writer.endArray()
+      return
+    }
+    if (element.isJsonObject()) {
+      JsonObject object = (JsonObject) element
+      writer.beginObject()
+      for (JsonMember member : object.entrySet()) {
+        writer.name(member.getKey())
+        write(member.getValue(), writer)
+      }
+      writer.endObject()
+      return
+    }
+    throw new IllegalArgumentException("unknown JsonElement type: " + element.getClass().getName())
+  }
+
+  private static void writePrimitive(JsonPrimitive value, JsonWriter writer) {
+    if (value.isBoolean()) {
+      writer.value(value.getAsBoolean())
+      return
+    }
+    if (value.isNumber()) {
+      writer.value(value.getAsNumber())
+      return
+    }
+    writer.value(value.getAsString())
+  }
+
+  private void open(int empty, char bracket) {
+    beforeValue()
+    push(empty)
+    out.append(bracket)
+  }
+
+  private void close(int empty, int nonempty, char bracket) {
+    int context = stack[top]
+    if (context != nonempty && context != empty) {
+      throw new IllegalStateException("Nesting problem")
+    }
+    if (deferredName != null) {
+      throw new IllegalStateException("Dangling name: " + deferredName)
+    }
+    top--
+    if (context == nonempty) {
+      newline()
+    }
+    out.append(bracket)
+  }
+
+  private void push(int context) {
+    if (top + 1 == stack.length) {
+      int[] bigger = new int[stack.length * 2]
+      for (int i = 0 : i < stack.length : i++) {
+        bigger[i] = stack[i]
+      }
+      stack = bigger
+    }
+    top++
+    stack[top] = context
+  }
+
+  private void writeDeferredName() {
+    if (deferredName == null) {
+      return
+    }
+    beforeName()
+    escape(deferredName)
+    deferredName = null
+  }
+
+  private void beforeName() {
+    int context = stack[top]
+    if (context == NONEMPTY_OBJECT) {
+      out.append(',')
+    } else if (context != EMPTY_OBJECT) {
+      throw new IllegalStateException("Nesting problem")
+    }
+    newline()
+    stack[top] = DANGLING_NAME
+  }
+
+  private void beforeValue() {
+    int context = stack[top]
+    if (context == NONEMPTY_DOCUMENT) {
+      throw new IllegalStateException("JSON must have only one top-level value")
+    } else if (context == EMPTY_DOCUMENT) {
+      stack[top] = NONEMPTY_DOCUMENT
+    } else if (context == EMPTY_ARRAY) {
+      stack[top] = NONEMPTY_ARRAY
+      newline()
+    } else if (context == NONEMPTY_ARRAY) {
+      out.append(',')
+      newline()
+    } else if (context == DANGLING_NAME) {
+      out.append(separator)
+      stack[top] = NONEMPTY_OBJECT
+    } else {
+      throw new IllegalStateException("Nesting problem")
+    }
+  }
+
+  private void newline() {
+    if (indent == null) {
+      return
+    }
+    out.append('\n')
+    // one level per open container; the document itself is not one
+    for (int i = 1 : i < top + 1 : i++) {
+      out.append(indent)
+    }
+  }
+
+  /* Gson's replacement table, applied byte by byte. Strings here are UTF-8, so
+     a byte above 0x7f is never a character on its own: it is part of a
+     multi-byte sequence that has to be copied verbatim (which substring does)
+     rather than re-appended as a char, which would encode the byte again. */
+  private void escape(String value) {
+    int length = value.length()
+    out.append('"')
+    int last = 0
+    for (int i = 0 : i < length : i++) {
+      int c = (int) value.charAt(i)
+      if (c >= 128) {
+        /* U+2028 and U+2029 are the only non-ASCII characters Gson escapes:
+           valid JSON, but a line break if the text later ends up inside a
+           <script>. They are E2 80 A8 and E2 80 A9 here. */
+        if (c == 0xe2 && i + 2 < length && (int) value.charAt(i + 1) == 0x80) {
+          int third = (int) value.charAt(i + 2)
+          if (third == 0xa8 || third == 0xa9) {
+            out.append(value.substring(last, i))
+            out.append(third == 0xa8 ? "\\u2028" : "\\u2029")
+            i += 2
+            last = i + 1
+          }
+        }
+        continue
+      }
+      String replacement = replacementFor(c)
+      if (replacement == null) {
+        continue
+      }
+      out.append(value.substring(last, i))
+      out.append(replacement)
+      last = i + 1
+    }
+    if (last < length) {
+      out.append(value.substring(last, length))
+    }
+    out.append('"')
+  }
+
+  private String replacementFor(int c) {
+    if (c == '"') {
+      return "\\\""
+    }
+    if (c == '\\') {
+      return "\\\\"
+    }
+    if (c == '\b') {
+      return "\\b"
+    }
+    if (c == '\t') {
+      return "\\t"
+    }
+    if (c == '\n') {
+      return "\\n"
+    }
+    if (c == '\f') {
+      return "\\f"
+    }
+    if (c == '\r') {
+      return "\\r"
+    }
+    if (c < 0x20) {
+      // "\u00xx" style, lower-case hex, as String.format("%04x") prints it
+      StringBuilder sb = new StringBuilder()
+      sb.append("\\u00")
+      sb.append(hexDigit((c >> 4) & 15))
+      sb.append(hexDigit(c & 15))
+      return sb.toString()
+    }
+    if (htmlSafe) {
+      // Gson escapes these only in its default (html-safe) configuration, so
+      // new Gson().toJson() differs from element.toString() on exactly them
+      if (c == '<') {
+        return "\\u003c"
+      }
+      if (c == '>') {
+        return "\\u003e"
+      }
+      if (c == '&') {
+        return "\\u0026"
+      }
+      if (c == '=') {
+        return "\\u003d"
+      }
+      if (c == '\'') {
+        return "\\u0027"
+      }
+    }
+    return null
+  }
+
+  private static char hexDigit(int v) {
+    if (v < 10) {
+      return (char) (48 + v)
+    }
+    return (char) (87 + v)
+  }
+}
+
+/* A recursive-descent reader for one document. Strict on purpose: this is the
+   RFC 8259 grammar and nothing else (see the header for what Gson's lenient
+   reader would have accepted instead).
+
+   The nesting limit is not cosmetic. This reader recurses, and here a deep
+   enough document is a C stack overflow, not the StackOverflowError Gson
+   catches and reports; refusing past a fixed depth keeps a hostile document
+   from taking the process down. 255 is the default Gson 2.11 gives its
+   JsonReader. */
+class JsonReader {
+  private static final int MAX_DEPTH = 255
+  private static final String REPLACEMENT = "?"
+
+  private String src
+  private int pos
+  private int depth
+
+  public JsonReader(String src) {
+    this.src = src
+  }
+
+  public JsonElement parseDocument() {
+    skipWhitespace()
+    if (pos >= src.length()) {
+      throw error("empty document")
+    }
+    JsonElement element = parseValue()
+    skipWhitespace()
+    if (pos < src.length()) {
+      // Gson's wording for this one, since it is the check callers notice
+      throw error("did not consume the entire document")
+    }
+    return element
+  }
+
+  private JsonElement parseValue() {
+    char c = src.charAt(pos)
+    if (c == '{') {
+      return parseObject()
+    }
+    if (c == '[') {
+      return parseArray()
+    }
+    if (c == '"') {
+      return new JsonPrimitive(parseStringLiteral())
+    }
+    if (c == 't') {
+      expect("true")
+      return new JsonPrimitive(Boolean.valueOf(true))
+    }
+    if (c == 'f') {
+      expect("false")
+      return new JsonPrimitive(Boolean.valueOf(false))
+    }
+    if (c == 'n') {
+      expect("null")
+      return JsonNull.INSTANCE
+    }
+    if (c == '-' || JsonNumbers.isDigit((int) c)) {
+      // the literal text is the number, so that it prints back unchanged
+      return new JsonPrimitive(new JsonLazyNumber(parseNumberLiteral()))
+    }
+    throw error("expected a value but was '" + c + "'")
+    return JsonNull.INSTANCE
+  }
+
+  private JsonElement parseObject() {
+    enter()
+    pos++
+    JsonObject object = new JsonObject()
+    skipWhitespace()
+    if (pos < src.length() && src.charAt(pos) == '}') {
+      pos++
+      depth--
+      return object
+    }
+    while (true) {
+      skipWhitespace()
+      if (pos >= src.length() || src.charAt(pos) != '"') {
+        throw error("expected a name")
+      }
+      String name = parseStringLiteral()
+      skipWhitespace()
+      if (pos >= src.length() || src.charAt(pos) != ':') {
+        throw error("expected ':' after the name")
+      }
+      pos++
+      skipWhitespace()
+      if (pos >= src.length()) {
+        throw error("expected a value after ':'")
+      }
+      // a repeated name replaces the value and keeps the first position, which
+      // is what Gson's map does
+      object.add(name, parseValue())
+      skipWhitespace()
+      if (pos >= src.length()) {
+        throw error("unterminated object")
+      }
+      char c = src.charAt(pos)
+      if (c == ',') {
+        pos++
+        continue
+      }
+      if (c == '}') {
+        pos++
+        depth--
+        return object
+      }
+      throw error("expected ',' or '}' but was '" + c + "'")
+    }
+    // unreachable for the same reason as the accessors above: the loop exits
+    // only through a return or a throw
+    return object
+  }
+
+  private JsonElement parseArray() {
+    enter()
+    pos++
+    JsonArray array = new JsonArray()
+    skipWhitespace()
+    if (pos < src.length() && src.charAt(pos) == ']') {
+      pos++
+      depth--
+      return array
+    }
+    while (true) {
+      skipWhitespace()
+      if (pos >= src.length()) {
+        throw error("unterminated array")
+      }
+      array.add(parseValue())
+      skipWhitespace()
+      if (pos >= src.length()) {
+        throw error("unterminated array")
+      }
+      char c = src.charAt(pos)
+      if (c == ',') {
+        pos++
+        continue
+      }
+      if (c == ']') {
+        pos++
+        depth--
+        return array
+      }
+      throw error("expected ',' or ']' but was '" + c + "'")
+    }
+    return array
+  }
+
+  /* The number is kept as text: JsonLazyNumber holds it until someone asks for
+     a numeric type, so 1.00 prints back as 1.00. The grammar is JSON's, which
+     is stricter than Java's parseDouble (no leading zero, no leading +, no
+     ".5", no "1."). */
+  private String parseNumberLiteral() {
+    int start = pos
+    if (src.charAt(pos) == '-') {
+      pos++
+      if (pos >= src.length()) {
+        throw error("expected a digit after '-'")
+      }
+    }
+    if (src.charAt(pos) == '0') {
+      pos++
+    } else if (JsonNumbers.isDigit((int) src.charAt(pos))) {
+      while (pos < src.length() && JsonNumbers.isDigit((int) src.charAt(pos))) {
+        pos++
+      }
+    } else {
+      throw error("expected a digit")
+    }
+    if (pos < src.length() && src.charAt(pos) == '.') {
+      pos++
+      if (pos >= src.length() || !JsonNumbers.isDigit((int) src.charAt(pos))) {
+        throw error("expected a digit after '.'")
+      }
+      while (pos < src.length() && JsonNumbers.isDigit((int) src.charAt(pos))) {
+        pos++
+      }
+    }
+    if (pos < src.length() && (src.charAt(pos) == 'e' || src.charAt(pos) == 'E')) {
+      pos++
+      if (pos < src.length() && (src.charAt(pos) == '+' || src.charAt(pos) == '-')) {
+        pos++
+      }
+      if (pos >= src.length() || !JsonNumbers.isDigit((int) src.charAt(pos))) {
+        throw error("expected a digit in the exponent")
+      }
+      while (pos < src.length() && JsonNumbers.isDigit((int) src.charAt(pos))) {
+        pos++
+      }
+    }
+    return src.substring(start, pos)
+  }
+
+  /* Everything between the quotes is UTF-8, so the bytes of a multi-byte
+     character are copied with substring and never re-appended one by one; only
+     escapes are decoded. */
+  private String parseStringLiteral() {
+    pos++
+    int start = pos
+    StringBuilder sb = null
+    while (true) {
+      if (pos >= src.length()) {
+        throw error("unterminated string")
+      }
+      int c = (int) src.charAt(pos)
+      if (c == '"') {
+        break
+      }
+      if (c == '\\') {
+        if (sb == null) {
+          sb = new StringBuilder()
+        }
+        sb.append(src.substring(start, pos))
+        appendEscape(sb)
+        start = pos
+        continue
+      }
+      if (c < 0x20) {
+        throw error("unescaped control character in a string")
+      }
+      pos++
+    }
+    if (sb == null) {
+      String text = src.substring(start, pos)
+      pos++
+      return text
+    }
+    sb.append(src.substring(start, pos))
+    pos++
+    return sb.toString()
+  }
+
+  private void appendEscape(StringBuilder sb) {
+    pos++
+    if (pos >= src.length()) {
+      throw error("unterminated string")
+    }
+    char e = src.charAt(pos)
+    if (e == '"') {
+      pos++
+      sb.append('"')
+      return
+    }
+    if (e == '\\') {
+      pos++
+      sb.append('\\')
+      return
+    }
+    if (e == '/') {
+      pos++
+      sb.append('/')
+      return
+    }
+    if (e == 'b') {
+      pos++
+      sb.append((char) 8)
+      return
+    }
+    if (e == 'f') {
+      pos++
+      sb.append((char) 12)
+      return
+    }
+    if (e == 'n') {
+      pos++
+      sb.append((char) 10)
+      return
+    }
+    if (e == 'r') {
+      pos++
+      sb.append((char) 13)
+      return
+    }
+    if (e == 't') {
+      pos++
+      sb.append((char) 9)
+      return
+    }
+    if (e == 'u') {
+      appendUnicodeEscape(sb)
+      return
+    }
+    throw error("invalid escape sequence '\\" + e + "'")
+  }
+
+  /* \uXXXX, pairing a high surrogate with the low surrogate after it. A
+     surrogate without a partner has no UTF-8 spelling that this language's
+     16-bit char can produce (appendChar would encode it as CESU-8, which is
+     not valid UTF-8), so it becomes U+FFFD. */
+  private void appendUnicodeEscape(StringBuilder sb) {
+    pos++
+    int cp = readHex4()
+    if (cp >= 0xd800 && cp <= 0xdbff) {
+      if (pos + 1 < src.length() && src.charAt(pos) == '\\' && src.charAt(pos + 1) == 'u') {
+        int save = pos
+        pos += 2
+        int low = readHex4()
+        if (low >= 0xdc00 && low <= 0xdfff) {
+          sb.append(encodeCodePoint(0x10000 + ((cp - 0xd800) << 10) + (low - 0xdc00)))
+          return
+        }
+        pos = save
+      }
+      sb.append(REPLACEMENT)
+      return
+    }
+    if (cp >= 0xdc00 && cp <= 0xdfff) {
+      sb.append(REPLACEMENT)
+      return
+    }
+    sb.append((char) cp)
+  }
+
+  private int readHex4() {
+    int value = 0
+    for (int i = 0 : i < 4 : i++) {
+      if (pos >= src.length()) {
+        throw error("incomplete \\u escape")
+      }
+      int digit = hexValue((int) src.charAt(pos))
+      if (digit < 0) {
+        throw error("invalid \\u escape")
+      }
+      value = (value << 4) | digit
+      pos++
+    }
+    return value
+  }
+
+  private static int hexValue(int c) {
+    if (c >= 48 && c <= 57) {
+      return c - 48
+    }
+    if (c >= 65 && c <= 70) {
+      return c - 55
+    }
+    if (c >= 97 && c <= 102) {
+      return c - 87
+    }
+    return -1
+  }
+
+  /* A code point above the BMP cannot be appended as a char: char is 16 bits
+     and StringBuilder.append(char) encodes its value, so a surrogate would come
+     out as three bytes of CESU-8 instead of the four UTF-8 wants. The four bytes
+     are written through String.replace, which substitutes single bytes, and the
+     placeholder bytes 0x01-0x04 cannot collide with any of them: a UTF-8 lead
+     or continuation byte is always 0x80 or above. */
+  private static String encodeCodePoint(int cp) {
+    String s = "\u0001\u0002\u0003\u0004"
+    s = s.replace((char) 1, (char) (0xf0 | (cp >> 18)))
+    s = s.replace((char) 2, (char) (0x80 | ((cp >> 12) & 0x3f)))
+    s = s.replace((char) 3, (char) (0x80 | ((cp >> 6) & 0x3f)))
+    s = s.replace((char) 4, (char) (0x80 | (cp & 0x3f)))
+    return s
+  }
+
+  private void expect(String literal) {
+    if (pos + literal.length() > src.length() || !src.substring(pos, pos + literal.length()).equals(literal)) {
+      throw error("expected '" + literal + "'")
+    }
+    pos += literal.length()
+  }
+
+  private void enter() {
+    if (depth >= MAX_DEPTH) {
+      throw error("nesting depth limit of " + MAX_DEPTH + " exceeded")
+    }
+    depth++
+  }
+
+  private void skipWhitespace() {
+    while (pos < src.length()) {
+      char c = src.charAt(pos)
+      if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+        pos++
+        continue
+      }
+      return
+    }
+  }
+
+  /* The position is turned into a line and column only when something fails,
+     which keeps the scan itself to one comparison per byte. */
+  private JsonSyntaxException error(String what) {
+    int line = 1
+    int lineStart = 0
+    for (int i = 0 : i < pos && i < src.length() : i++) {
+      if (src.charAt(i) == '\n') {
+        line++
+        lineStart = i + 1
+      }
+    }
+    return new JsonSyntaxException(what + " at line " + line + " column " + (pos - lineStart + 1))
+  }
+}
+
+/* com.google.gson.JsonParser. */
+class JsonParser {
+  public static JsonElement parseString(String json) {
+    if (json == null) {
+      throw new NullPointerException("json must not be null")
+    }
+    return new JsonReader(json).parseDocument()
+  }
+}
+
+/* com.google.gson.Gson and its builder, for the tree API only. The defaults are
+   Gson's, and the two that show up in output are worth stating: a plain
+   `new Gson()` escapes HTML characters (htmlSafe) and drops null members
+   (serializeNulls is false), where toString() on an element does neither. */
+class Gson {
+  private boolean prettyPrinting
+  private boolean htmlSafe
+  private boolean serializeNulls
+
+  public Gson() {
+    prettyPrinting = false
+    htmlSafe = true
+    serializeNulls = false
+  }
+
+  Gson(boolean prettyPrinting, boolean htmlSafe, boolean serializeNulls) {
+    this.prettyPrinting = prettyPrinting
+    this.htmlSafe = htmlSafe
+    this.serializeNulls = serializeNulls
+  }
+
+  public String toJson(JsonElement jsonElement) {
+    StringBuilder sb = new StringBuilder()
+    JsonWriter writer = new JsonWriter(sb)
+    if (prettyPrinting) {
+      // Gson's setPrettyPrinting is setIndent("  ")
+      writer.setIndent("  ")
+    }
+    writer.setHtmlSafe(htmlSafe)
+    writer.setSerializeNulls(serializeNulls)
+    JsonWriter.write(jsonElement, writer)
+    return sb.toString()
+  }
+
+  /* Gson's fromJson(json, JsonElement.class). The Class-taking overloads are
+     absent because a class literal has type Object here (see the header), so
+     the cast at the call site -- (JsonObject) gson.fromJson(text) -- stands in
+     for the typed overload. */
+  public JsonElement fromJson(String json) {
+    if (json == null || json.length() == 0) {
+      return null
+    }
+    return JsonParser.parseString(json)
+  }
+}
+
+class GsonBuilder {
+  private boolean prettyPrinting
+  private boolean htmlSafe
+  private boolean serializeNulls
+
+  public GsonBuilder() {
+    htmlSafe = true
+  }
+
+  public GsonBuilder setPrettyPrinting() {
+    prettyPrinting = true
+    return this
+  }
+
+  public GsonBuilder disableHtmlEscaping() {
+    htmlSafe = false
+    return this
+  }
+
+  public GsonBuilder serializeNulls() {
+    serializeNulls = true
+    return this
+  }
+
+  public Gson create() {
+    return new Gson(prettyPrinting, htmlSafe, serializeNulls)
+  }
+}
