@@ -1,0 +1,91 @@
+== documents Gson accepts too ==
+accept null | null
+accept true | true
+accept false | false
+accept 0 | 0
+accept -0 | -0
+accept 1e5 | 1e5
+accept -1.5E-3 | -1.5E-3
+accept 10000000000000000000 | 10000000000000000000
+accept 1e999 | 1e999
+accept "" | ""
+accept {} | {}
+accept [] | []
+accept [[[]]] | [[[]]]
+accept {"":""} | {"":""}
+accept [1,2] | [1,2]
+accept "\uD83D\uDE00" | "😀"
+accept "\ud83d\ude00" | "😀"
+accept with whitespace | {"a":[1,2]}
+== documents this parser rejects ==
+lenient reject {a:1} | rejected: expected a name at line 1 column 2
+lenient reject {'a':1} | rejected: expected a name at line 1 column 2
+lenient reject [1,] | rejected: expected a value but was ']' at line 1 column 4
+lenient reject {"a":1,} | rejected: expected a name at line 1 column 8
+lenient reject +1 | rejected: expected a value but was '+' at line 1 column 1
+lenient reject - | rejected: expected a digit after '-' at line 1 column 2
+lenient reject 01 | rejected: did not consume the entire document at line 1 column 2
+lenient reject .5 | rejected: expected a value but was '.' at line 1 column 1
+lenient reject 1. | rejected: expected a digit after '.' at line 1 column 3
+lenient reject 1.e5 | rejected: expected a digit after '.' at line 1 column 3
+lenient reject NaN | rejected: expected a value but was 'N' at line 1 column 1
+lenient reject Infinity | rejected: expected a value but was 'I' at line 1 column 1
+lenient reject 0x10 | rejected: did not consume the entire document at line 1 column 2
+lenient reject nul | rejected: expected 'null' at line 1 column 1
+lenient reject tru | rejected: expected 'true' at line 1 column 1
+lenient reject TRUE | rejected: expected a value but was 'T' at line 1 column 1
+lenient reject  | rejected: empty document at line 1 column 1
+reject     | rejected: empty document at line 1 column 4
+reject { | rejected: expected a name at line 1 column 2
+reject [ | rejected: unterminated array at line 1 column 2
+reject [1 | rejected: unterminated array at line 1 column 3
+reject {"a" | rejected: expected ':' after the name at line 1 column 5
+reject {"a"} | rejected: expected ':' after the name at line 1 column 5
+reject {"a":} | rejected: expected a value but was '}' at line 1 column 6
+reject {"a" 1} | rejected: expected ':' after the name at line 1 column 6
+reject {,} | rejected: expected a name at line 1 column 2
+reject [,1] | rejected: expected a value but was ',' at line 1 column 2
+reject [1 2] | rejected: expected ',' or ']' but was '2' at line 1 column 4
+reject "abc | rejected: unterminated string at line 1 column 5
+reject "\q" | rejected: invalid escape sequence '\q' at line 1 column 3
+reject "\u12" | rejected: invalid \u escape at line 1 column 6
+reject "\uZZZZ" | rejected: invalid \u escape at line 1 column 4
+reject 1.2.3 | rejected: did not consume the entire document at line 1 column 4
+reject 1e | rejected: expected a digit in the exponent at line 1 column 3
+reject 1e+ | rejected: expected a digit in the exponent at line 1 column 4
+reject /*c*/1 | rejected: expected a value but was '/' at line 1 column 1
+reject }} | rejected: expected a value but was '}' at line 1 column 1
+reject ] | rejected: expected a value but was ']' at line 1 column 1
+reject {"a":1} x | rejected: did not consume the entire document at line 1 column 9
+reject [1] [2] | rejected: did not consume the entire document at line 1 column 5
+reject 1 2 | rejected: did not consume the entire document at line 1 column 3
+reject {} {} | rejected: did not consume the entire document at line 1 column 4
+reject "a""b" | rejected: did not consume the entire document at line 1 column 4
+reject tab in string | rejected: unescaped control character in a string at line 1 column 3
+== number conversions, against Gson's own answers ==
+big int | 2147483647 (Gson: -1981284352)
+big long | 9223372036854775807 (Gson: -8446744073709551616)
+big byte | -1 (Gson: 0)
+big short | -1 (Gson: 0)
+big double | 1.0E19 (Gson: 1.0E19)
+wide int | 2147483647 (Gson: 2115098112)
+wide long | 15000000000 (Gson: 15000000000)
+wide byte | -1 (Gson: 0)
+wide short | -1 (Gson: -10752)
+overflow double | Infinity (Gson: Infinity)
+negative zero | 0.0 (Gson: -0.0)
+lone surrogate | "?" (Gson: "?" too)
+== accesses that differ from Gson ==
+empty document | rejected: empty document at line 1 column 1 (Gson: JsonNull.INSTANCE)
+null then trailing | rejected: did not consume the entire document at line 1 column 6 (Gson: JsonNull.INSTANCE)
+null as string | UnsupportedOperationException: JsonNull (Gson: com.google.gson.JsonNull)
+object as string | UnsupportedOperationException: JsonObject (Gson: com.google.gson.JsonObject)
+one-element array as string | 1 (Gson: 1)
+two-element array as string | teyru.IllegalStateException: Array must have size 1, but has size 2 (Gson: java.lang.IllegalStateException, same message)
+primitive as object | teyru.IllegalStateException: Not a JSON Object: 1 (Gson: java.lang.IllegalStateException, same message)
+bad int | teyru.IllegalArgumentException: For input string: "12.5" (Gson: java.lang.NumberFormatException, same message)
+bad int text | teyru.IllegalArgumentException: For input string: " 13 " (Gson: java.lang.NumberFormatException, same message)
+char primitive | "x" isString=true (Gson: "x" isString=true)
+== reader limits ==
+deep nesting | rejected: nesting depth limit of 255 exceeded at line 1 column 256 (Gson: parses it)
+200 deep | 400 characters, first two [[

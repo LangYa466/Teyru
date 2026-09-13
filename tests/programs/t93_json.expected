@@ -1,0 +1,154 @@
+== walk ==
+size | 18
+name | Teyru
+stars | 3
+ok | true
+has none | true
+has missing | false
+keys | [name, stars, pi, ratio, tiny, zero, big, ok, off, none, empty, list, tags, nested, unicode, esc, html, u2028]
+entries | [name="Teyru", stars=3, pi=3.14, ratio=1.5e+10, tiny=-2.5E-3, zero=0, big=10000000000000000000, ok=true, off=false, none=null, empty={}, list=[], tags=["a","b"], nested={"deep":[{"n":1},{"n":2}]}, unicode="café 中文 😀", esc="q\"b\\s/t\b\f\n\r\t\u0000\u001f", html="<a href='x'>&</a>", u2028="a\u2028b"]
+tags | ["a","b"]
+tag2 | b
+deep | 2
+empty size | 0
+list size | 0
+isJsonObject | true false
+isJsonPrimitive | true false
+isJsonArray | true
+isJsonNull | true false
+iterated | a+b+
+entry | stars -> 3
+== escapes ==
+esc | "q\"b\\s/t\b\f\n\r\t\u0000\u001f"
+esc length | 14
+unicode | "café 中文 😀"
+html | "<a href='x'>&</a>"
+u2028 | "a\u2028b"
+escaped key | {"a\"b":1}
+escaped solidus | "a/b"
+control | "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u0011\u0012\u0013\u0014\u0015\u0016\u0017\u0018\u0019\u001a\u001b\u001c\u001d\u001e\u001f"
+del | ""
+== numbers ==
+num 1 | keep=1 str=1 int=1 long=1 dbl=1.0 num=1
+num 0 | keep=0 str=0 int=0 long=0 dbl=0.0 num=0
+num -2.5E-3 | keep=-2.5E-3 str=-2.5E-3 int=0 long=0 dbl=-0.0025 num=-2.5E-3
+num 1e5 | keep=1e5 str=1e5 int=100000 long=100000 dbl=100000.0 num=1e5
+num 100000.0 | keep=100000.0 str=100000.0 int=100000 long=100000 dbl=100000.0 num=100000.0
+num 1E2 | keep=1E2 str=1E2 int=100 long=100 dbl=100.0 num=1E2
+num 0.1 | keep=0.1 str=0.1 int=0 long=0 dbl=0.1 num=0.1
+num 3.141592653589793 | keep=3.141592653589793 str=3.141592653589793 int=3 long=3 dbl=3.141592653589793 num=3.141592653589793
+big | 10000000000000000000 str=10000000000000000000 dbl=1.0E19
+ratio | 1.5e+10 long=15000000000
+constructed | 5 1.0 7 true "x"
+coerce | 12 -12 12.0 true true false
+coerce bad | For input string: "12.5"
+coerce blank | For input string: " 13 "
+== pretty ==
+{
+  "name": "Teyru",
+  "stars": 3,
+  "pi": 3.14,
+  "ratio": 1.5e+10,
+  "tiny": -2.5E-3,
+  "zero": 0,
+  "big": 10000000000000000000,
+  "ok": true,
+  "off": false,
+  "empty": {},
+  "list": [],
+  "tags": [
+    "a",
+    "b"
+  ],
+  "nested": {
+    "deep": [
+      {
+        "n": 1
+      },
+      {
+        "n": 2
+      }
+    ]
+  },
+  "unicode": "café 中文 😀",
+  "esc": "q\"b\\s/t\b\f\n\r\t\u0000\u001f",
+  "html": "\u003ca href\u003d\u0027x\u0027\u003e\u0026\u003c/a\u003e",
+  "u2028": "a\u2028b"
+}
+pretty empty | {}
+pretty empty array | []
+pretty mixed | [
+  1,
+  [
+    2,
+    {}
+  ],
+  []
+]
+pretty flat | {
+  "a": 1
+}
+== gson defaults ==
+default | {"name":"Teyru","stars":3,"pi":3.14,"ratio":1.5e+10,"tiny":-2.5E-3,"zero":0,"big":10000000000000000000,"ok":true,"off":false,"empty":{},"list":[],"tags":["a","b"],"nested":{"deep":[{"n":1},{"n":2}]},"unicode":"café 中文 😀","esc":"q\"b\\s/t\b\f\n\r\t\u0000\u001f","html":"\u003ca href\u003d\u0027x\u0027\u003e\u0026\u003c/a\u003e","u2028":"a\u2028b"}
+html escaped | {"a":"\u003c\u0026\u003e\u0027\""}
+html kept | {"a":"<&>'\""}
+nulls kept | {"a":1,"b":null}
+nulls dropped | {"a":1}
+toString keeps nulls | {"a":1,"b":null}
+fromJson | 2
+fromJson empty | null
+fromJson null | null
+== build ==
+built | {"s":"x","i":7,"bool":true,"d":1.5,"ch":"z","nothing":null,"arr":[1,2]}
+built size | 7
+built isEmpty | false true
+built prim | 7
+built arr | 2
+built obj | ClassCastException
+built remove | null -> {"s":"x","i":7,"bool":true,"d":1.5,"ch":"z","arr":[1,2]}
+order | {"b":1,"a":2,"c":3}
+replaced | {"b":9,"a":2,"c":3}
+removed | {"b":9,"c":3}
+re-added | {"b":9,"c":3,"a":4}
+array | [true,"c",1,2.5,"s",null]
+array size | 6 isEmpty=false
+array get | 1
+array set | true -> ["first","c",1,2.5,"s",null]
+array contains | true false
+array remove | "first" -> ["c",1,2.5,"s",null]
+array set null | "c" -> [null,1,2.5,"s",null]
+array of one | 5
+array addAll | [1,2]
+== null ==
+INSTANCE | null
+parsed null is INSTANCE | true
+null isJsonPrimitive | false
+null isJsonNull | true
+null equals | true true
+null copy | null
+null built | NullPointerException
+null getAsString | UnsupportedOperationException
+null getAsInt | UnsupportedOperationException
+object as string | UnsupportedOperationException
+not an object | Not a JSON Object: 3
+two elements | Array must have size 1, but has size 2
+== equality and round trip ==
+copy equals | true same object=false
+copy hash | true
+array equals | true
+array ne | false
+order insensitive | true
+order insensitive hash | true
+primitive equals | true false
+nested equals | true
+stable | true
+round trip {} | {}
+round trip [] | []
+round trip [1,[2,[3]]] | [1,[2,[3]]]
+round trip {"a":{"b":{"c":[null,true]}}} | {"a":{"b":{"c":[null,true]}}}
+round trip "" | ""
+round trip [[[[[]]]]] | [[[[[]]]]]
+round trip {"a":1,"a":2} | {"a":2}
+round trip 1e5 | 1e5
+round trip -0 | -0
+round trip doc | 1
