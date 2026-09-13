@@ -558,9 +558,13 @@ func (c *Checker) ensureTypeParams(cl *ast.Class) {
 	env := c.classEnv(cl)
 	for _, tp := range cl.Decl.TypeParams {
 		if len(tp.Bounds) > 0 {
-			tp.Sym.Bound = c.resolveType(env, tp.Bounds[0])
+			for _, b := range tp.Bounds {
+				tp.Sym.Bounds = append(tp.Sym.Bounds, c.resolveType(env, b))
+			}
+			tp.Sym.Bound = tp.Sym.Bounds[0]
 		} else {
 			tp.Sym.Bound = c.objType
+			tp.Sym.Bounds = []ast.Type{c.objType}
 		}
 	}
 }

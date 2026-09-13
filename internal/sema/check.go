@@ -2741,6 +2741,19 @@ func (ctx *methodCtx) checkMethodCall(v *ast.Call, rt ast.Type, want ast.Type) {
 	}
 	cands := ctx.c.methodsFor(recvCT, v.Name)
 	if len(cands) == 0 {
+		// an intersection bound reaches past the erasure: try the other bounds
+		// before giving up
+		for _, alt := range ctx.recvClasses(rt) {
+			if alt.Class == recvCT.Class {
+				continue
+			}
+			if more := ctx.c.methodsFor(alt, v.Name); len(more) > 0 {
+				cands, recvCT = more, alt
+				break
+			}
+		}
+	}
+	if len(cands) == 0 {
 		if ctx.tryExtensionMethod(v, rt) {
 			return
 		}
@@ -2817,6 +2830,33 @@ func visName(m ast.Mods) string {
 		return "protected"
 	}
 	return "package"
+}
+
+// recvClasses lists every reference type a receiver expression can be looked
+// up in. For an intersection bound (JLS 4.4: `<T extends A & B>`) the variable
+// has the members of all of its bounds, not only the leftmost one -- that one
+// is the erasure, not the whole type. Every other receiver answers with the
+// single class recvClass gives.
+func (ctx *methodCtx) recvClasses(t ast.Type) []*ast.ClassType {
+	if tv, ok := t.(*ast.TypeVarType); ok && len(tv.Var.Bounds) > 1 {
+		var out []*ast.ClassType
+		seen := map[*ast.Class]bool{}
+		for _, b := range tv.Var.Bounds {
+			ct, ok := ctx.c.erasure(b).(*ast.ClassType)
+			if !ok || ct.Class == nil || seen[ct.Class] {
+				continue
+			}
+			seen[ct.Class] = true
+			out = append(out, ct)
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	if ct := ctx.recvClass(t); ct != nil {
+		return []*ast.ClassType{ct}
+	}
+	return nil
 }
 
 // recvClass unwraps a type into a receiver class type (boxing primitives).
@@ -2963,6 +3003,19 @@ func (ctx *methodCtx) checkSelect(v *ast.Select, want ast.Type) {
 		return
 	}
 	f := ctx.c.findField(ct, v.Name)
+	if f == nil {
+		// a field may come from any bound of an intersection, not only the
+		// leftmost one
+		for _, alt := range ctx.recvClasses(xt) {
+			if alt.Class == ct.Class {
+				continue
+			}
+			if f = ctx.c.findField(alt, v.Name); f != nil {
+				ct = alt
+				break
+			}
+		}
+	}
 	if f == nil {
 		ctx.errf(v.Pos, "TY-TYP-0080", "cannot find symbol %s in %s", v.Name, ct.Class.Name)
 		v.SetType(ast.ErrorType{})

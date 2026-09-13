@@ -88,11 +88,17 @@ func (e *Emitter) boxCall(v string, p *ast.PrimType, dst ast.Type) string {
 	if fn == "" {
 		return v
 	}
+	// The formal a boxed argument is passed to is the *erased* one: an
+	// unbounded type variable erases to Object, a bounded one to its bound.
+	// coerce has already erased dst, so what arrives here is that reference
+	// type -- `Number` for `class Bag<T extends Number>` -- and not the box
+	// class the call site substituted. Boxing to the argument's own wrapper
+	// and casting to the erasure is what `M_Bag__init__0(C_Bag*,
+	// C_teyru_Number*)` expects; without the cast `new Bag<Integer>(7)`
+	// passes a bare `int` where the pointer goes.
 	switch d := dst.(type) {
 	case *ast.ClassType:
-		if d.Class.Special == "box" || d.Class.Special == "Object" {
-			return "(" + cname(d.Class) + "*)" + fn + "(" + v + ")"
-		}
+		return "(" + cname(d.Class) + "*)" + fn + "(" + v + ")"
 	case *ast.TypeVarType:
 		return "(void*)" + fn + "(" + v + ")"
 	}

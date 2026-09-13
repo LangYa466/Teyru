@@ -735,5 +735,10 @@ func (c *Class) IsInterface() bool { return c.Kind == KindInterface || c.Kind ==
 type TypeVar struct {
 	Name  string
 	Bound Type
-	ID    int
+	// Bounds holds every bound of an intersection (JLS 4.4: `<T extends A & B>`)
+	// with Bound kept equal to Bounds[0] for the single-bound call sites. A
+	// member of any bound is a member of the variable, so lookups walk the
+	// whole list; erasure is the leftmost bound, as the JLS requires.
+	Bounds []Type
+	ID     int
 }
