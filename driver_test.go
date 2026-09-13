@@ -99,6 +99,9 @@ func TestDiagnostics(t *testing.T) {
 		{"type", "class A {\n  public static void main(String[] args) {\n    int x = \"s\"\n  }\n}\n", "TY-TYP-0051"},
 		{"unknownName", "class A {\n  public static void main(String[] args) {\n    System.out.println(missing)\n  }\n}\n", "TY-TYP-0048"},
 		{"abstractMissing", "abstract class B {\n  abstract int f()\n}\nclass A extends B {\n  public static void main(String[] args) {\n  }\n}\n", "TY-TYP-0019"},
+		{"recursiveCtor", "class A {\n  A(int n) {\n    this(1)\n  }\n  A() {\n    this(2)\n  }\n}\nclass Main {\n  public static void main(String[] args) {\n    new A()\n  }\n}\n", "TY-TYP-0075"},
+		{"doubleSwitch", "class Main {\n  public static void main(String[] args) {\n    double d = 0.5\n    switch (d) {\n      case 1.5 -> System.out.println(\"x\")\n      default -> System.out.println(\"y\")\n    }\n  }\n}\n", "TY-TYP-0035"},
+		{"notExhaustive", "class Main {\n  public static void main(String[] args) {\n    int n = 7\n    String s = switch (n) {\n      case 1 -> \"one\"\n      case 2 -> \"two\"\n    }\n    System.out.println(s)\n  }\n}\n", "TY-TYP-0096"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
