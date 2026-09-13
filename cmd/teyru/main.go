@@ -34,9 +34,17 @@ flags:
 `
 
 func main() {
+	os.Exit(run())
+}
+
+// run does the work and returns the exit code. It is a function rather than the
+// body of main so that a deferred cleanup actually runs: os.Exit skips deferred
+// calls, and `teyru run` used to leave its compiled program and generated C
+// behind in the temporary directory on every invocation.
+func run() int {
 	if len(os.Args) < 2 {
 		fmt.Print(usage)
-		os.Exit(2)
+		return 2
 	}
 	cmd := os.Args[1]
 	args := os.Args[2:]
@@ -101,15 +109,15 @@ func main() {
 	switch cmd {
 	case "version", "--version", "-V":
 		fmt.Println(driver.Version())
-		return
+		return 0
 	case "help", "--help", "-h":
 		fmt.Print(usage)
-		return
+		return 0
 	case "build", "run", "emit", "emit-llvm":
 	default:
 		fmt.Fprintf(os.Stderr, "teyru: unknown command %q\n", cmd)
 		fmt.Print(usage)
-		os.Exit(2)
+		return 2
 	}
 
 	if cmd == "run" {
@@ -122,9 +130,13 @@ func main() {
 		opts.CFile = filepath.Join(dir, "program.c")
 	}
 	if cmd == "emit" {
-		opts.Out = filepath.Join(os.TempDir(), "teyru-emit")
-		opts.CFile = opts.Out + ".c"
+		// `emit` prints the generated C: it must not compile or link anything,
+		// and it must not leave a binary behind, so the C compiler is skipped.
+		// The C itself goes to the driver's temporary directory like every other
+		// build: a fixed path in the shared temporary directory is one
+		// concurrent emit away from handing back another program's source.
 		opts.EmitC = ""
+		opts.CSourceOnly = true
 	}
 	if cmd == "emit-llvm" {
 		dir, err := os.MkdirTemp("", "teyru-llvm-")
@@ -135,6 +147,10 @@ func main() {
 		opts.Out = filepath.Join(dir, "program")
 		opts.CFile = filepath.Join(dir, "program.c")
 		opts.EmitLLVM = filepath.Join(dir, "program.ll")
+		// the IR is written before the link step, and nobody looks at the
+		// executable an `emit-llvm` run would produce: asking for the IR used to
+		// fail outright when that unrequested link failed
+		opts.CSourceOnly = true
 	}
 
 	start := time.Now()
@@ -150,12 +166,7 @@ func main() {
 	}
 	switch cmd {
 	case "emit":
-		data, err := os.ReadFile(res.CFile)
-		if err != nil {
-			fail(err)
-		}
-		os.Stdout.Write(data)
-		os.Remove(res.CFile)
+		os.Stdout.WriteString(res.CSource)
 	case "emit-llvm":
 		data, err := os.ReadFile(res.LLVMFile)
 		if err != nil {
@@ -167,10 +178,14 @@ func main() {
 		if err != nil {
 			fail(err)
 		}
-		os.Exit(code)
+		if code >= 128 && code < 256 {
+			fmt.Fprintf(os.Stderr, "teyru: the program was killed by signal %d\n", code-128)
+		}
+		return code
 	default:
 		fmt.Println(res.Exe)
 	}
+	return 0
 }
 
 func fail(err error) {

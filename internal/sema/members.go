@@ -259,7 +259,12 @@ func (c *Checker) resolveMembers(cl *ast.Class) {
 			if cd.Implicit && !d.IsCtor && d.Name != "main" {
 				m.Mods |= ast.ModStatic
 			}
-			if cd.Implicit && d.Name == "main" && len(d.Params) == 0 {
+			// In a compact source file every member is a static member of the
+			// implicit class, main included, whether or not it takes the
+			// `String[] args` parameter. Leaving main non-static delegated the
+			// entry point to codegen's instance-main path, which does not
+			// compile the String[] form (emit.go's `_main_obj` value cast).
+			if cd.Implicit && d.Name == "main" {
 				m.Mods |= ast.ModStatic
 			}
 			if d.IsCtor {
@@ -307,6 +312,36 @@ func (c *Checker) resolveMembers(cl *ast.Class) {
 			fs.Mods |= ast.ModStatic
 		}
 	}
+	c.checkNativeSymbols(cl)
+}
+
+// checkNativeSymbols rejects two native methods of one class that would have to
+// share a single C symbol: the linker would bind both to one definition and one
+// of the overloads would silently run the other's code.
+//
+// The encodings nativeParam produces are injective for the types the language
+// has today, so this is a backstop rather than a path a program is expected to
+// reach: it is what keeps a future type, or a class whose name reads like an
+// array descriptor (`A[]` and a class called `AA` both encode to `AA`), from
+// turning into a wrong answer at run time.
+func (c *Checker) checkNativeSymbols(cl *ast.Class) {
+	seen := map[string]*ast.Method{}
+	var all []*ast.Method
+	for _, name := range sortedMethodNames(cl) {
+		all = append(all, cl.Methods[name]...)
+	}
+	all = append(all, cl.Ctors...)
+	for _, m := range all {
+		if m == nil || !m.Mods.Has(ast.ModNative) || m.Native == "" {
+			continue
+		}
+		if prev, ok := seen[m.Native]; ok {
+			c.errf(m.Pos, "TY-TYP-0097", "native methods %s and %s both need the C symbol %s",
+				describeMethod(prev), describeMethod(m), m.Native)
+			continue
+		}
+		seen[m.Native] = m
+	}
 }
 
 func (c *Checker) addCtor(cl *ast.Class, m *ast.Method) {
@@ -332,6 +367,9 @@ func hasMethodDecl(cd *ast.ClassDecl, name string, nparams int) bool {
 }
 
 // nativeName is the C symbol the runtime must provide for a native method.
+//
+// The symbol has to tell two overloads apart, so the parameter descriptors are
+// part of it; nativeParam renders one parameter.
 func nativeName(cl *ast.Class, m *ast.Method) string {
 	var b strings.Builder
 	b.WriteString("tyn_")
@@ -340,9 +378,27 @@ func nativeName(cl *ast.Class, m *ast.Method) string {
 	b.WriteString(util.Mangle(m.Name))
 	for _, p := range m.Params {
 		b.WriteByte('_')
-		b.WriteString(util.Descriptor(p))
+		b.WriteString(nativeParam(p))
 	}
 	return b.String()
+}
+
+// nativeParam is the symbol component of one parameter type: a primitive keeps
+// its single letter and a class its simple name, but an array carries its
+// element descriptor after the `A`.
+//
+// A bare `A` for every array (which is what util.Descriptor renders) is not
+// injective: `size(int[])`, `size(A)` and `size(A[])` all became
+// tyn_Foo_size_A, so two overloads shared one C function and one of them ran
+// the other's code. `int[]` is `AI` and `int[][]` is `AAI` now. Primitive,
+// class and type-variable parameters keep their encoding, so the symbols
+// tests/native and docs/native.md prescribe for those still hold; the table in
+// docs/native.md has to say `A` plus the element descriptor for arrays.
+func nativeParam(t ast.Type) string {
+	if at, ok := t.(*ast.ArrayType); ok {
+		return "A" + nativeParam(at.Elem)
+	}
+	return util.Descriptor(t)
 }
 
 func (c *Checker) resolveFieldDecl(cl *ast.Class, env *typeEnv, d *ast.FieldDecl, isIface bool) {

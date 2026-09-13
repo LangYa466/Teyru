@@ -1,0 +1,32 @@
+// Object.getClass() hands back a real Class object: it can be printed, asked
+// for its name, and compared with ==. Printing it used to kill the process,
+// because the runtime returned the raw tyclass* where the printing path
+// (ty_str_of_obj) expects an object with a class pointer and a vtable.
+//
+// `println(s.getClass())` prints the bare class name. Java prints "class Shape"
+// there: java.lang.Class.toString is "class " + getName, while the prelude
+// writes Class.toString as getName (lib/01_core.teyru).
+class Shape {
+  public Shape() {
+  }
+}
+
+class Circle extends Shape {
+  public Circle() {
+  }
+}
+
+class Main {
+  public static void main(String[] args) {
+    Shape s = new Shape()
+    Shape c = new Circle()
+    System.out.println(s.getClass().getName())
+    System.out.println(c.getClass().getName())
+    System.out.println(s.getClass())
+    System.out.println(s.getClass().toString())
+    System.out.println(s.getClass() == s.getClass())
+    System.out.println(s.getClass() == c.getClass())
+    System.out.println(c.getClass() == s.getClass())
+    System.out.println("name length: " + s.getClass().getName().length())
+  }
+}

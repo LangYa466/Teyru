@@ -1,0 +1,93 @@
+==================
+a sealed interface permits its implementations
+==================
+
+sealed interface Shape permits Circle, Square, Dot {
+  double area()
+}
+
+---
+
+(source_file
+  (interface_declaration
+    (modifiers)
+    (identifier)
+    (permits_clause
+      (scoped_identifier
+        (identifier))
+      (scoped_identifier
+        (identifier))
+      (scoped_identifier
+        (identifier)))
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters)))))
+
+==================
+final and non-sealed implementations
+==================
+
+sealed interface Vehicle permits Car, Bike {
+  int wheels()
+}
+
+final class Car implements Vehicle {
+  public int wheels() {
+    return 4
+  }
+}
+
+non-sealed class Bike implements Vehicle {
+  public int wheels() {
+    return 2
+  }
+}
+
+---
+
+(source_file
+  (interface_declaration
+    (modifiers)
+    (identifier)
+    (permits_clause
+      (scoped_identifier
+        (identifier))
+      (scoped_identifier
+        (identifier)))
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters))))
+  (class_declaration
+    (modifiers)
+    (identifier)
+    (super_interfaces
+      (scoped_identifier
+        (identifier)))
+    (class_body
+      (method_declaration
+        (modifiers)
+        (primitive_type)
+        (identifier)
+        (formal_parameters)
+        (block
+          (return_statement
+            (decimal_integer_literal))))))
+  (class_declaration
+    (modifiers)
+    (identifier)
+    (super_interfaces
+      (scoped_identifier
+        (identifier)))
+    (class_body
+      (method_declaration
+        (modifiers)
+        (primitive_type)
+        (identifier)
+        (formal_parameters)
+        (block
+          (return_statement
+            (decimal_integer_literal)))))))

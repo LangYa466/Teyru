@@ -16,7 +16,8 @@
 hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be converted to int
 ```
 
-`TY-SYN-0001` 到 `TY-SYN-0010` 由詞法分析器產生，`TY-SYN-0100` 之後由剖析器產生。
+`TY-SYN-0001`、`0002`、`0004`–`0011` 由詞法分析器產生（`TY-SYN-0003` 例外：它是剖析器
+在敘述結尾與 `throw` 換行時發出的），`TY-SYN-0100` 之後也由剖析器產生。
 
 ---
 
@@ -33,7 +34,8 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 | TY-SYN-0007 | `text block must start with a line break after """` | `"""` 之後必須立刻換行。 |
 | TY-SYN-0008 | `unterminated character literal`／`character literal does not fit in a char` | 字元常值沒有收尾，或超過 U+FFFF。 |
 | TY-SYN-0009 | `malformed integer literal`／`malformed floating-point literal` | 數字格式錯誤（例如 `0x` 後面沒有數字、`1e` 沒有指數）。 |
-| TY-SYN-0010 | `integer literal out of range` | 整數字面值超出 `int`／`long` 範圍，請加 `L` 後綴。 |
+| TY-SYN-0010 | `integer literal out of range` | 整數字面值超出可表示的位元數：十進位 `int` 上限 2^31、`long` 上限 2^63，非十進位 `int` 上限 `0xFFFFFFFF`、`long` 上限 `0xFFFFFFFFFFFFFFFF`（界線值會繞成負數）。需要更大的值請加 `L` 後綴。 |
+| TY-SYN-0011 | `invalid escape sequence \%c` | 字串或字元常值裡有 Teyru 不認識的跳脫序列（例如 `\q`）。合法的有 `\n` `\t` `\r` `\b` `\f` `\0` `\\` `\'` `\"`、八進位 `\nnn` 與 `\uXXXX`。 |
 | TY-SYN-0100 | `expected '%s', found %s` | 少了預期的 token（`)`、`]`、`{`、`}`、`:` 等）。 |
 | TY-SYN-0101 | `expected identifier, found %s` | 需要識別字的位置放了別的東西；常見於把關鍵字當名稱使用。 |
 | TY-SYN-0102 | `unexpected %s at top level` | 檔案最上層只允許 package／import／型別宣告，或直接寫成員（隱式類別形式）。 |
@@ -150,7 +152,7 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 | TY-TYP-0074 | `constructor call must be the first statement of a constructor` | `this(...)`／`super(...)` 必須是第一句。 |
 | TY-TYP-0075 | `recursive constructor invocation` | 建構子遞迴呼叫自己。 |
 
-### 方法解析與 lambda（0076–0086）
+### 方法解析、lambda 與 pattern（0076–0094）
 
 | 代碼 | 訊息 | 說明與修法 |
 |---|---|---|
@@ -165,9 +167,17 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 | TY-TYP-0084 | `lambda has %d parameters but %s requires %d` | lambda 參數數量不符。 |
 | TY-TYP-0085 | `cannot construct %s` | 建構子參照的目標不能建構。 |
 | TY-TYP-0086 | `cannot resolve static import %s` | 靜態 import 找不到對應成員。 |
+| TY-TYP-0087 | `record pattern requires a record type, found %s` | 解構 pattern 的左邊不是 record 型別（`case Point(int x, int y)` 的 `Point` 必須是 record）。 |
+| TY-TYP-0088 | `record pattern for %s needs %d components, found %d` | 解構的綁定數量與 record 成員數不符；巢狀解構也要逐一對上。 |
+| TY-TYP-0089 | `'case null' requires a reference selector` | `case null` 只能用在參考型別的 switch 選擇子上，原生型別請改用 `default`。 |
+| TY-TYP-0090 | `%s does not name a super interface` | `Interface.super.method()` 的 `Interface` 不存在或不是介面。 |
+| TY-TYP-0091 | `%s is not a super interface of %s` | 限定的 `super` 只能指向自己（直接或間接）實作的介面。 |
 | TY-TYP-0092 | `a primitive pattern needs a name to bind the value to` | 原生型別 pattern 一定要綁定變數：`o instanceof int i`，不能只寫 `o instanceof int`。 |
 | TY-TYP-0093 | `boolean cannot be converted to %s` | `boolean` 只能和 `boolean` pattern 配對。 |
 | TY-TYP-0094 | `primitive pattern %s needs a boxed value, found %s` | 選擇子既不是參考型別也不是原生數值。 |
+| TY-TYP-0095 | `cannot infer the type arguments of %s(%s)` | 泛型方法的型別引數推不出來：沒有帶型別的引數，也沒有目標型別可用（lambda 參數最常見）。寫出型別引數或給一個有型別的引數。 |
+| TY-TYP-0096 | `switch expression does not cover all possible input values` | switch **運算式**必須窮盡：`int`／`String` 選擇子一定要有 `default`，列舉選擇子要涵蓋每一個常數。switch 陳述式不受此限。 |
+| TY-TYP-0097 | `native methods %s and %s both need the C symbol %s` | 兩個多載 native 方法編碼後得到同一個 C 符號（例如類別名 `AI` 與 `int[]`）。改名或改參數型別。 |
 
 ## TY-PROP：原生 property
 
@@ -198,8 +208,10 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 
 | 例外 | 觸發時機 |
 |---|---|
-| `NullPointerException` | 對 `null` 取值、呼叫方法、取陣列長度 |
-| `ArrayIndexOutOfBoundsException` | 索引超出 `[0, length)` |
+| `NullPointerException` | 對 `null` 拆箱，或呼叫執行期提供的方法（`String` 的方法、`clone()`、介面方法）；對 `null` 讀欄位、索引陣列或做虛擬呼叫則不檢查，會直接 SIGSEGV |
+| `ArrayIndexOutOfBoundsException` | 陣列索引超出 `[0, length)`；對 `null` 陣列取 `length` 也走這個（`index 0 out of bounds for length 0`） |
+| `IndexOutOfBoundsException` | `ArrayList.get`／`set`／`removeAt` 的索引超出 `[0, size)` |
+| `NoSuchElementException` | 已經沒有元素卻再呼叫 `Iterator.next()` |
 | `ArithmeticException` | 整數除以零或取餘數為零 |
 | `ClassCastException` | `cast` 或 `instanceof` 失敗的強制轉型 |
 | `NegativeArraySizeException` | 陣列長度為負 |

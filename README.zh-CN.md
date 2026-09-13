@@ -6,7 +6,7 @@
 
 Teyru 的语法对 Java 开发者非常熟悉（类、接口、泛型、lambda、异常、record、enum、annotation），
 但去掉了分号、加入了原生 property，并且以**原生机器码**运行：编译器把整个程序降级为 C，
-再交给 clang/LLVM（或 gcc）编译成可执行文件。运行时只有大约两千行 C，其中包含自己的垃圾回收器
+再交给 clang/LLVM（或 gcc）编译成可执行文件。运行时只有约 1500 行 C，其中包含自己的垃圾回收器
 （conservative mark-and-sweep）、字符串、数组与异常实现，没有任何虚拟机。
 
 ```
@@ -31,6 +31,7 @@ Teyru 源码 (.teyru)
 - [语言速览](#语言速览)
 - [支持的语言特性](#支持的语言特性)
 - [标准库](#标准库)
+- [编辑器与工具](#编辑器与工具)
 - [项目结构](#项目结构)
 - [运行时模型](#运行时模型)
 - [与 Java 的差异](#与-java-的差异)
@@ -47,13 +48,13 @@ Teyru 源码 (.teyru)
 | 指标 | Teyru（原生） | Java（HotSpot） | 差距 |
 |---|---|---|---|
 | 启动 100 次总时间 | **0.068 s**（0.68 ms/次） | 1.97 s（19.8 ms/次） | **约 29 倍快** |
-| 可执行文件大小 | **33 KB** | JDK 运行时约 200 MB | 约 6000 倍小 |
+| 可执行文件大小 | **35 KB** | JDK 运行时约 200 MB | 约 5900 倍小 |
 | 峰值内存（hello） | **2.1 MB** | 50.2 MB | **约 24 倍省** |
-| `bench_fib` 递归 | **0.0060 s** | 0.0259 s | **4.3 倍快** |
-| `bench_loop` 循环与整数运算 | **0.0208 s** | 0.0430 s | **2.1 倍快** |
-| `bench_oop` 对象与虚调用 | **0.0044 s** | 0.0261 s | **5.9 倍快** |
-| `bench_string` 字符串处理 | **0.0096 s** | 0.0542 s | **5.7 倍快** |
-| `bench_alloc` 短命对象分配 | **0.0232 s** | 0.0288 s | **1.24 倍快** |
+| `bench_fib` 递归 | **0.0060 s** | 0.0264 s | **4.4 倍快** |
+| `bench_loop` 循环与整数运算 | **0.0209 s** | 0.0429 s | **2.1 倍快** |
+| `bench_oop` 对象与虚调用 | **0.0044 s** | 0.0253 s | **5.8 倍快** |
+| `bench_string` 字符串处理 | **0.0093 s** | 0.0554 s | **6.0 倍快** |
+| `bench_alloc` 短命对象分配 | **0.0233 s** | 0.0308 s | **1.3 倍快** |
 
 **为什么快：**
 
@@ -72,13 +73,15 @@ Teyru 源码 (.teyru)
 **诚实的边界。** 逃逸分析只覆盖“不离开所在方法”的对象。会存进字段、数组、返回或
 交给其他对象的对象仍然走堆与标记清除回收，而 HotSpot 有分代假设，所以在“对象长期
 存活、反复回收”的负载上 JVM 仍可能胜出。上面的数字都包含 process 启动，绝对值都很
-小；重现方式见 `sh scripts/bench.sh`。
+小；重现方式见 `sh scripts/bench.sh`，五支 benchmark 程序、启动 100 次、可执行文件大小
+与峰值内存都由这支脚本测量（大小那一列对照的 JDK 运行时是测量机器上安装的运行时，
+不由脚本测量）。
 
 ---
 
 ## 快速开始
 
-需要 **Go 1.24+** 与 **clang**（或 gcc）。
+需要 **Go 1.26+** 与 **clang**（或 gcc）。
 
 ```sh
 # 构建编译器
@@ -229,6 +232,10 @@ class Main {
 类型检查与代码生成路径，不需要 annotation processor。
 
 ```teyru
+import lombok.Data
+import lombok.AllArgsConstructor
+import lombok.Builder
+
 @Data
 @AllArgsConstructor
 @Builder
@@ -237,8 +244,13 @@ class Person {
   private int age
 }
 
-Person p = Person.builder().name("ada").age(36).build()
-System.out.println(p.getName() + " " + p.getAge())
+class Main {
+  public static void main(String[] args) {
+    Person p = Person.builder().name("ada").age(36).build()
+    System.out.println(p.getName() + " " + p.getAge())
+    System.out.println(p)
+  }
+}
 ```
 
 完整清单与差异见 **[docs/lombok.md](docs/lombok.md)**：`@Getter`／`@Setter`／`@ToString`／
@@ -257,8 +269,8 @@ Teyru 以 Java SE 25 最终定案的语法为基准（不含预览功能），�
 `println`／`print`／`readln`）、JEP 511 模块导入、JEP 513 弹性构造器本体、
 JEP 440 record 模式、JEP 441 switch 模式与 `when` 守卫、JEP 456 未命名变量 `_`、
 JEP 507 原生类型 pattern（`case int i`、`o instanceof int i`，精确转换）、
-JEP 395 record、JEP 394 `instanceof` 模式、JEP 378 文本块、JEP 361 switch 表达式、
-JEP 286 `var`。
+JEP 395 record、JEP 394 `instanceof` 模式、JEP 409 sealed 类（`sealed`／`permits`／
+`non-sealed`）、JEP 378 文本块、JEP 361 switch 表达式、JEP 286 `var`。
 
 ### 支持的语言特性
 
@@ -282,10 +294,11 @@ JEP 286 `var`。
 `Object`、`String`、`StringBuilder`、`Math`、`System`、`PrintStream`、
 `Iterable`／`Iterator`、`Comparable`、`AutoCloseable`、`Cloneable`、`Enum`、`Record`、
 八种原生包装类（`Byte`／`Short`／`Integer`／`Long`／`Float`／`Double`／`Character`／`Boolean`）、
-集合（`List`／`ArrayList`／`HashMap`），以及 `Throwable` 家族（`Exception`、`RuntimeException`、`NullPointerException`、
+集合（`List`／`ArrayList`／`Map`／`HashMap`），以及 `Throwable` 家族（`Exception`、`RuntimeException`、`NullPointerException`、
 `ArrayIndexOutOfBoundsException`、`ArithmeticException`、`ClassCastException`、
-`IllegalArgumentException`、`IllegalStateException`、`NoSuchElementException`、
-`NegativeArraySizeException`、`AssertionError`、`UnsupportedOperationException`）。
+`IllegalArgumentException`、`IllegalStateException`、`IndexOutOfBoundsException`、
+`NoSuchElementException`、`NegativeArraySizeException`、`AssertionError`、
+`UnsupportedOperationException`）。
 
 `ArrayList` 实现 `Iterable`，所以 `for (String s : names)` 与 Java 写法一致。
 没有 `printf`、没有文件 I/O——这些仍是刻意的范围限制。
@@ -300,11 +313,23 @@ teyru build --native impl.c program.teyru            # 一起编译
 
 ---
 
+## 编辑器与工具
+
+- **VS Code**：`editors/vscode/` 提供 `.teyru` 的 TextMate 语法高亮、语言配置与片段。
+  用 `npx @vscode/vsce package` 打包，再用 `code --install-extension teyru-0.1.0.vsix` 安装。
+- **tree-sitter**：`editors/tree-sitter-teyru/` 是完整文法，附高亮 query、缩进 query
+  与 corpus 测试，Neovim、Helix、Zed 等可直接使用。
+- GitHub 目前仍把 `.teyru` 显示为 Java：linguist 还没有 Teyru 的定义，
+  `.gitattributes` 先映射到最接近的语法。
+
+---
+
 ## 项目结构
 
 | 路径 | 说明 |
 |---|---|
 | `cmd/teyru` | CLI 入口（`build`／`run`／`emit`／`emit-llvm`／`version`） |
+| `internal/driver` | 编译流程：串起前端与 C 后端、调用 C 编译器、处理 native 源文件与输出选项 |
 | `internal/source` | 文件、位置换算、诊断容器 |
 | `internal/lexer` | 词法分析；换行不产生 token，只在 token 上标记“前面有换行” |
 | `internal/parser` | 递归下降解析器，用显著性与前缀完整性判断语句是否结束 |
@@ -315,9 +340,11 @@ teyru build --native impl.c program.teyru            # 一起编译
 | `internal/runtime/src` | C 运行时：GC、字符串、数组、异常、boxing、Math／System／StringBuilder |
 | `lib` | 用 Teyru 编写的标准库 |
 | `tests/programs` | 端到端测试程序与期望输出（`go test` 会逐一编译并比对） |
+| `tests/native` | native 方法互通测试：Teyru 声明、C 实现与期望输出（`TestNative`） |
 | `examples` | 示例程序与 JVM 对照的 benchmark（`bench_*.teyru` 与 `.java`） |
 | `scripts` | 开发脚本：`bench.sh` 性能测量、`pre-commit` 钩子 |
 | `docs` | 语言参考、诊断码、架构 |
+| `editors` | 编辑器支持：VS Code 扩展与 tree-sitter 文法 |
 
 ---
 
@@ -394,7 +421,9 @@ sh scripts/bench.sh       # 与 JVM 对照的性能测试（需要 java 才会�
 ```
 
 新增测试只需在 `tests/programs/` 放 `xxx.teyru` 与 `xxx.expected`；
-若程序需要命令行参数，再放 `xxx.args`（每行一个参数）。`go test` 会自动处理。
+若程序需要命令行参数，再放 `xxx.args`（每行一个参数）；程序如果**应该**失败，
+用 `xxx.exit` 写它必须结束时的状态码、`xxx.experr` 写它应该输出到 stderr 的内容。
+`go test` 会自动处理。
 
 贡献前请读 [AGENTS.md](AGENTS.md)。
 

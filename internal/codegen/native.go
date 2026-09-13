@@ -16,6 +16,68 @@ import (
 type nativeFn struct {
 	fn   string // C helper
 	recv string // C cast applied to the receiver ("" for static methods)
+	// classHint names a prelude class whose generated tyclass the call site
+	// passes to fn as a trailing argument. Object.getClass() needs it: the
+	// runtime builds a Class object from a tyclass this header-less C file
+	// cannot name.
+	classHint string
+}
+
+// streamTwin is the stream-aware twin of a PrintStream print helper: the same
+// output, written to whichever descriptor the receiver names.
+type streamTwin struct {
+	name  string // C helper taking the receiver first
+	proto string // its prototype, repeated at the call site
+}
+
+// printStreamClass is the prelude class whose print methods are stream aware.
+const printStreamClass = "teyru.PrintStream"
+
+// classOfProto is the prototype of the helper Object.getClass() calls. It is
+// not in tyrt.h because the generated program is the only caller.
+const classOfProto = "void *ty_class_of_cls(void *, tyclass *)"
+
+// streamTwins maps a stdout helper onto its stream-aware twin, which takes the
+// PrintStream as its first argument and writes to the descriptor in the
+// stream's `target` field. The helpers are not declared in tyrt.h (the shared
+// header is not this package's to change), so the call site declares them
+// inline -- the same statement-expression idiom the generated code already uses
+// for temporaries.
+var streamTwins = map[string]streamTwin{
+	"ty_println_void":   {"ty_ps_println_void", "void ty_ps_println_void(void *)"},
+	"ty_println_str":    {"ty_ps_println_str", "void ty_ps_println_str(void *, tystr *)"},
+	"ty_println_int":    {"ty_ps_println_int", "void ty_ps_println_int(void *, int64_t)"},
+	"ty_println_double": {"ty_ps_println_double", "void ty_ps_println_double(void *, double)"},
+	"ty_println_float":  {"ty_ps_println_float", "void ty_ps_println_float(void *, float)"},
+	"ty_println_bool":   {"ty_ps_println_bool", "void ty_ps_println_bool(void *, int32_t)"},
+	"ty_println_char":   {"ty_ps_println_char", "void ty_ps_println_char(void *, uint16_t)"},
+	"ty_println_obj":    {"ty_ps_println_obj", "void ty_ps_println_obj(void *, void *)"},
+	"ty_print_str":      {"ty_ps_print_str", "void ty_ps_print_str(void *, tystr *)"},
+	"ty_print_int":      {"ty_ps_print_int", "void ty_ps_print_int(void *, int64_t)"},
+	"ty_print_double":   {"ty_ps_print_double", "void ty_ps_print_double(void *, double)"},
+	"ty_print_float":    {"ty_ps_print_float", "void ty_ps_print_float(void *, float)"},
+	"ty_print_bool":     {"ty_ps_print_bool", "void ty_ps_print_bool(void *, int32_t)"},
+	"ty_print_char":     {"ty_ps_print_char", "void ty_ps_print_char(void *, uint16_t)"},
+	"ty_print_obj":      {"ty_ps_print_obj", "void ty_ps_print_obj(void *, void *)"},
+}
+
+// psTwin is the stream-aware twin of a PrintStream print method, or nil when
+// the method is not one. A class that extends PrintStream forces codegen down
+// the stub path (emit_synth builds that call from the table entry alone and
+// cannot declare the twin, so nf.fn has to be a function tyrt.h already
+// declares), and in such a program every stream writes to stdout again --
+// System.err included, because its receiver is a PrintStream too. That is what
+// the language did before the field existed, so no program gets worse; the
+// complete fix is to declare the twins in tyrt.h and point the table entries at
+// them, which is a change to a header this package does not own.
+func (e *Emitter) psTwin(m *ast.Method, nf nativeFn) *streamTwin {
+	if m.Owner == nil || m.Owner != e.prog.LookupClass(printStreamClass) {
+		return nil
+	}
+	if t, ok := streamTwins[nf.fn]; ok {
+		return &t
+	}
+	return nil
 }
 
 // specialNew maps classes whose allocation is owned by the runtime.
@@ -28,7 +90,7 @@ var nativeTable = map[string]nativeFn{
 	"Object.toString()":     {fn: "ty_object_tostring", recv: "void*"},
 	"Object.hashCode()":     {fn: "ty_obj_hash", recv: "void*"},
 	"Object.equals(Object)": {fn: "ty_obj_eq", recv: "void*"},
-	"Object.getClass()":     {fn: "ty_class_of", recv: "void*"},
+	"Object.getClass()":     {fn: "ty_class_of", recv: "void*", classHint: "teyru.Class"},
 	"Class.getName()":       {fn: "ty_class_name", recv: "void*"},
 	"Class.toString()":      {fn: "ty_class_name", recv: "void*"},
 
@@ -52,16 +114,27 @@ var nativeTable = map[string]nativeFn{
 	"String.compareTo(String)":  {fn: "ty_str_cmp", recv: "tystr*"},
 	"String.concat(String)":     {fn: "ty_str_concat", recv: "tystr*"},
 	"String.toString()":         {fn: "ty_str_ident", recv: "tystr*"},
-	"String.(String)":           {fn: "ty_str_copy", recv: "tystr*"},
-	"String.valueOf(I)":         {fn: "ty_str_of_int"},
-	"String.valueOf(J)":         {fn: "ty_str_of_long"},
-	"String.valueOf(D)":         {fn: "ty_str_of_double"},
-	"String.valueOf(F)":         {fn: "ty_str_of_float"},
-	"String.valueOf(Z)":         {fn: "ty_str_of_bool"},
-	"String.valueOf(C)":         {fn: "ty_str_of_char"},
-	"String.valueOf(Object)":    {fn: "ty_str_of_obj"},
+	// constructors are named <init> by the parser
+	"String.<init>(String)":  {fn: "ty_str_copy", recv: "tystr*"},
+	"String.valueOf(I)":      {fn: "ty_str_of_int"},
+	"String.valueOf(J)":      {fn: "ty_str_of_long"},
+	"String.valueOf(D)":      {fn: "ty_str_of_double"},
+	"String.valueOf(F)":      {fn: "ty_str_of_float"},
+	"String.valueOf(Z)":      {fn: "ty_str_of_bool"},
+	"String.valueOf(C)":      {fn: "ty_str_of_char"},
+	"String.valueOf(Object)": {fn: "ty_str_of_obj"},
 
 	// ---- boxed primitives
+	"Byte.valueOf(B)":  {fn: "ty_box_byte"},
+	"Byte.byteValue()": {fn: "ty_unbox_byte", recv: "void*"},
+	"Byte.hashCode()":  {fn: "ty_unbox_byte", recv: "void*"},
+	"Byte.toString()":  {fn: "ty_byte_tostr", recv: "void*"},
+
+	"Short.valueOf(S)":   {fn: "ty_box_short"},
+	"Short.shortValue()": {fn: "ty_unbox_short", recv: "void*"},
+	"Short.hashCode()":   {fn: "ty_unbox_short", recv: "void*"},
+	"Short.toString()":   {fn: "ty_short_tostr", recv: "void*"},
+
 	"Integer.intValue()":         {fn: "ty_unbox_int", recv: "void*"},
 	"Integer.valueOf(I)":         {fn: "ty_box_int"},
 	"Integer.parseInt(String)":   {fn: "ty_str_toint", recv: "tystr*"},
@@ -82,6 +155,7 @@ var nativeTable = map[string]nativeFn{
 	"Long.toString(J)":       {fn: "ty_str_of_long"},
 	"Long.hashCode()":        {fn: "ty_long_hash", recv: "void*"},
 	"Long.equals(Object)":    {fn: "ty_long_equals", recv: "void*"},
+	"Long.compareTo(Long)":   {fn: "ty_long_compare_obj", recv: "void*"},
 	"Long.compare(J,J)":      {fn: "ty_prim_cmp_long"},
 	"Long.max(J,J)":          {fn: "ty_max_long"},
 	"Long.min(J,J)":          {fn: "ty_min_long"},
@@ -94,6 +168,7 @@ var nativeTable = map[string]nativeFn{
 	"Double.toString(D)":         {fn: "ty_str_of_double"},
 	"Double.hashCode()":          {fn: "ty_double_hash", recv: "void*"},
 	"Double.equals(Object)":      {fn: "ty_double_equals", recv: "void*"},
+	"Double.compareTo(Double)":   {fn: "ty_double_compare_obj", recv: "void*"},
 	"Double.compare(D,D)":        {fn: "ty_double_compare"},
 	"Double.isNaN(D)":            {fn: "ty_isnan"},
 
@@ -101,6 +176,10 @@ var nativeTable = map[string]nativeFn{
 	"Float.valueOf(F)":         {fn: "ty_box_float"},
 	"Float.toString()":         {fn: "ty_float_tostr", recv: "void*"},
 	"Float.parseFloat(String)": {fn: "ty_str_tofloat", recv: "tystr*"},
+	"Float.hashCode()":         {fn: "ty_float_hash", recv: "void*"},
+	"Float.equals(Object)":     {fn: "ty_float_equals", recv: "void*"},
+	"Float.compareTo(Float)":   {fn: "ty_float_compare_obj", recv: "void*"},
+	"Float.compare(F,F)":       {fn: "ty_float_compare"},
 
 	"Boolean.booleanValue()":       {fn: "ty_unbox_bool", recv: "void*"},
 	"Boolean.valueOf(Z)":           {fn: "ty_box_bool"},
@@ -109,12 +188,15 @@ var nativeTable = map[string]nativeFn{
 	"Boolean.hashCode()":           {fn: "ty_unbox_bool", recv: "void*"},
 	"Boolean.equals(Object)":       {fn: "ty_bool_equals", recv: "void*"},
 
-	"Character.charValue()":     {fn: "ty_unbox_char", recv: "void*"},
-	"Character.valueOf(C)":      {fn: "ty_box_char"},
-	"Character.isDigit(C)":      {fn: "ty_is_digit"},
-	"Character.isLetter(C)":     {fn: "ty_is_letter"},
-	"Character.isWhitespace(C)": {fn: "ty_is_space"},
-	"Character.toString()":      {fn: "ty_char_tostr", recv: "void*"},
+	"Character.charValue()":          {fn: "ty_unbox_char", recv: "void*"},
+	"Character.valueOf(C)":           {fn: "ty_box_char"},
+	"Character.isDigit(C)":           {fn: "ty_is_digit"},
+	"Character.isLetter(C)":          {fn: "ty_is_letter"},
+	"Character.isWhitespace(C)":      {fn: "ty_is_space"},
+	"Character.toString()":           {fn: "ty_char_tostr", recv: "void*"},
+	"Character.hashCode()":           {fn: "ty_char_hash", recv: "void*"},
+	"Character.equals(Object)":       {fn: "ty_char_equals", recv: "void*"},
+	"Character.compareTo(Character)": {fn: "ty_char_compare_obj", recv: "void*"},
 
 	// ---- Math
 	"Math.abs(I)":   {fn: "ty_abs_int"},
@@ -204,7 +286,6 @@ func (e *Emitter) nativeCall(m *ast.Method, recv string, args []ast.Expr) string
 	if !ok {
 		return "0"
 	}
-	var parts []string
 	vals := make([]string, 0, len(args))
 	for i, a := range args {
 		var want ast.Type
@@ -213,16 +294,32 @@ func (e *Emitter) nativeCall(m *ast.Method, recv string, args []ast.Expr) string
 		}
 		vals = append(vals, e.coerce(e.expr(a), a.GetType(), want))
 	}
-	if m.IsStatic() {
-		// for static natives the cast describes the first argument
-		if nf.recv != "" && len(vals) > 0 {
-			vals[0] = "(" + nf.recv + ")" + vals[0]
+	var call string
+	if t := e.psTwin(m, nf); t != nil {
+		// The receiver comes first: which descriptor the text goes to is a
+		// property of the PrintStream object, not of the method.
+		body := t.name + "(" + strings.Join(append([]string{"(void*)" + recv}, vals...), ", ") + ")"
+		call = "({ extern " + t.proto + "; " + body + "; })"
+	} else if nf.classHint != "" && e.prog.LookupClass(nf.classHint) != nil {
+		// getClass hands the runtime the tyclass of this program's Class, so
+		// that the object it returns is an instance of it.
+		cl := e.prog.LookupClass(nf.classHint)
+		all := append([]string{"(void*)" + recv}, vals...)
+		all = append(all, "(void*)&cls_"+mangle(cl.Full))
+		call = "({ extern " + classOfProto + "; ty_class_of_cls(" + strings.Join(all, ", ") + "); })"
+	} else {
+		var parts []string
+		if m.IsStatic() {
+			// for static natives the cast describes the first argument
+			if nf.recv != "" && len(vals) > 0 {
+				vals[0] = "(" + nf.recv + ")" + vals[0]
+			}
+		} else if nf.recv != "" {
+			parts = append(parts, "("+nf.recv+")"+recv)
 		}
-	} else if nf.recv != "" {
-		parts = append(parts, "("+nf.recv+")"+recv)
+		parts = append(parts, vals...)
+		call = nf.fn + "(" + strings.Join(parts, ", ") + ")"
 	}
-	parts = append(parts, vals...)
-	call := nf.fn + "(" + strings.Join(parts, ", ") + ")"
 	if e.isRef(m.Result) {
 		return "(" + e.ctype(m.Result) + ")" + call
 	}
@@ -336,6 +433,20 @@ func (e *Emitter) nativeDecls() []NativeDecl {
 					Method:    cl.Full + "." + m.Name,
 				})
 			}
+		}
+		// Constructors are not in cl.Methods (they are named <init> and live in
+		// cl.Ctors), but a native constructor links against tyn_Class__init__...
+		// like any other native method: leaving them out made the linker ask for
+		// a symbol the header never declared.
+		for _, m := range cl.Ctors {
+			if !m.External || seen[m.Native] {
+				continue
+			}
+			seen[m.Native] = true
+			out = append(out, NativeDecl{
+				Signature: e.nativeSignature(m),
+				Method:    cl.Full + "." + cl.Name,
+			})
 		}
 	}
 	return out

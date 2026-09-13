@@ -25,7 +25,7 @@ type Program struct {
 type Builtins struct {
 	Object, String, Enum, Record, Throwable, Iterable, Iterator, StringBuilder *ast.Class
 	AutoCloseable, Cloneable, Comparable                                       *ast.Class
-	IllArg, IllState, NoSuchElem, Unsup                                        *ast.Class
+	IllArg, IllState, NoSuchElem, Unsup, ArrayStore                            *ast.Class
 	NPE, AIOOBE, Arith, CCE, NegArr, Assertion                                 *ast.Class
 	Boxes                                                                      map[ast.PrimKind]*ast.Class
 	Unbox                                                                      map[*ast.Class]ast.PrimKind
@@ -52,9 +52,6 @@ type Checker struct {
 	arrCls     *ast.Class
 	extensions map[*ast.Class][]*ast.Class
 }
-
-// c keeps a back pointer for the exported helpers used by code generation.
-var _ = 0
 
 // Check analyses the prelude plus user files.
 func Check(files []*ast.File, diags *source.Diagnostics) *Program {
@@ -95,6 +92,13 @@ func Check(files []*ast.File, diags *source.Diagnostics) *Program {
 		c.todo = c.todo[1:]
 		t()
 	}
+	// the array class is created on demand, by whichever code path asks for it
+	// first. Force it here, before the list is snapshotted: the emitter writes
+	// `&cls_teyru_Array` for every array cast, instanceof and array literal, so
+	// a program that only creates one -- `(Object) new int[1]` -- used to emit a
+	// reference to a class that was never declared (the C backend then failed
+	// with "use of undeclared identifier 'cls_teyru_Array'").
+	c.arrayClass()
 	for _, cl := range c.classes {
 		c.layout(cl)
 	}
@@ -188,6 +192,13 @@ func (c *Checker) findMain() {
 		var visit func(cl *ast.Class)
 		visit = func(cl *ast.Class) {
 			for _, m := range cl.Methods["main"] {
+				// JEP 512 lets a *compact* file have an instance main; a named
+				// class does not, which javac reports as "main method not found
+				// in class Main". Without this Teyru accepted one and emitted an
+				// entry point that did not compile.
+				if !m.IsStatic() && !isStaticCtx(cl) {
+					continue
+				}
 				if m.Result == ast.TVoid && (len(m.Params) == 0 || len(m.Params) == 1 && isStringArray(m.Params[0])) {
 					cands = append(cands, m)
 				}
@@ -312,7 +323,8 @@ func (c *Checker) initBuiltins() {
 		Cloneable: get("Cloneable"), Comparable: get("Comparable"),
 		IllArg: get("IllegalArgumentException"), IllState: get("IllegalStateException"),
 		NoSuchElem: get("NoSuchElementException"), Unsup: get("UnsupportedOperationException"),
-		NPE: get("NullPointerException"), AIOOBE: get("ArrayIndexOutOfBoundsException"),
+		ArrayStore: get("ArrayStoreException"),
+		NPE:        get("NullPointerException"), AIOOBE: get("ArrayIndexOutOfBoundsException"),
 		Arith: get("ArithmeticException"), CCE: get("ClassCastException"),
 		NegArr: get("NegativeArraySizeException"), Assertion: get("AssertionError"),
 		Boxes: map[ast.PrimKind]*ast.Class{}, Unbox: map[*ast.Class]ast.PrimKind{},

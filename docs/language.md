@@ -1,7 +1,8 @@
 # Teyru 語言參考
 
-本文件描述 Teyru 0.2 的語法與語意。文件以實作為準：這裡寫的每一項都在
-`tests/programs/` 有對應的測試，`go test ./...` 會逐項驗證。
+本文件描述 Teyru 0.2 的語法與語意。文件以實作為準：這裡寫的每一項語言特性都在
+`tests/programs/` 有對應的測試，`go test ./...` 會逐項驗證；標準程式庫的 API 則只
+涵蓋一部分（例如 `Map.putAll`、`Map.keys` 還沒有測試用到），測試涵蓋範圍仍不完整。
 
 - [1. 原始檔與詞法](#1-原始檔與詞法)
 - [2. 換行與敘述終止](#2-換行與敘述終止)
@@ -29,7 +30,8 @@
 - 字面值：整數（十進位、`0x`、`0b`、`0` 開頭八進位、`_` 分隔、`L` 後綴）、
   浮點（`f`／`d` 後綴、指數）、`char`、`String`、text block `"""…"""`、
   `true`／`false`／`null`。
-- 跳脫序列：`\n \t \r \b \f \s \0-7 \uXXXX`，text block 內支援 `\<換行>` 續行。
+- 跳脫序列：`\n \t \r \b \f \s \0-7 \uXXXX`；`\<換行>` 續行在一般字串與 text block
+  都適用，未知的跳脫字元會去掉反斜線後原樣輸出（`\q` 就是 `q`，不是錯誤）。
 
 **沒有分號。** 分號不是合法 token，會直接產生 `TY-SYN-0001`；
 字串、字元、註解與 text block 內的分號是資料，不受影響。
@@ -419,6 +421,7 @@ try {
 | 類別 | 內容 |
 |---|---|
 | `Object` | `toString`、`hashCode`、`equals`、`getClass` |
+| 陣列 | `length`、元素存取、`clone`；`toString` 印成 `[array]`（Java 是 `[I@<hash>`；Teyru 的陣列不帶元素型別，印不出 `[I` 這種拼法） |
 | `String` | `length`、`charAt`、`isEmpty`、`equals`、`hashCode`、`indexOf`、`substring`、`toUpperCase`、`toLowerCase`、`trim`、`contains`、`startsWith`、`endsWith`、`replace`、`compareTo`、`concat`、`valueOf`（多載） |
 | `StringBuilder` | `append`（String／Object／int／long／char／double／boolean）、`toString`、`length` |
 | `Math` | `PI`、`abs`、`max`、`min`、`sqrt`、`pow`、`floor`、`ceil`、`round`、`random` |
@@ -428,9 +431,10 @@ try {
 | 介面 | `Cloneable`、`Comparable<T>`、`AutoCloseable`、`Iterable<T>`、`Iterator<T>` |
 | `Enum<E>` | `ordinal`、`name`、`compareTo`、`toString`、`hashCode`、`equals` |
 | `Record` | 所有 record 的根 |
-| `List<T>` | `size`、`get`、`add`、`isEmpty`、`contains`、`indexOf`；繼承 `Iterable<T>` |
-| `ArrayList<T>` | `List<T>` 的實作；可加倍成長，另有 `set`、`removeAt`、`clear`、`toString` |
-| `HashMap<K,V>` | `put`、`get`、`containsKey`、`remove`、`size`、`isEmpty`、`toString` |
+| `List<T>` | `size`、`get`、`add`、`addAll`、`isEmpty`、`contains`、`indexOf`；繼承 `Iterable<T>` |
+| `ArrayList<T>` | `List<T>` 的實作；可加倍成長，另有 `set`、`removeAt`、`clear`、`addAll`、`toString` |
+| `Map<K,V>` | `get`、`put`、`putAll`、`containsKey`、`remove`、`size`、`isEmpty`、`keys` |
+| `HashMap<K,V>` | `Map<K,V>` 的實作；另有 `toString` |
 | `Logger` | `trace`／`debug`／`info`／`warn`／`error` |
 
 集合以 Teyru 撰寫，因此 `for` 迴圈直接支援：
@@ -472,4 +476,4 @@ for (String n : names) {
 - 泛型建構子的顯式型別引數 `new <T>Foo(...)`
 - 文字區塊的縮排細則（目前實作最小縮排去除）
 - 註解的執行期保留與讀取（`java.lang.annotation` 不存在）
-- 模組系統的語意（`import module` 與 `module-info` 只被解析）
+- 模組系統的語意（`import module X` 會被剖析後忽略，執行期沒有模組系統；`module-info` 不支援）

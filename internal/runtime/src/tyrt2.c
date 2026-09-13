@@ -7,6 +7,28 @@
 #include <math.h>
 #include <time.h>
 
+/* The helpers below that a generated program calls but tyrt.h does not declare
+   (that header is another component's): getClass's Class builder, and the
+   stream-aware print helpers. The call site declares them too, inside the
+   statement expression it wraps the call in. Forward declarations here keep a
+   -Wmissing-prototypes build of this file quiet. */
+void *ty_class_of_cls(void *o, tyclass *clscls);
+void ty_ps_print_str(void *self, tystr *s);
+void ty_ps_println_str(void *self, tystr *s);
+void ty_ps_print_int(void *self, int64_t v);
+void ty_ps_println_int(void *self, int64_t v);
+void ty_ps_print_double(void *self, double v);
+void ty_ps_println_double(void *self, double v);
+void ty_ps_print_float(void *self, float v);
+void ty_ps_println_float(void *self, float v);
+void ty_ps_print_char(void *self, uint16_t c);
+void ty_ps_println_char(void *self, uint16_t c);
+void ty_ps_print_bool(void *self, int32_t v);
+void ty_ps_println_bool(void *self, int32_t v);
+void ty_ps_print_obj(void *self, void *o);
+void ty_ps_println_obj(void *self, void *o);
+void ty_ps_println_void(void *self);
+
 /* ---- class initialisation --------------------------------------------- */
 
 void ty_unimplemented(const char *what) {
@@ -22,8 +44,77 @@ void ty_clinit(tyclass *c) {
   if (c->clinit) ((void (*)(void))c->clinit)();
 }
 
+/* ---- Class objects ------------------------------------------------------ */
+
+/* getClass has to hand back a real object. It used to return the tyclass
+   pointer itself, and every consumer of a reference reads the object's class
+   out of its first word, so `println(x.getClass())` walked a `const char*`
+   name as if it were a tyclass and crashed.
+
+   A Class object is a small wrapper: its payload is the tyclass it names, and
+   its own class is the program's own teyru.Class, which the call site hands
+   over (native.go emits `ty_class_of_cls(o, &cls_teyru_Class)`), because that
+   struct is static in the generated C and the runtime cannot name it. With the
+   real class in place, instanceof, casts, virtual dispatch and equality all
+   behave like they do for any other object.
+
+   One wrapper per tyclass is reused, so `a.getClass() == a.getClass()` holds.
+   The wrappers and the buckets below are malloc'd rather than allocated from
+   the runtime heap: class metadata is immortal, and memory the collector does
+   not own can never be collected out from under a Class object that a program
+   still refers to. */
+typedef struct tyclassobj {
+  tyobj obj;            /* obj.cls is teyru.Class */
+  tyclass *target;      /* the class this object names */
+  struct tyclassobj *next;
+} tyclassobj;
+
+#define TY_CLASS_BUCKETS 64
+static tyclassobj *ty_class_objs[TY_CLASS_BUCKETS];
+
+/* The generated teyru.Class, as passed by the call site. NULL until the first
+   call, which is also what a class literal's raw handle looks like. */
+static tyclass *ty_class_cls;
+
+void *ty_class_of_cls(void *o, tyclass *clscls) {
+  if (clscls) ty_class_cls = clscls;
+  if (!ty_class_cls) ty_class_cls = TY_OBJECT;
+  if (!o) ty_throw(ty_npe());
+  tyclass *k = ((tyobj *)o)->cls;
+  if (!k) return NULL;
+  int32_t b = (int32_t)((((uintptr_t)k) >> 4) & (TY_CLASS_BUCKETS - 1));
+  for (tyclassobj *c = ty_class_objs[b]; c; c = c->next) {
+    if (c->target == k) return c;
+  }
+  tyclassobj *c = (tyclassobj *)calloc(1, sizeof(tyclassobj));
+  if (!c) ty_throw(ty_npe());
+  c->obj.cls = ty_class_cls;
+  c->target = k;
+  c->next = ty_class_objs[b];
+  ty_class_objs[b] = c;
+  return c;
+}
+
+/* tyrt.h declares this one and nothing in a generated program calls it any
+   more: the getClass call site goes through ty_class_of_cls, which also hands
+   over the tyclass of teyru.Class. It stays as the raw handle accessor for
+   native code that wants the class pointer itself. */
 void *ty_class_of(void *o) { return o ? (void *)(((tyobj *)o)->cls) : NULL; }
-tystr *ty_class_name(void *c) { return c ? ty_str_intern(((tyclass *)c)->name) : NULL; }
+
+/* Class.getName and Class.toString. The receiver is either a Class object built
+   by ty_class_of_cls, whose payload names the class, or the raw tyclass handle
+   a class literal produces (codegen renders `String.class` as
+   `(tyobj*)&cls_teyru_String`), which is the tyclass itself. The wrapper's own
+   class tells the two apart: a tyclass's first word is its name, and a name
+   can never be the address of the generated Class struct. */
+tystr *ty_class_name(void *c) {
+  if (!c) return NULL;
+  if (ty_class_cls && ((tyobj *)c)->cls == ty_class_cls) {
+    tyclass *k = ((tyclassobj *)c)->target;
+    return k ? ty_str_intern(k->name) : NULL;
+  }
+  return ty_str_intern(((tyclass *)c)->name);
+}
 
 tystr *ty_str_ident(tystr *s) { return s; }
 
@@ -39,8 +130,13 @@ int32_t ty_object_hash(tyobj *o) {
 
 int32_t ty_object_equals(tyobj *a, tyobj *b) { return a == b; }
 
+/* String.equals(Object): in Java only another String can be equal, so the class
+   is checked before the payload is read as one. An unrelated object carries no
+   length and data fields where a String keeps them, and reading them would
+   compare against whatever bytes follow the object. */
 int32_t ty_str_eq_obj(tystr *a, void *b) {
   if (b == NULL) return a == NULL;
+  if (((tyobj *)b)->cls != TY_STRING) return 0;
   return ty_str_eq(a, (tystr *)b);
 }
 
@@ -58,6 +154,10 @@ int32_t ty_str_tobool(tystr *s) { return s && strcmp(s->data, "true") == 0; }
 /* ---- boxing helpers ---------------------------------------------------- */
 
 tystr *ty_int_tostr(void *o) { return ty_str_of_int(ty_unbox_int(o)); }
+/* Byte.toString and Short.toString are the decimal spelling of the value, so
+   they share the int formatter. */
+tystr *ty_byte_tostr(void *o) { return ty_str_of_int(ty_unbox_byte(o)); }
+tystr *ty_short_tostr(void *o) { return ty_str_of_int(ty_unbox_short(o)); }
 tystr *ty_bool_tostr(void *o) { return ty_str_of_bool(ty_unbox_bool(o)); }
 tystr *ty_char_tostr(void *o) { return ty_str_of_char(ty_unbox_char(o)); }
 tystr *ty_long_tostr(void *o) { return ty_str_of_long(ty_unbox_long(o)); }
@@ -72,9 +172,33 @@ int32_t ty_long_equals(void *a, void *b) {
   if (b == NULL) return 0;
   return ty_unbox_long(a) == ty_unbox_long(b);
 }
+/* Java's doubleToLongBits and floatToIntBits: the bit pattern with every NaN
+   collapsed to one value and the sign of zero kept. Double.equals,
+   Double.hashCode and Double.compare are all defined through it, so the two
+   zeros differ, NaN equals NaN, and equal values hash alike. */
+static int64_t dbl_bits(double d) {
+  if (d != d) return (int64_t)0x7ff8000000000000LL;
+  int64_t b;
+  memcpy(&b, &d, 8);
+  return b;
+}
+static int32_t flt_bits(float f) {
+  if (f != f) return (int32_t)0x7fc00000;
+  int32_t b;
+  memcpy(&b, &f, 4);
+  return b;
+}
 int32_t ty_double_equals(void *a, void *b) {
   if (b == NULL) return 0;
-  return ty_unbox_double(a) == ty_unbox_double(b);
+  return dbl_bits(ty_unbox_double(a)) == dbl_bits(ty_unbox_double(b));
+}
+int32_t ty_float_equals(void *a, void *b) {
+  if (b == NULL) return 0;
+  return flt_bits(ty_unbox_float(a)) == flt_bits(ty_unbox_float(b));
+}
+int32_t ty_char_equals(void *a, void *b) {
+  if (b == NULL) return 0;
+  return ty_unbox_char(a) == ty_unbox_char(b);
 }
 int32_t ty_bool_equals(void *a, void *b) {
   if (b == NULL) return 0;
@@ -88,25 +212,51 @@ int32_t ty_long_compare(int64_t a, int64_t b) { return a < b ? -1 : (a > b ? 1 :
 int32_t ty_prim_cmp_int(int32_t a, int32_t b) { return a < b ? -1 : (a > b ? 1 : 0); }
 int32_t ty_prim_cmp_long(int64_t a, int64_t b) { return a < b ? -1 : (a > b ? 1 : 0); }
 int32_t ty_prim_cmp_double(double a, double b) { return a < b ? -1 : (a > b ? 1 : 0); }
-int32_t ty_double_compare(double a, double b) { return a < b ? -1 : (a > b ? 1 : 0); }
+/* Java's Double.compare/Float.compare: the numeric order first, and only for
+   values that compare equal numerically (the two zeros, NaN) the bit order,
+   which puts -0.0 below 0.0 and NaN above everything. */
+int32_t ty_double_compare(double a, double b) {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  int64_t x = dbl_bits(a), y = dbl_bits(b);
+  return x == y ? 0 : (x < y ? -1 : 1);
+}
+int32_t ty_float_compare(float a, float b) {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  int32_t x = flt_bits(a), y = flt_bits(b);
+  return x == y ? 0 : (x < y ? -1 : 1);
+}
+/* Long.compareTo and Double.compareTo take the other box as an argument, so the
+   `_obj` forms unbox it first; a null argument raises a NullPointerException,
+   like an intrinsic in Java. */
+int32_t ty_long_compare_obj(void *a, void *b) {
+  return ty_long_compare(ty_unbox_long(a), ty_unbox_long(b));
+}
+int32_t ty_double_compare_obj(void *a, void *b) {
+  return ty_double_compare(ty_unbox_double(a), ty_unbox_double(b));
+}
+int32_t ty_float_compare_obj(void *a, void *b) {
+  return ty_float_compare(ty_unbox_float(a), ty_unbox_float(b));
+}
+int32_t ty_char_compare_obj(void *a, void *b) {
+  uint16_t x = ty_unbox_char(a), y = ty_unbox_char(b);
+  return x < y ? -1 : (x > y ? 1 : 0);
+}
 int32_t ty_long_hash(void *o) {
   int64_t v = ty_unbox_long(o);
   return (int32_t)(v ^ ((uint64_t)v >> 32));
 }
 int32_t ty_dhash_bits(double d) {
-  int64_t bits;
-  if (d == 0.0) bits = 0;
-  else memcpy(&bits, &d, 8);
+  int64_t bits = dbl_bits(d);
   return (int32_t)(bits ^ ((uint64_t)bits >> 32));
 }
 int32_t ty_double_hash(void *o) { return ty_dhash_bits(ty_unbox_double(o)); }
+int32_t ty_float_hash(void *o) { return flt_bits(ty_unbox_float(o)); }
+int32_t ty_char_hash(void *o) { return (int32_t)ty_unbox_char(o); }
 int32_t ty_long_toint(void *o) { return (int32_t)ty_unbox_long(o); }
 
-int32_t ty_fhash_bits(float f) {
-  int32_t bits;
-  memcpy(&bits, &f, 4);
-  return bits;
-}
+int32_t ty_fhash_bits(float f) { return flt_bits(f); }
 
 /* ---- math -------------------------------------------------------------- */
 
@@ -140,9 +290,16 @@ void ty_exit(int32_t code) { exit(code); }
 
 void ty_arraycopy(void *src, int32_t spos, void *dst, int32_t dpos, int32_t len) {
   tyarr *a = (tyarr *)src, *b = (tyarr *)dst;
-  if (!a || !b || spos < 0 || dpos < 0 || len < 0 || spos + len > a->len || dpos + len > b->len) {
-    ty_throw((tyobj *)ty_aioobe(0, a ? a->len : 0));
+  if (!a || !b) ty_throw((tyobj *)ty_npe());
+  /* written so that a negative length or a huge index cannot wrap the sum */
+  if (spos < 0 || dpos < 0 || len < 0 || spos > a->len - len || dpos > b->len - len) {
+    ty_throw((tyobj *)ty_aioobe(spos < 0 ? spos : dpos, a->len));
   }
+  /* Java requires the two arrays to have the same element type: copying a
+     long[] into a byte[] is an ArrayStoreException. Without this test the copy
+     below would take its byte count from the source element size and write
+     past the end of the destination. */
+  if (a->esize != b->esize || a->refs != b->refs) ty_throw((tyobj *)ty_arraystore());
   memmove((char *)b->data + (size_t)dpos * b->esize, (char *)a->data + (size_t)spos * a->esize,
           (size_t)len * a->esize);
 }
@@ -223,3 +380,77 @@ tystr *ty_readln(void) {
   while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
   return ty_str_new(buf, (int64_t)n);
 }
+
+/* ---- PrintStream ------------------------------------------------------- */
+
+/* A PrintStream writes to the file descriptor in its first instance field: 1 is
+   stdout and 2 is stderr, so System.err reaches descriptor 2 while every other
+   stream keeps writing to 1. The prelude declares the field (lib/03_io.teyru,
+   `private int target`) and System's initializer is what sets it; the helpers
+   below read it at the offset that follows the object header, which is where
+   the field lands because it is the only instance field of the class.
+
+   These helpers are not in tyrt.h: the generated program declares them at the
+   call site (see the stream twins in internal/codegen/native.go), so the shared
+   header does not have to change. Each one mirrors the stdout helper of the
+   same name in tyrt.c byte for byte, down to the formatting helper it calls, so
+   `System.out.println(x)` and `System.err.println(x)` produce identical text.
+
+   Writing to stderr flushes stdout first: stdout is block buffered when it is a
+   pipe, and without the flush the two streams would come out of order. */
+typedef struct {
+  tyobj obj;
+  int32_t target;
+} tyPrintStream;
+
+static FILE *ty_ps_out(void *self) {
+  if (!self) ty_throw(ty_npe());
+  if (((tyPrintStream *)self)->target != 2) return stdout;
+  fflush(stdout);
+  return stderr;
+}
+
+void ty_ps_print_str(void *self, tystr *s) {
+  FILE *f = ty_ps_out(self);
+  if (s) fwrite(s->data, 1, (size_t)s->len, f);
+  else fputs("null", f);
+}
+void ty_ps_println_str(void *self, tystr *s) {
+  ty_ps_print_str(self, s);
+  fputc('\n', ty_ps_out(self));
+}
+void ty_ps_print_int(void *self, int64_t v) { fprintf(ty_ps_out(self), "%lld", (long long)v); }
+void ty_ps_println_int(void *self, int64_t v) { fprintf(ty_ps_out(self), "%lld\n", (long long)v); }
+void ty_ps_print_double(void *self, double v) {
+  tystr *s = ty_str_of_double(v);
+  fwrite(s->data, 1, (size_t)s->len, ty_ps_out(self));
+}
+void ty_ps_println_double(void *self, double v) {
+  ty_ps_print_double(self, v);
+  fputc('\n', ty_ps_out(self));
+}
+void ty_ps_print_float(void *self, float v) {
+  tystr *s = ty_str_of_float(v);
+  fwrite(s->data, 1, (size_t)s->len, ty_ps_out(self));
+}
+void ty_ps_println_float(void *self, float v) {
+  ty_ps_print_float(self, v);
+  fputc('\n', ty_ps_out(self));
+}
+void ty_ps_print_char(void *self, uint16_t c) {
+  FILE *f = ty_ps_out(self);
+  if (c < 0x80) fputc((int)c, f);
+  else fputs(ty_str_of_char(c)->data, f);
+}
+void ty_ps_println_char(void *self, uint16_t c) {
+  ty_ps_print_char(self, c);
+  fputc('\n', ty_ps_out(self));
+}
+void ty_ps_print_bool(void *self, int32_t v) { fputs(v ? "true" : "false", ty_ps_out(self)); }
+void ty_ps_println_bool(void *self, int32_t v) { fputs(v ? "true\n" : "false\n", ty_ps_out(self)); }
+void ty_ps_print_obj(void *self, void *o) { ty_ps_print_str(self, ty_str_of_obj(o)); }
+void ty_ps_println_obj(void *self, void *o) {
+  ty_ps_print_obj(self, o);
+  fputc('\n', ty_ps_out(self));
+}
+void ty_ps_println_void(void *self) { fputc('\n', ty_ps_out(self)); }

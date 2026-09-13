@@ -135,6 +135,14 @@ class IndexOutOfBoundsException extends RuntimeException {
   }
 }
 
+class ArrayStoreException extends RuntimeException {
+  public ArrayStoreException() {
+  }
+  public ArrayStoreException(String message) {
+    super(message)
+  }
+}
+
 class UnsupportedOperationException extends RuntimeException {
   public UnsupportedOperationException() {
   }

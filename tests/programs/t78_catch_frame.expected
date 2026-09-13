@@ -1,0 +1,11 @@
+f 1
+caught boom
+b 0
+b 1
+outer boom
+c 0
+c 2
+after loop
+outer boom
+yield y1
+done

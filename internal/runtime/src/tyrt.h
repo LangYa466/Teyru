@@ -54,6 +54,7 @@ struct tyclass {
 
 /* Class handles installed by generated startup code. */
 extern tyclass *TY_STRING;
+extern tyclass *TY_ARRAY;
 extern tyclass *TY_BOX[9];
 extern tyclass *TY_OBJECT;
 
@@ -71,13 +72,14 @@ void ty_uncaught(void *e) __attribute__((noreturn));
 
 /* Preallocated exception classes (filled by generated code at startup). */
 extern tyclass *TY_NPE, *TY_AIOOBE, *TY_ARITH, *TY_CCE, *TY_NEGARR, *TY_ASSERT,
-    *TY_ILLARG, *TY_ILLSTATE, *TY_NOSUCHELEM, *TY_UNSUP;
+    *TY_ILLARG, *TY_ILLSTATE, *TY_NOSUCHELEM, *TY_UNSUP, *TY_ARRAYSTORE;
 
 void *ty_npe(void);
 void *ty_aioobe(int64_t idx, int64_t len);
 void *ty_arith(const char *msg);
 void *ty_cce(tyclass *from, tyclass *to);
 void *ty_negarr(void);
+void *ty_arraystore(void);
 void *ty_assertfail(const char *msg);
 
 /* ---- allocation / GC -------------------------------------------------- */
@@ -87,6 +89,9 @@ void *ty_assertfail(const char *msg);
    back into the runtime. */
 /* class flags: the class has been initialised */
 #define TY_CLS_INIT 8
+/* the class describes an array: its payload is a tyarr whose element slots the
+   collector has to trace when the array holds references */
+#define TY_CLS_ARRAY 2
 #define TY_HDR 16
 #define TY_ALIGN 16
 extern char *ty_bump;
@@ -182,11 +187,17 @@ int8_t ty_unbox_byte(void *o);
 uint16_t ty_unbox_char(void *o);
 int32_t ty_unbox_bool(void *o);
 
-/* Primitive type patterns (JEP 507). ty_prim_match reports whether a boxed
-   value can be read as the requested primitive kind without losing anything,
-   and stores it through out. kind uses the same numbering as TY_BOX:
-   1 boolean, 2 byte, 3 short, 4 char, 5 int, 6 long, 7 float, 8 double. */
-int32_t ty_prim_match(void *o, int32_t kind, void *out);
+/* Primitive type patterns (JEP 507). ty_prim_match reports whether the operand
+   matches the requested primitive kind and stores the converted value through
+   out. kind uses the same numbering as TY_BOX: 1 boolean, 2 byte, 3 short,
+   4 char, 5 int, 6 long, 7 float, 8 double.
+
+   boxed says the operand was a reference and therefore carries a box: JEP 507
+   then requires the box to be exactly the pattern's type (an Integer matches
+   `int i` but not `long l`). When the operand was a primitive, which the
+   compiler boxes to get here, only the conversion has to be exact, so
+   `long v = 5; v instanceof int i` matches but 5000000000L does not. */
+int32_t ty_prim_match(void *o, int32_t kind, void *out, int32_t boxed);
 
 /* ---- misc ------------------------------------------------------------- */
 void ty_sync_enter(void *lock);
@@ -223,6 +234,8 @@ double ty_str_todouble(tystr *s);
 float ty_str_tofloat(tystr *s);
 int32_t ty_str_tobool(tystr *s);
 tystr *ty_int_tostr(void *o);
+tystr *ty_byte_tostr(void *o);
+tystr *ty_short_tostr(void *o);
 tystr *ty_bool_tostr(void *o);
 tystr *ty_char_tostr(void *o);
 tystr *ty_long_tostr(void *o);
@@ -238,6 +251,15 @@ int32_t ty_prim_cmp_int(int32_t a, int32_t b);
 int32_t ty_prim_cmp_long(int64_t a, int64_t b);
 int32_t ty_prim_cmp_double(double a, double b);
 int32_t ty_double_compare(double a, double b);
+int32_t ty_long_compare_obj(void *a, void *b);
+int32_t ty_double_compare_obj(void *a, void *b);
+int32_t ty_float_compare_obj(void *a, void *b);
+int32_t ty_char_compare_obj(void *a, void *b);
+int32_t ty_float_equals(void *a, void *b);
+int32_t ty_char_equals(void *a, void *b);
+int32_t ty_float_compare(float a, float b);
+int32_t ty_float_hash(void *o);
+int32_t ty_char_hash(void *o);
 int32_t ty_long_hash(void *o);
 int32_t ty_double_hash(void *o);
 int32_t ty_long_toint(void *o);

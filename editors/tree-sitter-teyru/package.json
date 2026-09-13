@@ -1,0 +1,64 @@
+{
+  "name": "tree-sitter-teyru",
+  "version": "0.1.0",
+  "description": "Teyru grammar for tree-sitter",
+  "keywords": [
+    "parser",
+    "lexer",
+    "teyru",
+    "tree-sitter"
+  ],
+  "files": [
+    "grammar.js",
+    "tree-sitter.json",
+    "queries/",
+    "src/",
+    "LICENSE",
+    "README.md"
+  ],
+  "license": "GPL-2.0-only",
+  "author": {
+    "name": "LangYa466",
+    "email": "langya466@gmail.com",
+    "url": "https://github.com/LangYa466"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LangYa466/Teyru.git",
+    "directory": "editors/tree-sitter-teyru"
+  },
+  "tree-sitter": [
+    {
+      "scope": "source.teyru",
+      "file-types": [
+        "teyru"
+      ],
+      "highlights": [
+        "queries/highlights.scm"
+      ],
+      "locals": [
+        "queries/locals.scm"
+      ],
+      "indents": [
+        "queries/indents.scm"
+      ],
+      "injection-regex": "^teyru$"
+    }
+  ],
+  "peerDependencies": {
+    "tree-sitter": "^0.25.0"
+  },
+  "peerDependenciesMeta": {
+    "tree-sitter": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "^0.25.0"
+  },
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test",
+    "parse": "tree-sitter parse"
+  }
+}

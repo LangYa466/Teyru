@@ -1,0 +1,246 @@
+==================
+a switch expression yields arithmetically
+==================
+
+class C {
+  String f(int n) {
+    return switch (n) {
+      case 1 -> "one"
+      case 2, 3 -> "few"
+      default -> "many"
+    }
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (scoped_identifier
+          (identifier))
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (primitive_type)
+            (identifier)))
+        (block
+          (return_statement
+            (switch_construct
+              (parenthesized_expression
+                (identifier))
+              (switch_block
+                (switch_rule
+                  (switch_label
+                    (switch_case_label
+                      (decimal_integer_literal)))
+                  (string_literal))
+                (switch_rule
+                  (switch_label
+                    (switch_case_label
+                      (decimal_integer_literal))
+                    (switch_case_label
+                      (decimal_integer_literal)))
+                  (string_literal))
+                (switch_rule
+                  (switch_label)
+                  (string_literal))))))))))
+
+==================
+a switch expression with a block and yield
+==================
+
+class C {
+  int f(int n) {
+    return switch (n) {
+      case 1 -> {
+        int v = n * 2
+        yield v + 1
+      }
+      default -> 0
+    }
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (primitive_type)
+            (identifier)))
+        (block
+          (return_statement
+            (switch_construct
+              (parenthesized_expression
+                (identifier))
+              (switch_block
+                (switch_rule
+                  (switch_label
+                    (switch_case_label
+                      (decimal_integer_literal)))
+                  (block_that_may_yield
+                    (local_variable_declaration
+                      (primitive_type)
+                      (variable_declarator
+                        (identifier)
+                        (binary_expression
+                          (identifier)
+                          (decimal_integer_literal))))
+                    (yield_statement
+                      (binary_expression
+                        (identifier)
+                        (decimal_integer_literal)))))
+                (switch_rule
+                  (switch_label)
+                  (decimal_integer_literal))))))))))
+
+==================
+a switch over strings and enums, with case null
+==================
+
+class C {
+  String f(String s, Color c) {
+    String a = switch (s) {
+      case "red" -> "r"
+      case null -> "none"
+      default -> "other"
+    }
+    return switch (c) {
+      case RED -> a
+      default -> "?"
+    }
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (scoped_identifier
+          (identifier))
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (scoped_identifier
+              (identifier))
+            (identifier))
+          (formal_parameter
+            (scoped_identifier
+              (identifier))
+            (identifier)))
+        (block
+          (local_variable_declaration
+            (scoped_identifier
+              (identifier))
+            (variable_declarator
+              (identifier)
+              (switch_construct
+                (parenthesized_expression
+                  (identifier))
+                (switch_block
+                  (switch_rule
+                    (switch_label
+                      (switch_case_label
+                        (string_literal)))
+                    (string_literal))
+                  (switch_rule
+                    (switch_label
+                      (switch_case_label
+                        (null_literal)))
+                    (string_literal))
+                  (switch_rule
+                    (switch_label)
+                    (string_literal))))))
+          (return_statement
+            (switch_construct
+              (parenthesized_expression
+                (identifier))
+              (switch_block
+                (switch_rule
+                  (switch_label
+                    (switch_case_label
+                      (identifier)))
+                  (identifier))
+                (switch_rule
+                  (switch_label)
+                  (string_literal))))))))))
+
+==================
+a switch statement with an arrow body that throws
+==================
+
+class C {
+  void f(int n) {
+    switch (n) {
+      case 1 -> System.out.println("one")
+      case 2 -> throw new IllegalStateException("two")
+      default -> {
+        System.out.println("other")
+      }
+    }
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (primitive_type)
+            (identifier)))
+        (block
+          (expression_statement
+            (switch_construct
+              (parenthesized_expression
+                (identifier))
+              (switch_block
+                (switch_rule
+                  (switch_label
+                    (switch_case_label
+                      (decimal_integer_literal)))
+                  (method_invocation
+                    (field_access
+                      (identifier)
+                      (identifier))
+                    (identifier)
+                    (argument_list
+                      (string_literal))))
+                (switch_rule
+                  (switch_label
+                    (switch_case_label
+                      (decimal_integer_literal)))
+                  (throw_statement
+                    (object_creation_expression
+                      (scoped_identifier
+                        (identifier))
+                      (argument_list
+                        (string_literal)))))
+                (switch_rule
+                  (switch_label)
+                  (block_that_may_yield
+                    (expression_statement
+                      (method_invocation
+                        (field_access
+                          (identifier)
+                          (identifier))
+                        (identifier)
+                        (argument_list
+                          (string_literal))))))))))))))

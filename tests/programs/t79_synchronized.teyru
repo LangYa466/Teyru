@@ -1,0 +1,32 @@
+// A synchronized block and a synchronized method run their bodies; the lock is
+// reentrant, so nesting them on one object must not deadlock.
+class Counter {
+  private int n
+
+  public synchronized void bump() {
+    n++
+  }
+
+  public int run() {
+    synchronized (this) {
+      bump()
+      synchronized (this) {
+        n += 10
+      }
+    }
+    return n
+  }
+}
+
+class Main {
+  public static void main(String[] args) {
+    Counter c = new Counter()
+    System.out.println(c.run())
+    System.out.println(c.run())
+    Object lock = new Object()
+    synchronized (lock) {
+      System.out.println("inside")
+    }
+    System.out.println("after")
+  }
+}

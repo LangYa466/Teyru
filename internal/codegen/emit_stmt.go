@@ -73,6 +73,14 @@ func (e *Emitter) stmt(s ast.Stmt) {
 		e.clearPatterns()
 	case *ast.DoWhile:
 		labels := e.takeLabels()
+		// Java keeps the variable a pattern binds out of the body's scope, so
+		// the declaration stands before the loop, where the condition that
+		// follows `while` can still see it
+		e.hoistPatterns(v.Cond)
+		// the condition is rendered here and written after the body: emitting
+		// the body would drop the record of which patterns this condition
+		// declared, and the text must still name them
+		cond := e.cond(v.Cond)
 		e.line("do {\n")
 		e.indent++
 		e.pushLoop("")
@@ -80,8 +88,9 @@ func (e *Emitter) stmt(s ast.Stmt) {
 		e.popLoop()
 		e.contLabels(labels)
 		e.indent--
-		e.line("} while (%s);\n", e.cond(v.Cond))
+		e.line("} while (%s);\n", cond)
 		e.brkLabels(labels)
+		e.clearPatterns()
 	case *ast.For:
 		labels := e.takeLabels()
 		e.line("{\n")
@@ -89,6 +98,9 @@ func (e *Emitter) stmt(s ast.Stmt) {
 		for _, init := range v.Init {
 			e.stmt(init)
 		}
+		// the update and the body both run after the condition, so a variable
+		// a pattern in the condition binds belongs to the whole loop
+		e.hoistPatterns(v.Cond)
 		cond := "1"
 		if v.Cond != nil {
 			cond = e.cond(v.Cond)
@@ -115,6 +127,7 @@ func (e *Emitter) stmt(s ast.Stmt) {
 		e.indent--
 		e.line("}\n")
 		e.brkLabels(labels)
+		e.clearPatterns()
 	case *ast.ForEach:
 		e.forEach(v)
 	case *ast.Return:
@@ -137,13 +150,16 @@ func (e *Emitter) stmt(s ast.Stmt) {
 			target = e.labelDepth[v.Label]
 		}
 		e.leaveFinallys(target)
-		if v.Label != "" {
+		switch {
+		case v.Label != "":
 			e.line("goto %s;\n", e.labelName(v.Label, true))
-		} else {
+		case e.breakTarget() != "":
+			e.line("goto %s;\n", e.breakTarget())
+		default:
 			e.line("break;\n")
 		}
 	case *ast.Continue:
-		target := len(e.loops) - 1
+		target := e.continueDepth()
 		if v.Label != "" {
 			target = e.labelDepth[v.Label]
 		}
@@ -163,7 +179,7 @@ func (e *Emitter) stmt(s ast.Stmt) {
 	case *ast.Switch:
 		e.switchStmt(v, "")
 	case *ast.Yield:
-		e.line("/* yield handled by switch expression */;\n")
+		e.yieldStmt(v)
 	case *ast.Labeled:
 		// a loop turns the pending labels into its continue and break targets
 		// (chained labels such as `a: b: for (...) {}` all apply to the loop);
@@ -247,8 +263,17 @@ func (e *Emitter) brkLabels(labels []string) {
 }
 
 // leaveFinallys runs the finally actions of every try statement that a jump out
-// of the loop at loopDepth abandons, innermost first. A depth of -1 means the
-// whole method is being left.
+// of the loop at loopDepth abandons, innermost first, and restores the handler
+// chain of every frame it passes. A depth of -1 means the whole method is being
+// left.
+//
+// A frame may have nothing to run: a try with a catch and no finally registers
+// a frame of its own, because leaving it still has to take ty_cur_catch off the
+// frame. Only restoring it where the body falls through — which was the only
+// restore there was — left a return, a break, a continue or a yield out of the
+// body with the chain pointing at a frame of a call that had already returned:
+// the next throw longjmped into freed stack, which crashed or, if the frame was
+// still intact, resumed an older iteration and re-ran its catch forever.
 func (e *Emitter) leaveFinallys(loopDepth int) {
 	if len(e.finallys) == 0 {
 		return
@@ -263,6 +288,9 @@ func (e *Emitter) leaveFinallys(loopDepth int) {
 		// would run the same finally twice
 		e.finallys = saved[:i]
 		e.line("ty_cur_catch = %s.prev;\n", f.name)
+		if f.emit == nil {
+			continue
+		}
 		e.line("{\n")
 		e.indent++
 		f.emit()
@@ -276,10 +304,86 @@ func (e *Emitter) leaveFinallys(loopDepth int) {
 // innermost enclosing loop, or "" when C's continue statement already means
 // the right thing.
 func (e *Emitter) continueTarget() string {
-	if len(e.loops) == 0 {
+	i := e.continueDepth()
+	if i < 0 {
 		return ""
 	}
-	return e.loops[len(e.loops)-1]
+	return e.loops[i]
+}
+
+// continueDepth returns the position in the loop stack of the innermost loop an
+// unlabelled continue can reach, or -1 when no loop encloses it. A switch case
+// body sits on the same stack but is not a loop: a continue never leaves the
+// switch it is in, so it keeps looking further out for its loop.
+func (e *Emitter) continueDepth() int {
+	for i := len(e.loops) - 1; i >= 0; i-- {
+		if !isCaseEnd(e.loops[i]) {
+			return i
+		}
+	}
+	return -1
+}
+
+// breakTarget returns the label an unlabelled break must jump to, or "" when
+// C's break statement already leaves the innermost breakable statement. The top
+// of the loop stack is that statement: a case body pushes the label that ends
+// its switch, and a C break would leave the loop around the switch instead,
+// while a loop pushes its continue target, which C's break already handles.
+func (e *Emitter) breakTarget() string {
+	if n := len(e.loops); n > 0 && isCaseEnd(e.loops[n-1]) {
+		return e.loops[n-1]
+	}
+	return ""
+}
+
+// caseDepth returns the position in the loop stack of the case body the
+// statement being emitted sits in, or -1 when it sits in none. The innermost
+// case body is the one whose switch a yield belongs to: a switch nested in a
+// case body pushes an entry of its own above.
+func (e *Emitter) caseDepth() int {
+	for i := len(e.loops) - 1; i >= 0; i-- {
+		if isCaseEnd(e.loops[i]) {
+			return i
+		}
+	}
+	return -1
+}
+
+// yieldStmt lowers a yield inside a case body.
+//
+// Java gives the value to the switch expression the case body belongs to,
+// whatever statement sits between the two — an if, a loop or a try does not
+// change where the value goes — so the switch being emitted is read out of the
+// emitter instead of being looked for among the statements of the body. Only a
+// yield written directly in the body could be found that way, and the rest were
+// turned into a comment: the value was dropped and the control flow fell
+// through into the next case body, which overwrote the result.
+//
+// e.switchCur holds the id of the switch in progress, and carries whether it
+// has a result in its sign: a switch expression stores the id, a switch
+// statement stores it negated because there is no value to hand back.
+func (e *Emitter) yieldStmt(v *ast.Yield) {
+	depth := e.caseDepth()
+	if depth < 0 {
+		// The checker accepts a yield outside a switch expression, so one can
+		// still reach the emitter; jumping to a label that was never emitted
+		// would not compile at all.
+		e.line("/* yield outside of a switch expression */;\n")
+		return
+	}
+	id, result := e.switchCur, e.switchCur >= 0
+	if !result {
+		id = -e.switchCur - 1
+	}
+	if result {
+		// the value is read before any finally action runs, as it is for a
+		// return: the actions are part of leaving, not of computing the value
+		e.line("*_res%d = %s;\n", id, e.expr(v.X))
+	}
+	// a yield abandons every loop, try and catch frame between the yield and
+	// its case body, and their finally actions run before the jump
+	e.leaveFinallys(depth)
+	e.line("goto _end%d;\n", id)
 }
 
 func (e *Emitter) pushLoop(target string) { e.loops = append(e.loops, target) }
@@ -309,7 +413,14 @@ func (e *Emitter) localVar(v *ast.LocalVar) {
 			e.stackNew(vd, nw, ct, name)
 			continue
 		}
+		// An `instanceof` pattern binds a variable whose scope is the rest of
+		// the expression, so `boolean b = o instanceof String s && s.length() > 0`
+		// is legal Java. Declare it here, before the statement that reads it:
+		// without this the emitted C named a variable that was never declared,
+		// and the compiler reported it as a C error in generated code.
+		e.hoistPatterns(vd.Init)
 		e.line("%s %s = %s;\n", ct, name, e.coerce(e.expr(vd.Init), vd.Init.GetType(), vd.Sym.Type))
+		e.clearPatterns()
 	}
 }
 
@@ -527,18 +638,23 @@ func (e *Emitter) tryStmt(v *ast.Try) {
 func (e *Emitter) tryWithResources(v *ast.Try) {
 	e.line("{\n")
 	e.indent++
-	for _, r := range v.Resources {
-		e.stmt(r)
+	// a resource written as an expression is evaluated once, into a temporary
+	// the close calls read back: re-evaluating it at every exit would run its
+	// side effects again and could close a different object than it opened
+	names := make([]string, len(v.Resources))
+	for i, r := range v.Resources {
+		switch t := r.(type) {
+		case *ast.LocalVar:
+			e.stmt(r)
+			names[i] = e.localName(t.Vars[0].Sym)
+		case *ast.ExprStmt:
+			names[i] = e.tmpName()
+			e.line("tyobj* %s = (tyobj*)%s;\n", names[i], e.expr(t.X))
+		}
 	}
 	closeFn := func() {
 		for i := len(v.Resources) - 1; i >= 0; i-- {
-			var name string
-			switch r := v.Resources[i].(type) {
-			case *ast.LocalVar:
-				name = e.localName(r.Vars[0].Sym)
-			case *ast.ExprStmt:
-				name = e.tmpRef(e.expr(r.X))
-			}
+			name := names[i]
 			if name != "" {
 				e.line("if (%s) ((void(*)(void*))ty_itab((tyobj*)%s, %d))((tyobj*)%s);\n",
 					name, name, e.selectorOf(e.prog.Builtins.AutoCloseable, "close"), name)
@@ -580,14 +696,23 @@ func (e *Emitter) emitTryCore(v *ast.Try, closeFn func()) {
 		e.indent++
 		e.line("if (setjmp(%s.buf) == 0) {\n", c)
 		e.indent++
+		// The catch frame is a handler the body can leave without unwinding at
+		// all, so it is registered like a finally frame: the exits that do not
+		// jump — a return, a break, a continue, a yield — have to take
+		// ty_cur_catch off it before anything else can throw. The frame is
+		// dropped again once the body is emitted: the catch bodies below run
+		// with the chain already restored, exactly as the generated code does
+		// at the top of the else branch.
+		e.finallys = append(e.finallys, finFrame{depth: frame.depth, name: c})
 		e.emitBlockInner(v.Body)
+		e.finallys = e.finallys[:len(e.finallys)-1]
 		e.indent--
 		e.line("} else {\n")
 		e.indent++
 		e.line("tyobj* _ex = %s.ex;\n", c)
 		e.line("ty_cur_catch = %s.prev;\n", c)
 		first := true
-		for i, cat := range v.Catches {
+		for _, cat := range v.Catches {
 			cond := e.catchCond(cat)
 			if first {
 				e.line("if (%s) {\n", cond)
@@ -600,7 +725,6 @@ func (e *Emitter) emitTryCore(v *ast.Try, closeFn func()) {
 			e.emitBlockInner(cat.Body)
 			e.indent--
 			e.line("}\n")
-			_ = i
 		}
 		e.line("else { ty_cur_catch = %s.prev; ty_throw(_ex); }\n", c)
 		e.indent--
@@ -639,8 +763,36 @@ func (e *Emitter) catchCond(cat *ast.Catch) string {
 
 // ---------------------------------------------------------------- switch
 
+// caseEndPrefix starts the label every switch case body breaks out to. The loop
+// stack carries those labels as well, so the prefix is what tells them apart
+// from the entries of real loops, which are "" or a temporary such as _t12.
+const caseEndPrefix = "_end"
+
+// caseEndLabel is the C label that ends the switch with the given id.
+func caseEndLabel(id int) string { return fmt.Sprintf("%s%d", caseEndPrefix, id) }
+
+// isCaseEnd reports whether a loop stack entry is the end of a switch case body
+// rather than a loop.
+func isCaseEnd(t string) bool { return strings.HasPrefix(t, caseEndPrefix) }
+
+// resultSlot declares the pointer a nested yield writes the value of a switch
+// expression through. The yield knows the switch it belongs to but not the
+// temporary its value ends up in, which the caller of switchStmt declares, so
+// the value is reached through a pointer named after the switch id — the same
+// id that names the label the yield jumps to.
+func (e *Emitter) resultSlot(resultTmp string, id int) {
+	if resultTmp == "" {
+		return
+	}
+	e.line("__typeof__(%s)* _res%d = &%s;\n", resultTmp, id, resultTmp)
+}
+
 // hoistPatterns declares the variables bound by `instanceof` patterns that
-// appear in a controlling expression, so the condition can refer to them.
+// appear in a controlling expression, so the body and the update of a loop can
+// refer to them. Java binds such a variable afresh on every evaluation of the
+// condition rather than once when the loop is entered, so only the declaration
+// is hoisted: the assignment is part of the condition, and instanceOf writes it
+// there (see assignPattern in emit_expr.go).
 func (e *Emitter) hoistPatterns(cond ast.Expr) {
 	if cond == nil {
 		return
@@ -652,7 +804,7 @@ func (e *Emitter) hoistPatterns(cond ast.Expr) {
 		switch v := x.(type) {
 		case *ast.InstanceOf:
 			if v.Binding != nil {
-				name := e.bindExprPattern(v)
+				name := e.declareExprPattern(v)
 				if name != "" {
 					e.patternVars[v] = name
 				}
@@ -682,100 +834,286 @@ func (e *Emitter) instTarget(v *ast.InstanceOf) string {
 	return "&cls_" + mangle(e.prog.ArrayClass().Full)
 }
 
-// bindExprPattern declares the variable of an instanceof pattern and returns
-// the C expression that holds the matched value (empty for `_`).
-func (e *Emitter) bindExprPattern(v *ast.InstanceOf) string {
+// declareExprPattern declares the variables an `instanceof` pattern in a
+// controlling expression binds, with their zero values: the one that holds the
+// whole match and, for a record pattern, one per component. It returns the
+// variable holding the match, or "" when there is none.
+//
+// Only the declaration is hoisted; the values arrive with every evaluation of
+// the condition, which instanceOf emits as a statement expression. Java gives
+// the variable the scope of the loop body and binds it anew each time the
+// condition is evaluated, so `xs[i] instanceof String s` must see the element
+// of the current iteration, not of the one that entered the loop.
+func (e *Emitter) declareExprPattern(v *ast.InstanceOf) string {
 	pat := v.Binding
 	if pat == nil {
 		return ""
 	}
-	src := e.expr(v.X)
 	if prim, ok := e.prog.Erased(v.Type.Resolved).(*ast.PrimType); ok {
 		// a primitive pattern is a question about the value, so the match is
 		// recorded in a flag next to the value itself
 		n := e.tmpName()
 		okName := e.tmpName()
 		e.line("%s %s = 0;\n", e.ctype(prim), n)
-		e.line("int32_t %s = ty_prim_match((void*)%s, %d, &%s);\n", okName, src, prim.Kind, n)
+		e.line("int32_t %s = 0;\n", okName)
 		e.patternOK[v] = okName
 		if pat.Sym != nil && !pat.Unnamed {
 			e.locals[pat.Sym] = n
 		}
 		return n
 	}
-	typeName := e.ctype(v.Type.Resolved)
 	n := e.tmpName()
-	// the bound variable holds the value only when the type test succeeds,
-	// which is what `x instanceof T t` means as a condition
-	e.line("%s %s = (%s)ty_instanceof((tyobj*)%s, %s) ? (%s)%s : NULL;\n",
-		typeName, n, typeName, src, e.instTarget(v), typeName, src)
+	e.line("%s %s = NULL;\n", e.ctype(v.Type.Resolved), n)
 	if len(pat.Decomp) > 0 {
-		e.bindComponents(pat, n)
+		// the components of a record pattern are part of the binding, so they
+		// are declared here and read out of the match in the condition
+		e.declareBinds(e.planComponents(pat, n))
 		return n
 	}
 	if pat.Sym != nil && !pat.Unnamed {
 		e.locals[pat.Sym] = n
-		return n
 	}
 	return n
 }
 
-// compBind is one variable of a record pattern and the expression that reads
-// its value out of the enclosing record.
+// compBind is one variable of a record pattern: the expression that reads its
+// value out of the enclosing record, the test the component has to pass before
+// the variables nested inside it may be read, and those nested binds.
 type compBind struct {
 	ct       string
 	name     string
 	accessor string
+	// test guards the reads nested in this component, and is empty when the
+	// enclosing record already settles what they need. A component read out of
+	// the matched value itself needs no test; a component a nested pattern
+	// destructures is only reachable when it holds a value, and one the pattern
+	// names a narrower type for has to be of that type.
+	test string
+	subs []compBind
 }
 
 // planComponents walks a record pattern and returns the variables it binds,
-// with the accessor for each. Nested patterns get a temporary for the inner
-// record, declared before the variables read out of it.
+// with the accessor and the test for each. Nested patterns get a temporary for
+// the inner record, declared before the variables read out of it.
+//
+// The name of that temporary is derived from the receiver rather than taken
+// from the counter, so that planning one pattern twice — once to declare its
+// variables, once to assign them — yields the same names. A pattern in the
+// condition of a loop is planned both ways.
 func (e *Emitter) planComponents(p *ast.Param, recv string) []compBind {
-	var out []compBind
-	var walk func(p *ast.Param, recv string)
-	walk = func(p *ast.Param, recv string) {
+	var walk func(p *ast.Param, recv string) []compBind
+	walk = func(p *ast.Param, recv string) []compBind {
+		var out []compBind
 		for i, sub := range p.Decomp {
 			if i >= len(p.Comps) {
-				return
+				break
 			}
 			comp := p.Comps[i]
 			accessor := fmt.Sprintf("(%s)->f_%s", recv, mangle(comp.Name))
 			if len(sub.Decomp) > 0 {
-				inner := e.tmpName()
-				out = append(out, compBind{e.ctype(comp.Type), inner, accessor})
-				walk(sub, inner)
+				inner := fmt.Sprintf("%s_n%d", recv, i)
+				out = append(out, compBind{
+					ct:       e.ctype(comp.Type),
+					name:     inner,
+					accessor: accessor,
+					test:     e.compTest(sub, comp, inner),
+					subs:     walk(sub, inner),
+				})
 				continue
 			}
 			if sub.Sym == nil || sub.Unnamed {
+				// a pattern that binds nothing asks nothing of the component:
+				// the unnamed pattern matches every value, null included
 				continue
 			}
-			out = append(out, compBind{e.ctype(comp.Type), e.localName(sub.Sym), accessor})
+			name := e.localName(sub.Sym)
+			out = append(out, compBind{
+				ct:       e.ctype(comp.Type),
+				name:     name,
+				accessor: accessor,
+				test:     e.compTest(sub, comp, name),
+			})
 		}
+		return out
 	}
-	walk(p, recv)
-	return out
+	return walk(p, recv)
 }
 
-// bindComponents extracts the record components of a record pattern.
-func (e *Emitter) bindComponents(p *ast.Param, recv string) {
-	for _, b := range e.planComponents(p, recv) {
-		e.line("%s %s = %s;\n", b.ct, b.name, b.accessor)
+// nestedClass returns the class a component pattern names for its component, or
+// nil when the pattern is total: a pattern written without a type (`var`, or a
+// bare name) and the unnamed pattern ask nothing about the type of the value.
+// The checker resolves the type of the pattern a case or a condition tests, but
+// a component pattern keeps its type only as written, so the name is resolved
+// here. A name that resolves to nothing leaves the pattern total rather than
+// being guessed at, which reads the component as though the pattern had asked
+// for nothing.
+func (e *Emitter) nestedClass(sub *ast.Param, comp *ast.Field) *ast.Class {
+	if sub == nil || sub.Unnamed || sub.Type == nil || sub.Type.Dims > 0 {
+		return nil
 	}
+	if ct, ok := sub.Type.Resolved.(*ast.ClassType); ok {
+		return ct.Class
+	}
+	if comp != nil && comp.Owner != nil {
+		// a type parameter of the record shadows a class of the same name, and
+		// the checker binds the component to that type rather than to the class
+		for _, tv := range comp.Owner.TypeParams {
+			if tv.Name == sub.Type.Name {
+				return nil
+			}
+		}
+	}
+	return e.resolveClass(sub.Type.Name)
+}
+
+// resolveClass resolves a type name as written in a pattern. A class nested in
+// another is registered under the class that encloses it and under no name of
+// its own, so the walk goes segment by segment, the way the checker resolves a
+// qualified name. A package name resolves to nothing here, and the pattern
+// stays total.
+func (e *Emitter) resolveClass(name string) *ast.Class {
+	parts := strings.Split(name, ".")
+	cl := e.prog.LookupClass(parts[0])
+	for _, seg := range parts[1:] {
+		if cl == nil {
+			return nil
+		}
+		cl = cl.Nested[seg]
+	}
+	return cl
+}
+
+// compTest renders the test a component pattern places on its component before
+// the variables nested inside that component may be read, or "" when there is
+// none. The name is the variable the component is read into; the test names it,
+// so an empty one only asks whether a test exists.
+//
+// A record pattern asks whether the component holds a value: matching a record
+// means being an instance of it, so a null component fails the pattern. A type
+// pattern that names a class narrower than the component's own type asks the
+// same question of that class, and a null component fails it as well. A type
+// pattern that names the component's own type is total — it reads the component
+// as it is, null included, which is what javac does — and a pattern written
+// without a type is total too, so both leave the component to the enclosing
+// test.
+func (e *Emitter) compTest(sub *ast.Param, comp *ast.Field, name string) string {
+	cls := e.nestedClass(sub, comp)
+	narrower := cls != nil && e.ctype(&ast.ClassType{Class: cls}) != e.ctype(comp.Type)
+	switch {
+	case len(sub.Decomp) > 0:
+		if narrower {
+			return fmt.Sprintf("%s != NULL && ty_instanceof((void*)%s, &cls_%s)", name, name, mangle(cls.Full))
+		}
+		return fmt.Sprintf("%s != NULL", name)
+	case narrower:
+		return fmt.Sprintf("ty_instanceof((void*)%s, &cls_%s)", name, mangle(cls.Full))
+	}
+	return ""
+}
+
+// patternTestsComponents reports whether a pattern asks about its components as
+// well as the record itself, which is what makes its condition more than the
+// type test on the value.
+func (e *Emitter) patternTestsComponents(p *ast.Param) bool {
+	for i, sub := range p.Decomp {
+		if i >= len(p.Comps) {
+			break
+		}
+		if e.compTest(sub, p.Comps[i], "") != "" || e.patternTestsComponents(sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// declareBinds declares the variables of a record pattern with their zero
+// values, each before the variables read out of it.
+func (e *Emitter) declareBinds(binds []compBind) {
+	for _, b := range binds {
+		e.line("%s %s = %s;\n", b.ct, b.name, zeroOf(b.ct))
+		e.declareBinds(b.subs)
+	}
+}
+
+// emitComponentReads fills the variables of a record pattern, outermost first.
+// okName names the int32_t variable holding the result of the pattern so far: a
+// component a nested pattern rejects clears it, so the test that reads these
+// variables reports that the pattern did not match. An empty okName is for a
+// caller that has already made sure the pattern matched — the reads a failed
+// test would have guarded are left out there. Either way a component nested in
+// another is only ever read under the test that makes it safe: a value that is
+// not of the tested type, or is not there at all, is never dereferenced.
+func (e *Emitter) emitComponentReads(binds []compBind, okName string) {
+	for _, b := range binds {
+		e.line("%s = %s;\n", b.name, b.accessor)
+		if b.test == "" {
+			continue
+		}
+		if len(b.subs) == 0 {
+			// nothing nested to read, so the test is the whole of it
+			if okName != "" {
+				e.line("if (!(%s)) { %s = 0; }\n", b.test, okName)
+			}
+			continue
+		}
+		e.line("if (%s) {\n", b.test)
+		e.indent++
+		e.emitComponentReads(b.subs, okName)
+		e.indent--
+		if okName == "" {
+			e.line("}\n")
+		} else {
+			e.line("} else { %s = 0; }\n", okName)
+		}
+	}
+}
+
+// bindComponents declares the variables of a record pattern and reads the
+// components into them. The receiver has already matched, so reading the
+// components themselves is safe; a component a nested pattern rejects is left
+// at its zero value instead of being read through.
+func (e *Emitter) bindComponents(p *ast.Param, recv string) {
+	binds := e.planComponents(p, recv)
+	e.declareBinds(binds)
+	e.emitComponentReads(binds, "")
 }
 
 // patternBind declares the variables of a case pattern with zero values, reads
 // them inside the type test, and returns the condition that says the pattern
 // matched. The caller must only use the variables under that condition: a value
-// that is not of the tested type is never read.
+// that is not of the tested type is never read, and neither is a component that
+// a nested pattern rejects — that component is read only under a test of its
+// own, which also clears the condition, so a nested pattern matches only when
+// every component it destructures is there and of the type it names.
+// switchSelectorValue renders the selector of the switch being emitted as the
+// runtime sees it. A primitive selector has to be boxed like any other
+// primitive operand of a primitive type pattern: handing ty_prim_match the
+// number where it expects an object made it dereference the value as a class
+// pointer (a switch on a long with `case int i` segfaulted).
+func (e *Emitter) switchSelectorValue(id int) string {
+	if p, ok := e.switchSel.(*ast.PrimType); ok && p.Kind != ast.Void {
+		if fn := boxFn(p.Kind); fn != "" {
+			return fn + fmt.Sprintf("(_s%d)", id)
+		}
+	}
+	return fmt.Sprintf("_s%d", id)
+}
+
+// switchOperandBoxed is primOperandBoxed for the selector of the switch being
+// emitted: a reference selector carries a box, a primitive one does not.
+func (e *Emitter) switchOperandBoxed() int {
+	return operandIsBox(e.prog, e.switchSel)
+}
+
 func (e *Emitter) patternBind(cs *ast.Case, id int) string {
 	pat := cs.Pattern
-	src := fmt.Sprintf("((void*)_s%d)", id)
+	src := e.switchSelectorValue(id)
 	if prim, isPrim := e.prog.Erased(pat.Type.Resolved).(*ast.PrimType); isPrim {
 		val := e.tmpName()
 		ok := e.tmpName()
 		e.line("%s %s = 0;\n", e.ctype(prim), val)
-		e.line("int32_t %s = ty_prim_match((void*)%s, %d, &%s);\n", ok, src, prim.Kind, val)
+		e.line("int32_t %s = ty_prim_match((void*)%s, %d, &%s, %d);\n", ok, src, prim.Kind, val,
+			e.switchOperandBoxed())
 		if pat.Sym != nil && !pat.Unnamed {
 			e.locals[pat.Sym] = val
 		}
@@ -794,31 +1132,51 @@ func (e *Emitter) patternBind(cs *ast.Case, id int) string {
 		varName = e.localName(pat.Sym)
 		e.line("%s %s = NULL;\n", ct, varName)
 	}
-	for _, b := range binds {
-		e.line("%s %s = %s;\n", b.ct, b.name, zeroOf(b.ct))
+	e.declareBinds(binds)
+	if len(binds) == 0 {
+		// nothing is read out of the match, so the type test is all of it
+		e.line("if (%s) {\n", pred)
+		e.indent++
+		e.line("%s = (%s)%s;\n", recv, ct, src)
+		if varName != "" {
+			e.line("%s = %s;\n", varName, recv)
+		}
+		e.indent--
+		e.line("}\n")
+		return fmt.Sprintf("(%s != NULL)", recv)
 	}
+	ok := e.tmpName()
+	e.line("int32_t %s = 0;\n", ok)
 	e.line("if (%s) {\n", pred)
 	e.indent++
 	e.line("%s = (%s)%s;\n", recv, ct, src)
-	if varName != "" {
-		e.line("%s = %s;\n", varName, recv)
-	}
-	for _, b := range binds {
-		e.line("%s = %s;\n", b.name, b.accessor)
-	}
+	// passing the type test is the whole of the match for a pattern with no
+	// nested components, and every one that fails a test of its own clears the
+	// flag again
+	e.line("%s = 1;\n", ok)
+	e.emitComponentReads(binds, ok)
 	e.indent--
 	e.line("}\n")
-	return fmt.Sprintf("(%s != NULL)", recv)
+	return fmt.Sprintf("(%s != 0)", ok)
 }
 
 // clearPatterns drops the substitutions recorded for one controlling expression.
 func (e *Emitter) clearPatterns() { e.patternVars = nil }
 
-// switchNeedsChain reports whether the switch uses patterns or guards, which
-// cannot be expressed as a plain C switch and are lowered as an if/else chain.
+// switchNeedsChain reports whether the switch uses patterns, guards or a null
+// case, which cannot be expressed as a plain C switch and are lowered as an
+// if/else chain.
+//
+// `case null` belongs here with them: the checker routes a reference selector
+// with a null case to a pattern switch, and nothing about a C case label can
+// ask whether the selector is null. Lowered as a constant switch, the label of
+// every constant case collapsed to the integer 0 — the comparison the chain
+// makes is about the value, not about the pointer — so all of them landed on
+// the null case at once (F2: "DDA" where javac prints "ADN"), and two of them
+// emitted the same C case twice, which does not compile at all.
 func switchNeedsChain(s *ast.Switch) bool {
 	for _, cs := range s.Cases {
-		if cs.Pattern != nil || cs.Guard != nil {
+		if cs.Pattern != nil || cs.Guard != nil || cs.Null {
 			return true
 		}
 	}
@@ -834,12 +1192,29 @@ func (e *Emitter) switchStmt(s *ast.Switch, resultTmp string) {
 	}
 	id := e.switchID
 	e.switchID++
+	// the selector's static type decides how a primitive type pattern in a case
+	// is matched: a reference selector carries a box and JEP 507 then requires
+	// the box to be exactly the pattern's type, while a primitive selector is
+	// only asked for an exact conversion
+	selType := e.switchSel
+	e.switchSel = s.X.GetType()
+	defer func() { e.switchSel = selType }()
+	// a yield in a case body reaches its switch through the emitter, however
+	// deeply the body nests it; see yieldStmt
+	curType := e.switchCur
+	if resultTmp != "" {
+		e.switchCur = id
+	} else {
+		e.switchCur = -id - 1
+	}
+	defer func() { e.switchCur = curType }()
 	if switchNeedsChain(s) {
 		e.switchChain(s, resultTmp, id)
 		return
 	}
 	e.line("{\n")
 	e.indent++
+	e.resultSlot(resultTmp, id)
 	selT := e.ctype(s.X.GetType())
 	switch s.Kind {
 	case ast.SwitchString:
@@ -880,6 +1255,12 @@ func (e *Emitter) switchStmt(s *ast.Switch, resultTmp string) {
 		}
 	}
 	e.line("default: goto _cd%d;\n}\n", id)
+	// A break anywhere in a case body leaves the switch, so the body is a level
+	// of its own on the loop stack: without it the break would leave the loop
+	// around the switch, and the finally actions of a try inside the case body
+	// would not run. A nested loop pushes its own entry above, which restores
+	// the loop meaning of a break inside it.
+	e.pushLoop(caseEndLabel(id))
 	for i, cs := range s.Cases {
 		if isDefaultCase(cs) {
 			continue
@@ -897,6 +1278,7 @@ func (e *Emitter) switchStmt(s *ast.Switch, resultTmp string) {
 		}
 	}
 	e.indent--
+	e.popLoop()
 	e.line("_end%d: ;\n", id)
 	e.indent--
 	e.line("}\n")
@@ -912,6 +1294,7 @@ func isDefaultCase(cs *ast.Case) bool {
 func (e *Emitter) switchChain(s *ast.Switch, resultTmp string, id int) {
 	e.line("{\n")
 	e.indent++
+	e.resultSlot(resultTmp, id)
 	selT := e.ctype(s.X.GetType())
 	e.line("%s _s%d = %s;\n", selT, id, e.expr(s.X))
 	e.line("int _k%d = -1;\n", id)
@@ -947,6 +1330,8 @@ func (e *Emitter) switchChain(s *ast.Switch, resultTmp string, id int) {
 		e.line("case %d: goto _c%d_%d;\n", i, id, i)
 	}
 	e.line("default: goto _cd%d;\n}\n", id)
+	// see switchStmt: the case bodies are a break level of their own
+	e.pushLoop(caseEndLabel(id))
 	for i, cs := range s.Cases {
 		if isDefaultCase(cs) {
 			continue
@@ -966,6 +1351,7 @@ func (e *Emitter) switchChain(s *ast.Switch, resultTmp string, id int) {
 		}
 	}
 	e.indent--
+	e.popLoop()
 	e.line("_end%d: ;\n", id)
 	e.indent--
 	e.line("}\n")
@@ -976,7 +1362,7 @@ func (e *Emitter) emitPatternBinding(cs *ast.Case, id int) {
 	if cs.Pattern == nil {
 		return
 	}
-	src := fmt.Sprintf("((void*)_s%d)", id)
+	src := e.switchSelectorValue(id)
 	if prim, isPrim := e.prog.Erased(cs.Pattern.Type.Resolved).(*ast.PrimType); isPrim {
 		// the body only runs when the pattern matched, so the value is simply
 		// read again
@@ -985,7 +1371,8 @@ func (e *Emitter) emitPatternBinding(cs *ast.Case, id int) {
 		}
 		n := e.localName(cs.Pattern.Sym)
 		e.line("%s %s = 0;\n", e.ctype(prim), n)
-		e.line("ty_prim_match((void*)%s, %d, &%s);\n", src, prim.Kind, n)
+		e.line("ty_prim_match((void*)%s, %d, &%s, %d);\n", src, prim.Kind, n,
+			e.switchOperandBoxed())
 		return
 	}
 	if len(cs.Pattern.Decomp) > 0 {
@@ -1009,11 +1396,7 @@ func (e *Emitter) caseCond(s *ast.Switch, cs *ast.Case, id int) string {
 		parts = append(parts, fmt.Sprintf("(_s%d == NULL)", id))
 	}
 	for _, l := range cs.Labels {
-		if s.Kind == ast.SwitchString {
-			parts = append(parts, fmt.Sprintf("ty_str_eq((tystr*)_s%d, (tystr*)%s)", id, e.expr(l)))
-			continue
-		}
-		parts = append(parts, fmt.Sprintf("((int64_t)_s%d == %s)", id, e.constInt(l)))
+		parts = append(parts, e.labelCond(s.X.GetType(), l, id))
 	}
 	primitive := false
 	if cs.Pattern != nil {
@@ -1044,23 +1427,112 @@ func (e *Emitter) caseCond(s *ast.Switch, cs *ast.Case, id int) string {
 		}
 		return fmt.Sprintf("({ %s (%s) && (%s); })", inner, bound, guard)
 	}
-	if cs.Guard == nil {
+	if cs.Guard == nil && (cs.Pattern == nil || !e.patternTestsComponents(cs.Pattern)) {
 		return cond
 	}
 	if cs.Pattern != nil {
 		// The guard reads the pattern variables, so they have to exist before
 		// it runs. They are read inside the type test and the whole thing
 		// becomes the condition, which keeps a value of the wrong type from
-		// ever being dereferenced.
+		// ever being dereferenced. A nested pattern is bound the same way and
+		// for a second reason: what it reads is only there under the tests of
+		// its own components, and those tests have to be part of the condition
+		// that picks the case, or the body would run for a value the pattern
+		// rejects.
 		var guard string
 		var bound string
 		inner := e.capture(func() {
 			bound = e.patternBind(cs, id)
-			guard = e.expr(cs.Guard)
+			if cs.Guard != nil {
+				guard = e.expr(cs.Guard)
+			}
 		})
+		if cs.Guard == nil {
+			return fmt.Sprintf("({ %s %s; })", inner, bound)
+		}
 		return fmt.Sprintf("({ %s (%s) && (%s); })", inner, bound, guard)
 	}
 	return "(" + cond + " && " + e.expr(cs.Guard) + ")"
+}
+
+// labelCond renders the test of one constant case label against the selector.
+//
+// The comparison follows the selector's static type rather than the switch kind
+// the checker resolved. A `case null` turns a switch on a String or an enum
+// into a pattern switch, and its labels are still String constants or enum
+// constants: compared as plain integers they all came out as 0, so every one of
+// them matched the null case as well, and a switch that also held a type
+// pattern compared a pointer against an ordinal and never matched its constants
+// at all.
+func (e *Emitter) labelCond(sel ast.Type, l ast.Expr, id int) string {
+	switch {
+	case e.isStringSelector(sel):
+		return fmt.Sprintf("ty_str_eq((tystr*)_s%d, (tystr*)%s)", id, e.expr(l))
+	case e.isEnumSelector(sel):
+		// an enum constant is only reachable through its ordinal, the same
+		// value the constant dispatch switches on
+		return fmt.Sprintf("(ty_enum_ordinal((void*)_s%d) == %s)", id, e.constInt(l))
+	}
+	if c, ok := e.boxedLabelCond(sel, l, id); ok {
+		return c
+	}
+	return fmt.Sprintf("((int64_t)_s%d == %s)", id, e.constInt(l))
+}
+
+// boxedLabelCond renders the test of one constant label against a selector that
+// holds a box, and reports whether it applies.
+//
+// A `case null` is also what lets a switch be written on a box at all: the
+// checker rejects a box as a switch selector unless a null case makes it a
+// pattern switch, and the chain that lowers such a switch holds the box, not
+// the value in it. Comparing the box as an integer never matched, so every
+// constant label of such a switch silently answered with the default; Java
+// compares the value the box carries.
+//
+// A null selector carries no value to compare and belongs to the null case, as
+// Java says, so the test asks for the box before it opens it: an unboxing call
+// on null is a NullPointerException, and a case label must not throw it.
+func (e *Emitter) boxedLabelCond(sel ast.Type, l ast.Expr, id int) (string, bool) {
+	ct, ok := e.prog.Erased(sel).(*ast.ClassType)
+	if !ok || ct.Class == nil {
+		return "", false
+	}
+	kind, ok := e.prog.Builtins.Unbox[ct.Class]
+	if !ok {
+		return "", false
+	}
+	fn := "ty_unbox_int"
+	switch kind {
+	case ast.Boolean:
+		fn = "ty_unbox_bool"
+	case ast.Byte:
+		fn = "ty_unbox_byte"
+	case ast.Short:
+		fn = "ty_unbox_short"
+	case ast.Char:
+		fn = "ty_unbox_char"
+	case ast.Long:
+		fn = "ty_unbox_long"
+	case ast.Float:
+		fn = "ty_unbox_float"
+	case ast.Double:
+		fn = "ty_unbox_double"
+	}
+	return fmt.Sprintf("(_s%d != NULL && %s((void*)_s%d) == %s)", id, fn, id, e.constInt(l)), true
+}
+
+// isStringSelector reports whether a selector has the String type, the only
+// reference type whose case labels are compared by value.
+func (e *Emitter) isStringSelector(t ast.Type) bool {
+	ct, ok := e.prog.Erased(t).(*ast.ClassType)
+	return ok && ct.Class == e.prog.Builtins.String
+}
+
+// isEnumSelector reports whether a selector is an enum, whose case labels name
+// its constants.
+func (e *Emitter) isEnumSelector(t ast.Type) bool {
+	ct, ok := e.prog.Erased(t).(*ast.ClassType)
+	return ok && ct.Class != nil && ct.Class.Kind == ast.KindEnum
 }
 
 // classOf renders the class descriptor of a resolved type.
@@ -1086,6 +1558,12 @@ func (e *Emitter) constInt(l ast.Expr) string {
 }
 
 // switchCaseBody emits one case body; Java colon cases fall through.
+//
+// A yield in the body is left to e.stmt: it is the switch being emitted, not
+// the shape of the body, that gives a yield its value and its end label, so
+// every statement of the body — whatever depth a yield hides at — is emitted
+// the same way. Looking for yields in the body's own statements found only the
+// ones written directly in it.
 func (e *Emitter) switchCaseBody(cs *ast.Case, resultTmp string, id int) {
 	if cs.ArrowX != nil {
 		if resultTmp != "" {
@@ -1097,35 +1575,6 @@ func (e *Emitter) switchCaseBody(cs *ast.Case, resultTmp string, id int) {
 		return
 	}
 	for _, st := range cs.Body {
-		if y, ok := st.(*ast.Yield); ok {
-			if resultTmp != "" {
-				e.line("%s = %s;\n", resultTmp, e.expr(y.X))
-			}
-			e.line("goto _end%d;\n", id)
-			continue
-		}
-		if _, isBreak := st.(*ast.Break); isBreak {
-			e.line("goto _end%d;\n", id)
-			continue
-		}
-		if b, ok := st.(*ast.Block); ok && resultTmp != "" {
-			e.emitYieldBlock(b, resultTmp, id)
-			continue
-		}
 		e.stmt(st)
 	}
 }
-
-// emitYieldBlock handles blocks that yield a value inside a switch expression.
-func (e *Emitter) emitYieldBlock(b *ast.Block, resultTmp string, id int) {
-	for _, st := range b.Stmts {
-		if y, ok := st.(*ast.Yield); ok {
-			e.line("%s = %s;\n", resultTmp, e.expr(y.X))
-			e.line("goto _end%d;\n", id)
-			continue
-		}
-		e.stmt(st)
-	}
-}
-
-var _ = ast.ModPublic

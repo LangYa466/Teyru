@@ -1,0 +1,7 @@
+// A failed assert ends the program with a diagnostic, like java -ea.
+class Main {
+  public static void main(String[] args) {
+    System.out.println("checking")
+    assert 1 > 2 : "one is not greater than two"
+  }
+}

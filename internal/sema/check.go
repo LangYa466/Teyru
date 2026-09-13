@@ -19,7 +19,6 @@ type methodCtx struct {
 	scopes          []map[string]*ast.Var
 	loops           int
 	sw              *ast.Switch
-	try             int
 	lambda          *ast.Lambda
 	staticImports   []*ast.Field
 	staticMethods   map[string][]*ast.Method
@@ -547,7 +546,6 @@ func (ctx *methodCtx) checkTry(v *ast.Try) {
 	c := ctx.c
 	ctx.push()
 	defer ctx.pop()
-	ctx.try++
 	for _, r := range v.Resources {
 		ctx.checkStmt(r)
 		if lv, ok := r.(*ast.LocalVar); ok {
@@ -578,7 +576,6 @@ func (ctx *methodCtx) checkTry(v *ast.Try) {
 	if v.Finally != nil {
 		ctx.checkBlock(v.Finally, true)
 	}
-	ctx.try--
 }
 
 func (ctx *methodCtx) checkSwitch(s *ast.Switch, expr bool) {
@@ -597,7 +594,9 @@ func (ctx *methodCtx) checkSwitch(s *ast.Switch, expr bool) {
 	switch {
 	case hasPattern && ast.IsRef(xt):
 		s.Kind = ast.SwitchType
-	case isNumericType(xt) || ast.IsPrim(xt, ast.Char):
+	case isIntegralType(xt):
+		// float and double selectors are not integral: they fall through to
+		// the diagnostic below rather than being truncated to int.
 		s.Kind = ast.SwitchInt
 	case c.isSubtype(xt, c.strType):
 		s.Kind = ast.SwitchString
@@ -610,6 +609,7 @@ func (ctx *methodCtx) checkSwitch(s *ast.Switch, expr bool) {
 		s.Kind = ast.SwitchInt
 	}
 	seen := map[string]bool{}
+	covered := map[string]bool{}
 	hasDefault := false
 	for _, cs := range s.Cases {
 		if cs.Default {
@@ -643,6 +643,15 @@ func (ctx *methodCtx) checkSwitch(s *ast.Switch, expr bool) {
 		for _, l := range cs.Labels {
 			ctx.checkExpr(l, nil)
 			ctx.convertTo(l, xt)
+			// what the label names, for the exhaustiveness check below: an
+			// enum constant is written bare or qualified (`case RED` and
+			// `case Color.RED` are the same constant)
+			switch lbl := l.(type) {
+			case *ast.Ident:
+				covered[lbl.Name] = true
+			case *ast.Select:
+				covered[lbl.Name] = true
+			}
 			cv := c.constEval(l)
 			if !cv.ok {
 				ctx.errf(l.GetPos(), "TY-TYP-0038", "case label must be a constant expression")
@@ -678,11 +687,39 @@ func (ctx *methodCtx) checkSwitch(s *ast.Switch, expr bool) {
 			ctx.pop()
 		}
 	}
+	// A switch expression must be exhaustive (JLS 14.11.2): with no default and
+	// no arms that cover every value it would evaluate to the type's zero
+	// value, a silent wrong answer. An enum selector is decidable here, so it
+	// is checked rather than refused outright like the others.
+	if expr && !hasDefault {
+		switch s.Kind {
+		case ast.SwitchInt, ast.SwitchString:
+			ctx.errf(s.Pos, "TY-TYP-0096", "switch expression does not cover all possible input values")
+		case ast.SwitchEnum:
+			et, ok := xt.(*ast.ClassType)
+			if ok {
+				for _, f := range et.Class.EnumConsts {
+					if !covered[f.Name] {
+						ctx.errf(s.Pos, "TY-TYP-0096", "switch expression does not cover all possible input values")
+						break
+					}
+				}
+			}
+		}
+	}
 }
 
 func isEnumType(t ast.Type) bool {
 	ct, ok := t.(*ast.ClassType)
 	return ok && ct.Class.Kind == ast.KindEnum
+}
+
+// isIntegralType reports whether t is a primitive integral type, char included.
+// float and double are deliberately excluded: a switch selector must be
+// integral (docs/language.md §6.4).
+func isIntegralType(t ast.Type) bool {
+	p, ok := t.(*ast.PrimType)
+	return ok && p.IsIntegral()
 }
 
 // ---------------------------------------------------------------- expressions
@@ -1058,11 +1095,6 @@ func (ctx *methodCtx) captureOuter(target *ast.Class, v *ast.Var) {
 			break
 		}
 	}
-}
-
-// convert inserts an implicit conversion when needed.
-func (ctx *methodCtx) convert(e ast.Expr, target ast.Type) ast.Expr {
-	return ctx.convertWith(e, target, e.GetType())
 }
 
 func (ctx *methodCtx) convertWith(e ast.Expr, target, src ast.Type) ast.Expr {
@@ -1761,7 +1793,7 @@ func (ctx *methodCtx) checkNew(v *ast.New, want ast.Type) {
 	if pt, ok := t.(*ast.ClassType); ok && len(pt.Args) > 0 {
 		ctorType = pt
 	}
-	ctor := c.resolveCtor(ctx, ctorType, v, cl)
+	ctor := c.resolveCtor(ctx, ctorType, v, cl, want)
 	_ = ctor
 	// outer instance for inner classes
 	if cl.Inner {
@@ -1883,16 +1915,8 @@ func findClass(scope, target *ast.Class) *ast.Class {
 	return found
 }
 
-// isInstanceContext reports whether the current class has an enclosing instance of target.
-func (c *Checker) isInstanceContext(ctx *methodCtx, target *ast.Class) bool {
-	if ctx.inStatic() {
-		return false
-	}
-	return findEnclosing(ctx.cl, target) != nil
-}
-
 // resolveCtor picks a constructor and checks arguments.
-func (c *Checker) resolveCtor(ctx *methodCtx, ct *ast.ClassType, v *ast.New, cl *ast.Class) *ast.Method {
+func (c *Checker) resolveCtor(ctx *methodCtx, ct *ast.ClassType, v *ast.New, cl *ast.Class, want ast.Type) *ast.Method {
 	if cl.IsInterface() {
 		// interfaces have no constructors; an anonymous class implements one
 		for _, a := range v.Args {
@@ -1905,7 +1929,7 @@ func (c *Checker) resolveCtor(ctx *methodCtx, ct *ast.ClassType, v *ast.New, cl 
 	if len(cands) == 0 {
 		cands = append(cands, &ast.Method{Name: "<init>", IsCtor: true, Owner: cl, Mods: ast.ModPublic, Result: ast.TVoid})
 	}
-	best, score := ctx.pickOverload(ct, cands, v.Args)
+	best, score := ctx.pickOverload(ct, cands, v.Args, want)
 	if best == nil {
 		ctx.errf(v.Pos, "TY-TYP-0072", "no suitable constructor found for %s(%s)", cl.Name, argTypes(v.Args))
 		for _, e := range v.Args {
@@ -1914,7 +1938,6 @@ func (c *Checker) resolveCtor(ctx *methodCtx, ct *ast.ClassType, v *ast.New, cl 
 		return nil
 	}
 	ctx.bindArgs(best, score, v.Args, ct)
-	v.Varargs = score.varargs
 	return best
 }
 
@@ -1933,18 +1956,24 @@ func argTypes(args []ast.Expr) string {
 
 type ovScore struct {
 	total    int
-	varargs  int
-	convs    []int
 	method   *ast.Method
 	instArgs []ast.Type
 	targs    map[*ast.TypeVar]ast.Type // inferred method type arguments
+	// phase is the applicability phase the candidate was found in
+	// (JLS 15.12.2): 1 without boxing or varargs, 2 with boxing, 3 with a
+	// variable-arity call. An earlier phase always wins over a later one.
+	phase int
 	// directVarargs records that a varargs method was called with the array
 	// itself rather than with individual arguments
 	directVarargs bool
 }
 
-// pickOverload chooses the most specific applicable method.
-func (ctx *methodCtx) pickOverload(recv *ast.ClassType, cands []*ast.Method, args []ast.Expr) (*ast.Method, ovScore) {
+// pickOverload chooses the method to call following the phases of JLS 15.12.2:
+// the candidates applicable without boxing or varargs are considered first, then
+// those that need boxing, and only if none applies the variable-arity ones. A
+// varargs call whose elements all match exactly used to tie with a fixed-arity
+// method and win or lose on declaration order alone.
+func (ctx *methodCtx) pickOverload(recv *ast.ClassType, cands []*ast.Method, args []ast.Expr, want ast.Type) (*ast.Method, ovScore) {
 	// Check arguments once with no target to obtain their types. Lambdas and
 	// method references need a target type, so they are checked after the
 	// overload is chosen, in bindArgs.
@@ -1954,23 +1983,88 @@ func (ctx *methodCtx) pickOverload(recv *ast.ClassType, cands []*ast.Method, arg
 		}
 	}
 	best := ovScore{total: 1 << 30}
-	for _, m := range cands {
-		if !ctx.accessible(m) {
-			continue
+	for phase := phaseStrict; phase <= phaseVarargs; phase++ {
+		for _, m := range cands {
+			if !ctx.accessible(m) {
+				continue
+			}
+			s, ok := ctx.applicable(recv, m, args, want)
+			if !ok || s.phase != phase {
+				continue
+			}
+			if best.method == nil || s.total < best.total {
+				best = s
+			}
 		}
-		s, ok := ctx.applicable(recv, m, args)
-		if !ok {
-			continue
-		}
-		if best.method == nil || s.total < best.total {
-			best = s
+		if best.method != nil {
+			ctx.checkInferred(best.method, best.targs, args)
+			return best.method, best
 		}
 	}
-	if best.method == nil {
-		return nil, best
-	}
-	return best.method, best
+	return nil, best
 }
+
+// checkInferred rejects a call whose method type arguments stayed unknown: the
+// signature would collapse to void or to a missing type at lowering time, and
+// handing that to the C backend ends in an error about generated code rather
+// than about the program. An argument that is not a lambda always reports its
+// own type, so only a lambda (or method reference) can leave a hole.
+func (ctx *methodCtx) checkInferred(m *ast.Method, targs map[*ast.TypeVar]ast.Type, args []ast.Expr) {
+	if len(m.TypeParams) == 0 {
+		return
+	}
+	missing := false
+	for _, tv := range m.TypeParams {
+		if targs[tv] == nil && mentionsTypeVar(m, tv) {
+			missing = true
+			break
+		}
+	}
+	if !missing {
+		return
+	}
+	pos := m.Pos
+	for _, a := range args {
+		if isLambdaLike(a) && a.GetType() == nil {
+			pos = a.GetPos()
+			break
+		}
+	}
+	ctx.errf(pos, "TY-TYP-0095", "cannot infer the type arguments of %s(%s)", m.Name, argTypes(args))
+}
+
+// mentionsTypeVar reports whether tv occurs in the signature of m.
+func mentionsTypeVar(m *ast.Method, tv *ast.TypeVar) bool {
+	for _, t := range m.Params {
+		if mentionsType(t, tv) {
+			return true
+		}
+	}
+	return mentionsType(m.Result, tv)
+}
+
+func mentionsType(t ast.Type, tv *ast.TypeVar) bool {
+	switch v := t.(type) {
+	case *ast.TypeVarType:
+		return v.Var == tv
+	case *ast.ClassType:
+		for _, a := range v.Args {
+			if mentionsType(a, tv) {
+				return true
+			}
+		}
+	case *ast.ArrayType:
+		return mentionsType(v.Elem, tv)
+	}
+	return false
+}
+
+// The applicability phases of JLS 15.12.2, in the order they are tried.
+const (
+	phaseStrict  = 1 // no boxing, no varargs
+	phaseBoxing  = 2 // boxing allowed, no varargs
+	phaseVarargs = 3 // variable arity
+)
 
 func (ctx *methodCtx) accessible(m *ast.Method) bool {
 	if m.Owner == nil || m.Owner.Builtin {
@@ -2000,7 +2094,10 @@ func samePackage(a, b *ast.File) bool {
 }
 
 // applicable reports whether args can be passed to m together with a cost.
-func (ctx *methodCtx) applicable(recv *ast.ClassType, m *ast.Method, args []ast.Expr) (ovScore, bool) {
+// want is the type the call is expected to produce, which is what determines a
+// method type argument that no argument can pin down (a lambda has no type of
+// its own until it is checked against its target interface).
+func (ctx *methodCtx) applicable(recv *ast.ClassType, m *ast.Method, args []ast.Expr, want ast.Type) (ovScore, bool) {
 	c := ctx.c
 	// substitute type variables from the receiver
 	bind := map[*ast.TypeVar]ast.Type{}
@@ -2027,6 +2124,13 @@ func (ctx *methodCtx) applicable(recv *ast.ClassType, m *ast.Method, args []ast.
 			mbind[tv] = ctx.pendingTypeArgs[i]
 		}
 	}
+	// An argument that is a lambda cannot say which type argument it stands
+	// for, so the result the call must produce is matched against the declared
+	// result type first: `Box<Integer> c = b.map(s -> len(s))` infers the
+	// method's U from the Box<Integer> the caller asked for.
+	if want != nil {
+		c.inferTypeArg(m.Result, want, mbind)
+	}
 	n := len(params)
 	if m.Varargs {
 		n--
@@ -2038,22 +2142,29 @@ func (ctx *methodCtx) applicable(recv *ast.ClassType, m *ast.Method, args []ast.
 		return ovScore{}, false
 	}
 	// A varargs method also accepts the array itself in place of the arguments.
+	// That invocation passes the array explicitly, so it is an ordinary
+	// fixed-arity one and takes part in the phases above.
+	direct := false
 	if m.Varargs && len(args) == len(params) {
-		direct := true
-		total := 0
+		direct, boxed, total := true, false, 0
 		for i, a := range args {
 			cost, ok := ctx.convCost(a.GetType(), params[i])
 			if !ok {
 				direct = false
 				break
 			}
+			if cost >= convBoxingCost {
+				boxed = true
+			}
 			total += cost
 		}
 		if direct {
-			return ovScore{method: m, instArgs: params, targs: mbind, total: total, directVarargs: true}, true
+			return ovScore{method: m, instArgs: params, targs: mbind, total: total,
+				phase: phase(boxed), directVarargs: true}, true
 		}
 	}
 	s := ovScore{method: m, instArgs: params}
+	boxed := false
 	for i, a := range args {
 		var pt ast.Type
 		switch {
@@ -2075,7 +2186,6 @@ func (ctx *methodCtx) applicable(recv *ast.ClassType, m *ast.Method, args []ast.
 					params[i] = c.subst(pt, mbind)
 				}
 				s.total += 1
-				s.convs = append(s.convs, 1)
 				continue
 			}
 		}
@@ -2092,17 +2202,27 @@ func (ctx *methodCtx) applicable(recv *ast.ClassType, m *ast.Method, args []ast.
 			}
 			return ovScore{}, false
 		}
-		s.total += cost
-		s.convs = append(s.convs, cost)
-	}
-	if m.Varargs {
-		s.varargs = -1
-		if m.Varargs && len(args) != len(params) {
-			s.varargs = len(args)
+		if cost >= convBoxingCost {
+			boxed = true
 		}
+		s.total += cost
+	}
+	// the variable-arity phase: the arguments are collected into a fresh array
+	if m.Varargs && !direct {
+		s.phase = phaseVarargs
+	} else {
+		s.phase = phase(boxed)
 	}
 	s.targs = mbind
 	return s, true
+}
+
+// phase maps a candidate that avoids varargs to its applicability phase.
+func phase(boxed bool) int {
+	if boxed {
+		return phaseBoxing
+	}
+	return phaseStrict
 }
 
 // assignableTo reports whether a value of type t may be used where target is
@@ -2207,6 +2327,10 @@ func (c *Checker) inferTypeArg(param, arg ast.Type, bind map[*ast.TypeVar]ast.Ty
 	}
 	return param
 }
+
+// convBoxingCost is the cheapest conversion cost that boxes or unboxes: a
+// candidate that needs one is applicable only from the boxing phase on.
+const convBoxingCost = 2
 
 // convCost returns 0 for identity, 1 for widening/upcast, 2 for boxing, 3 for unboxing.
 func (ctx *methodCtx) convCost(src, target ast.Type) (int, bool) {
@@ -2400,13 +2524,16 @@ func (ctx *methodCtx) checkQualifiedSuper(v *ast.Call) {
 		return
 	}
 	recv := &ast.ClassType{Class: iface, Args: typeVarArgs(iface)}
-	m, sc := ctx.pickOverload(recv, ctx.methodsOf(iface, v.Name), v.Args)
+	m, sc := ctx.pickOverload(recv, ctx.methodsOf(iface, v.Name), v.Args, nil)
 	if m == nil {
 		ctx.errf(v.Pos, "TY-TYP-0076", "cannot find method %s(%s) in %s", v.Name, argTypes(v.Args), iface.Name)
 		v.SetType(ast.ErrorType{})
 		return
 	}
 	ctx.bindArgs(m, sc, v.Args, recv)
+	if sc.directVarargs {
+		ctx.c.Direct[v] = true
+	}
 	v.Method = m
 	v.SetType(m.Result)
 }
@@ -2421,7 +2548,7 @@ func (ctx *methodCtx) checkThisCtor(v *ast.Call) {
 			v.SetType(ast.TVoid)
 			return
 		}
-		m, s := ctx.pickOverload(ctx.cl.Super, ctx.cl.Super.Class.Ctors, v.Args)
+		m, s := ctx.pickOverload(ctx.cl.Super, ctx.cl.Super.Class.Ctors, v.Args, nil)
 		if m == nil {
 			ctx.errf(v.Pos, "TY-TYP-0072", "no suitable constructor found for %s(%s)", ctx.cl.Super.Class.Name, argTypes(v.Args))
 		} else {
@@ -2429,11 +2556,14 @@ func (ctx *methodCtx) checkThisCtor(v *ast.Call) {
 			v.Method = m
 		}
 	} else {
-		m, s := ctx.pickOverload(&ast.ClassType{Class: ctx.cl}, ctx.cl.Ctors, v.Args)
+		m, s := ctx.pickOverload(&ast.ClassType{Class: ctx.cl}, ctx.cl.Ctors, v.Args, nil)
 		if m == nil {
 			ctx.errf(v.Pos, "TY-TYP-0072", "no suitable constructor found for %s(%s)", ctx.cl.Name, argTypes(v.Args))
 		} else {
-			if m != ctx.m {
+			// JLS 8.8.7.1: delegating to another constructor is legal, but a
+			// cycle of this(...) calls never terminates. The diagnostic fires
+			// on whichever delegation closes the cycle.
+			if ctx.delegationCloses(m) {
 				ctx.errf(v.Pos, "TY-TYP-0075", "recursive constructor invocation")
 			}
 			ctx.bindArgs(m, s, v.Args, &ast.ClassType{Class: ctx.cl})
@@ -2443,10 +2573,55 @@ func (ctx *methodCtx) checkThisCtor(v *ast.Call) {
 	v.SetType(ast.TVoid)
 }
 
+// delegationCloses reports whether the chain of this(...) calls reachable from
+// m comes back to the constructor being checked, either directly or through a
+// cycle that never leaves it. Bodies are checked in declaration order, so a
+// cycle is first visible from whichever of its constructors is checked last:
+// the walk follows the delegation targets resolved so far and stops at the
+// first constructor whose own this(...) call has not been checked yet.
+func (ctx *methodCtx) delegationCloses(m *ast.Method) bool {
+	seen := map[*ast.Method]bool{}
+	for m != nil {
+		if m == ctx.m || seen[m] {
+			return true
+		}
+		seen[m] = true
+		m = thisCtorTarget(m)
+	}
+	return false
+}
+
+// thisCtorTarget returns the constructor that a leading this(...) call in m's
+// body delegates to, or nil when m's body does not delegate. A super(...) call
+// chains to a different class and is never part of a cycle.
+func thisCtorTarget(m *ast.Method) *ast.Method {
+	if m == nil {
+		return nil
+	}
+	// a source constructor keeps its body on the declaration, a synthesized
+	// one carries it on the method itself
+	body := m.Body
+	if body == nil && m.Decl != nil {
+		body = m.Decl.Body
+	}
+	if body == nil || len(body.Stmts) == 0 {
+		return nil
+	}
+	es, ok := body.Stmts[0].(*ast.ExprStmt)
+	if !ok {
+		return nil
+	}
+	call, ok := es.X.(*ast.Call)
+	if !ok || !call.ThisCtor || call.Super {
+		return nil
+	}
+	return call.Method
+}
+
 func (ctx *methodCtx) checkUnqualifiedCall(v *ast.Call, want ast.Type) {
 	// methods of the enclosing class chain
 	recv := &ast.ClassType{Class: ctx.cl, Args: typeVarArgs(ctx.cl)}
-	if m, s := ctx.pickOverload(recv, ctx.methodsOf(ctx.cl, v.Name), v.Args); m != nil {
+	if m, s := ctx.pickOverload(recv, ctx.methodsOf(ctx.cl, v.Name), v.Args, want); m != nil {
 		ctx.bindArgs(m, s, v.Args, recv)
 		if s.directVarargs {
 			ctx.c.Direct[v] = true
@@ -2456,14 +2631,13 @@ func (ctx *methodCtx) checkUnqualifiedCall(v *ast.Call, want ast.Type) {
 		v.SetType(ctx.c.subst(m.Result, s.targs))
 		return
 	}
-	// implicit this receiver also covers superclass methods
-	if m := ctx.findInChain(v.Name, v.Args); m != nil {
-		return
-	}
 	// static imports
 	for _, m := range ctx.staticMethods[v.Name] {
-		if s, ok := ctx.applicable(recv, m, v.Args); ok {
+		if s, ok := ctx.applicable(recv, m, v.Args, want); ok {
 			ctx.bindArgs(m, s, v.Args, nil)
+			if s.directVarargs {
+				ctx.c.Direct[v] = true
+			}
 			v.Method = m
 			v.Static = true
 			v.SetType(ctx.c.subst(m.Result, s.targs))
@@ -2473,8 +2647,11 @@ func (ctx *methodCtx) checkUnqualifiedCall(v *ast.Call, want ast.Type) {
 	// enclosing class (inner class calling outer method)
 	for cl := ctx.cl.Outer; cl != nil; cl = cl.Outer {
 		orecv := &ast.ClassType{Class: cl, Args: typeVarArgs(cl)}
-		if m, s := ctx.pickOverload(orecv, ctx.methodsOf(cl, v.Name), v.Args); m != nil {
+		if m, s := ctx.pickOverload(orecv, ctx.methodsOf(cl, v.Name), v.Args, want); m != nil {
 			ctx.bindArgs(m, s, v.Args, orecv)
+			if s.directVarargs {
+				ctx.c.Direct[v] = true
+			}
 			v.Method = m
 			v.Static = m.IsStatic()
 			v.Recv = &ast.This{ExprBase: ast.ExprBase{Pos: v.Pos, T: orecv}, Qual: cl.Full, Var: ctx.thisVar(cl)}
@@ -2487,7 +2664,7 @@ func (ctx *methodCtx) checkUnqualifiedCall(v *ast.Call, want ast.Type) {
 	if ctx.cl != nil && ctx.cl.Decl != nil && ctx.cl.Decl.Implicit {
 		if io := ctx.c.programClass("IO"); io != nil {
 			recv := &ast.ClassType{Class: io}
-			if m, s := ctx.pickOverload(recv, ctx.methodsOf(io, v.Name), v.Args); m != nil {
+			if m, s := ctx.pickOverload(recv, ctx.methodsOf(io, v.Name), v.Args, want); m != nil {
 				ctx.bindArgs(m, s, v.Args, recv)
 				v.Method = m
 				v.Static = true
@@ -2506,19 +2683,6 @@ func (ctx *methodCtx) thisVar(cl *ast.Class) *ast.Var {
 	}
 	if ctx.m != nil {
 		return ctx.m.ThisVar
-	}
-	return nil
-}
-
-func (ctx *methodCtx) findInChain(name string, args []ast.Expr) *ast.Method {
-	for cl := ctx.cl; cl != nil; cl = cl.Outer {
-		recv := &ast.ClassType{Class: cl, Args: typeVarArgs(cl)}
-		if m, s := ctx.pickOverload(recv, ctx.methodsOf(cl, name), args); m != nil {
-			// unreachable: handled by caller
-			_ = m
-			_ = s
-			return nil
-		}
 	}
 	return nil
 }
@@ -2542,11 +2706,14 @@ func (ctx *methodCtx) methodsOf(cl *ast.Class, name string) []*ast.Method {
 func (ctx *methodCtx) checkMethodCall(v *ast.Call, rt ast.Type, want ast.Type) {
 	// A type name receiver: static call or nested class field
 	if cl := ctx.typeOf(v.Recv); cl != nil {
-		if m, s := ctx.pickOverload(&ast.ClassType{Class: cl, Args: typeVarArgs(cl)}, ctx.methodsOf(cl, v.Name), v.Args); m != nil {
+		if m, s := ctx.pickOverload(&ast.ClassType{Class: cl, Args: typeVarArgs(cl)}, ctx.methodsOf(cl, v.Name), v.Args, want); m != nil {
 			if !m.IsStatic() {
 				ctx.errf(v.Pos, "TY-TYP-0077", "non-static method %s cannot be referenced from a type name", v.Name)
 			}
 			ctx.bindArgs(m, s, v.Args, &ast.ClassType{Class: cl})
+			if s.directVarargs {
+				ctx.c.Direct[v] = true
+			}
 			v.Method = m
 			v.Static = true
 			v.SetType(ctx.c.subst(m.Result, s.targs))
@@ -2581,7 +2748,7 @@ func (ctx *methodCtx) checkMethodCall(v *ast.Call, rt ast.Type, want ast.Type) {
 		v.SetType(ast.ErrorType{})
 		return
 	}
-	m, s := ctx.pickOverload(recvCT, cands, v.Args)
+	m, s := ctx.pickOverload(recvCT, cands, v.Args, want)
 	if m == nil {
 		ctx.errf(v.Pos, "TY-TYP-0076", "cannot find method %s(%s) in %s", v.Name, argTypes(v.Args), recvCT.Class.Name)
 		v.SetType(ast.ErrorType{})
@@ -2603,7 +2770,6 @@ func (ctx *methodCtx) checkMethodCall(v *ast.Call, rt ast.Type, want ast.Type) {
 	if !v.Static && !ctx.accessibleInstance(m, rt) {
 		ctx.errf(v.Pos, "TY-TYP-0079", "%s has %s access in %s", m.Name, visName(m.Mods), m.Owner.Name)
 	}
-	ctx.rewritePropCall(v, m)
 }
 
 // tryExtensionMethod rewrites `a.foo(b)` into `Extensions.foo(a, b)` for
@@ -2617,7 +2783,7 @@ func (ctx *methodCtx) tryExtensionMethod(v *ast.Call, rt ast.Type) bool {
 	for _, ext := range exts {
 		recv := &ast.ClassType{Class: ext}
 		args := append([]ast.Expr{v.Recv}, v.Args...)
-		if m, s := ctx.pickOverload(recv, ctx.methodsOf(ext, v.Name), args); m != nil {
+		if m, s := ctx.pickOverload(recv, ctx.methodsOf(ext, v.Name), args, nil); m != nil {
 			ctx.bindArgs(m, s, args, recv)
 			v.Static = true
 			v.Method = m
@@ -2652,8 +2818,6 @@ func visName(m ast.Mods) string {
 	}
 	return "package"
 }
-
-func (ctx *methodCtx) rewritePropCall(v *ast.Call, m *ast.Method) {}
 
 // recvClass unwraps a type into a receiver class type (boxing primitives).
 func (ctx *methodCtx) recvClass(t ast.Type) *ast.ClassType {
@@ -2782,16 +2946,12 @@ func (ctx *methodCtx) checkSelect(v *ast.Select, want ast.Type) {
 		return
 	}
 	// array length
-	if arr, ok := xt.(*ast.ArrayType); ok {
+	if _, ok := xt.(*ast.ArrayType); ok {
 		if v.Name == "length" {
 			v.Ref = "length"
 			v.SetType(ast.TInt)
 			return
 		}
-		if obj := ctx.objField(v, xt, v.Name); obj != nil {
-			return
-		}
-		_ = arr
 		ctx.errf(v.Pos, "TY-TYP-0080", "cannot find symbol %s on array", v.Name)
 		v.SetType(ast.ErrorType{})
 		return
@@ -2902,11 +3062,6 @@ func (ctx *methodCtx) typeOfName(v *ast.Select) *ast.Class {
 	v.Ref = cl
 	v.SetType(&ast.ClassType{Class: cl})
 	return cl
-}
-
-func (ctx *methodCtx) objField(v *ast.Select, arr ast.Type, name string) ast.Expr {
-	// Object methods are handled in checkMethodCall; arrays only expose `length`.
-	return nil
 }
 
 // ---------------------------------------------------------------- lambdas
@@ -3118,7 +3273,9 @@ func (ctx *methodCtx) checkMethodRef(mr *ast.MethodRef, want ast.Type) {
 		if m, _ := ctx.matchRefParams(rt, all, params); m != nil && !m.IsStatic() {
 			target = m
 		}
-		if target == nil {
+		// an unbound reference takes its receiver from the first parameter, so it
+		// only exists when the functional interface has at least one parameter
+		if target == nil && len(params) > 0 {
 			// unbound: first parameter is the receiver
 			if m, _ := ctx.matchRefParams(rt, all, params[1:]); m != nil && !m.IsStatic() {
 				target = m

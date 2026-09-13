@@ -1,0 +1,29 @@
+class Main {
+  public static void main(String[] args) {
+    long[] l = {1L, 2L}
+    byte[] b = new byte[4]
+    try {
+      System.arraycopy(l, 0, b, 0, 2)
+      System.out.println("copied")
+    } catch (ArrayStoreException e) {
+      System.out.println("store " + e.getMessage())
+    }
+    int[] src = {1, 2, 3, 4}
+    int[] dst = new int[4]
+    System.arraycopy(src, 1, dst, 0, 3)
+    System.out.println(dst[0] + " " + dst[2] + " " + dst[3])
+    int[] small = new int[2]
+    try {
+      System.arraycopy(src, 0, small, 0, 3)
+      System.out.println("no throw")
+    } catch (ArrayIndexOutOfBoundsException e) {
+      System.out.println("bounds")
+    }
+    try {
+      System.arraycopy(null, 0, dst, 0, 1)
+      System.out.println("no npe")
+    } catch (NullPointerException e) {
+      System.out.println("npe")
+    }
+  }
+}

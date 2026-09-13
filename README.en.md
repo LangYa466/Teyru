@@ -7,7 +7,7 @@
 The syntax will feel familiar to Java developers (classes, interfaces, generics, lambdas,
 exceptions, records, enums, annotations), but Teyru drops semicolons, adds native
 properties, and runs as **native machine code**: the compiler lowers the whole program to
-C and hands it to clang/LLVM (or gcc). The runtime is about two thousand lines of C — a
+C and hands it to clang/LLVM (or gcc). The runtime is about 1500 lines of C — a
 conservative mark-and-sweep collector, strings, arrays and exceptions — with no virtual
 machine of any kind.
 
@@ -33,6 +33,7 @@ into `opt`, `llc` or a custom pass; `./teyru emit` prints the generated C.
 - [Language tour](#language-tour)
 - [Language features](#language-features)
 - [Standard library](#standard-library)
+- [Editors and tooling](#editors-and-tooling)
 - [Project layout](#project-layout)
 - [Runtime model](#runtime-model)
 - [Differences from Java](#differences-from-java)
@@ -49,13 +50,13 @@ Measured on one machine (Linux x86-64, clang 22, OpenJDK 21 Temurin, best of 5 r
 | Metric | Teyru (native) | Java (HotSpot) | Difference |
 |---|---|---|---|
 | 100 startups | **0.068 s** (0.68 ms each) | 1.97 s (19.8 ms each) | **~29x faster** |
-| Executable size | **33 KB** | ~200 MB JDK runtime | ~6000x smaller |
+| Executable size | **35 KB** | ~200 MB JDK runtime | ~5900x smaller |
 | Peak RSS (hello) | **2.1 MB** | 50.2 MB | **~24x less** |
-| `bench_fib` recursion | **0.0060 s** | 0.0259 s | **4.3x faster** |
-| `bench_loop` loops and integer math | **0.0208 s** | 0.0430 s | **2.1x faster** |
-| `bench_oop` objects and virtual calls | **0.0044 s** | 0.0261 s | **5.9x faster** |
-| `bench_string` string handling | **0.0096 s** | 0.0542 s | **5.7x faster** |
-| `bench_alloc` short-lived allocation | **0.0232 s** | 0.0288 s | **1.24x faster** |
+| `bench_fib` recursion | **0.0060 s** | 0.0264 s | **4.4x faster** |
+| `bench_loop` loops and integer math | **0.0209 s** | 0.0429 s | **2.1x faster** |
+| `bench_oop` objects and virtual calls | **0.0044 s** | 0.0253 s | **5.8x faster** |
+| `bench_string` string handling | **0.0093 s** | 0.0554 s | **6.0x faster** |
+| `bench_alloc` short-lived allocation | **0.0233 s** | 0.0308 s | **1.3x faster** |
 
 **Where the speed comes from:**
 
@@ -80,13 +81,16 @@ method that creates them. An object stored into a field, an array, a return valu
 another object still goes to the heap and the mark-and-sweep collector, and HotSpot's
 generational assumption wins on workloads where objects live long and are collected
 repeatedly. Every number above includes process startup, so the absolute values are
-small. Every number is reproducible with `sh scripts/bench.sh`.
+small. Every number is reproducible with `sh scripts/bench.sh`, which measures the five
+programs, the 100 startups, the executable size and the peak RSS; the JDK-runtime figure
+in the size row is the runtime installed on the measuring machine, which the script does
+not measure.
 
 ---
 
 ## Quick start
 
-You need **Go 1.24+** and **clang** (or gcc).
+You need **Go 1.26+** and **clang** (or gcc).
 
 ```sh
 # Build the compiler
@@ -272,9 +276,13 @@ class Person {
   private int age
 }
 
-Person p = Person.builder().name("ada").age(36).build()
-System.out.println(p.getName() + " " + p.getAge())
-System.out.println(p)
+class Main {
+  public static void main(String[] args) {
+    Person p = Person.builder().name("ada").age(36).build()
+    System.out.println(p.getName() + " " + p.getAge())
+    System.out.println(p)
+  }
+}
 ```
 
 The full list and the differences are in **[docs/lombok.md](docs/lombok.md)**:
@@ -308,10 +316,10 @@ compiled and checked together with every user program:
 `Object`, `String`, `StringBuilder`, `Math`, `System`, `PrintStream`,
 `Iterable`/`Iterator`, `Comparable`, `AutoCloseable`, `Cloneable`, `Enum`, `Record`,
 the eight primitive wrappers (`Byte`, `Short`, `Integer`, `Long`, `Float`, `Double`,
-`Character`, `Boolean`), the collections (`List`, `ArrayList`, `HashMap`), and the
-`Character`, `Boolean`), and the `Throwable` family (`Exception`, `RuntimeException`,
-`NullPointerException`, `ArrayIndexOutOfBoundsException`, `ArithmeticException`,
-`ClassCastException`, `IllegalArgumentException`, `IllegalStateException`,
+`Character`, `Boolean`), the collections (`List`, `ArrayList`, `Map`, `HashMap`), and the
+`Throwable` family (`Exception`, `RuntimeException`, `NullPointerException`,
+`ArrayIndexOutOfBoundsException`, `ArithmeticException`, `ClassCastException`,
+`IllegalArgumentException`, `IllegalStateException`, `IndexOutOfBoundsException`,
 `NoSuchElementException`, `NegativeArraySizeException`, `AssertionError`,
 `UnsupportedOperationException`).
 
@@ -328,11 +336,26 @@ teyru build --native impl.c program.teyru            # compile them together
 
 ---
 
+## Editors and tooling
+
+- **VS Code**: `editors/vscode/` adds TextMate syntax highlighting, language
+  configuration and snippets for `.teyru` files. Package it with
+  `npx @vscode/vsce package` and install the result with
+  `code --install-extension teyru-0.1.0.vsix`.
+- **tree-sitter**: `editors/tree-sitter-teyru/` is a complete grammar with
+  highlight queries, indentation queries and corpus tests, usable from Neovim,
+  Helix, Zed and anything else that loads tree-sitter parsers.
+- GitHub still labels `.teyru` files as Java. Linguist has no Teyru definition
+  yet; `.gitattributes` maps the extension to the closest grammar until it does.
+
+---
+
 ## Project layout
 
 | Path | Purpose |
 |---|---|
 | `cmd/teyru` | CLI entry point (`build`/`run`/`emit`/`emit-llvm`/`version`) |
+| `internal/driver` | Compile pipeline: wires the front end to the C back end, runs the C compiler, handles native sources and output options |
 | `internal/source` | Files, position mapping, diagnostics |
 | `internal/lexer` | Tokeniser; newlines are not tokens, each token carries a "newline before" flag |
 | `internal/parser` | Recursive descent; statement termination uses newline significance plus prefix completeness |
@@ -343,9 +366,11 @@ teyru build --native impl.c program.teyru            # compile them together
 | `internal/runtime/src` | C runtime: GC, strings, arrays, exceptions, boxing, Math/System/StringBuilder |
 | `lib` | Standard library, written in Teyru |
 | `tests/programs` | End-to-end programs plus expected output (`go test` compiles and diffs each one) |
+| `tests/native` | Native-method interop test: Teyru declarations, a C implementation and the expected output (`TestNative`) |
 | `examples` | Examples and the JVM comparison benchmarks (`bench_*.teyru` and `.java`) |
 | `scripts` | Development scripts: `bench.sh`, the `pre-commit` hook |
 | `docs` | Language reference, diagnostics, architecture |
+| `editors` | Editor support: the VS Code extension and the tree-sitter grammar |
 
 ---
 
@@ -429,8 +454,9 @@ sh scripts/bench.sh       # JVM comparison (the JVM half runs only if java is in
 ```
 
 To add a test, drop `xxx.teyru` and `xxx.expected` into `tests/programs/`; if the program
-takes command line arguments, add `xxx.args` (one argument per line). `go test` handles
-the rest.
+takes command line arguments, add `xxx.args` (one argument per line); if the program is
+*meant* to fail, add `xxx.exit` with the status it must exit with and `xxx.experr` with
+what it should write to stderr. `go test` handles the rest.
 
 Please read [AGENTS.md](AGENTS.md) before contributing.
 

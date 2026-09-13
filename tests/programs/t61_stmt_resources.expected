@@ -1,0 +1,9 @@
+in body
+close local
+close expr
+after inner
+variable
+close held
+close throws
+caught boom
+made=4

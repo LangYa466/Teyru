@@ -18,11 +18,47 @@ void __asan_unpoison_memory_region(void *, size_t);
 
 tycatch *ty_cur_catch = NULL;
 tyclass *TY_STRING = NULL;
+tyclass *TY_ARRAY = NULL;
 tyclass *TY_BOX[9] = {0};
 tyclass *TY_OBJECT = NULL;
 
 tyclass *TY_NPE, *TY_AIOOBE, *TY_ARITH, *TY_CCE, *TY_NEGARR, *TY_ASSERT;
-tyclass *TY_ILLARG, *TY_ILLSTATE, *TY_NOSUCHELEM, *TY_UNSUP;
+tyclass *TY_ILLARG, *TY_ILLSTATE, *TY_NOSUCHELEM, *TY_UNSUP, *TY_ARRAYSTORE;
+
+/* The class an array carries. The generated startup installs the program's own
+   array class in TY_ARRAY; a program that links the runtime without that
+   startup (hand-written C) would otherwise allocate arrays with no class at
+   all, and every class-driven path -- instanceof, casts, string conversion and
+   the collector's element tracing -- would be blind to them, which is how
+   object arrays came to lose their elements. This built-in class keeps the
+   runtime self-sufficient. It carries TY_CLS_ARRAY so the collector recognises
+   it, and its super is bound to TY_OBJECT the first time an array is made, so a
+   program that installs an Object class still gets working instanceof. The
+   vtable mirrors the generated array class slot for slot (toString, hashCode,
+   equals, getClass, clone) and spells toString the way it does. */
+static tystr *default_array_tostring(void *o) {
+  (void)o;
+  return ty_str_intern("[array]");
+}
+static int32_t default_array_hashcode(void *o) { return ty_obj_hash(o); }
+static int32_t default_array_equals(void *a, void *b) { return a == b; }
+static void *default_array_getclass(void *o) { return ty_class_of(o); }
+static void *default_array_clone(void *o) {
+  tyarr *a = (tyarr *)o;
+  return ty_array_clone(a, a->esize);
+}
+static void *default_array_vt[5] = {
+    (void *)default_array_tostring, (void *)default_array_hashcode,
+    (void *)default_array_equals, (void *)default_array_getclass,
+    (void *)default_array_clone};
+static tyclass default_array_cls = {"[array]", -1, TY_CLS_ARRAY, NULL, 0, NULL, 5,
+                                    default_array_vt, NULL, 0, 0, NULL, 0, NULL, 0, NULL};
+
+static tyclass *array_class(void) {
+  if (TY_ARRAY) return TY_ARRAY;
+  if (!default_array_cls.super) default_array_cls.super = TY_OBJECT;
+  return &default_array_cls;
+}
 
 /* ------------------------------------------------------------------ GC */
 
@@ -34,6 +70,13 @@ typedef struct tychunk {
   struct tychunk *next;
   size_t used, cap;
   char *mem;
+  /* One bit per TY_ALIGN bytes of `mem`, set for every address that is the
+     start of a block. Rebuilt at the beginning of each collection from the size
+     words, and consulted by the root scan: a conservative stack word can point
+     anywhere inside a live object, and following such an interior word as if it
+     were an object traces a garbage class pointer -- and writes the mark bit
+     into a live object's payload. */
+  uint8_t *starts;
 } tychunk;
 
 static tychunk *chunks = NULL;
@@ -57,6 +100,12 @@ void *ty_roots[TY_SHADOW_MAX];
 int64_t ty_sp = 0;
 
 #define TY_MARK_BIT 1u
+/* The high bit of the size word marks a block that is on a free list. The
+   collector must not read the mark word of a free block -- that word holds the
+   free list link -- and a stale pointer into a freed block must not be mistaken
+   for an object, so the bit is checked before anything else. */
+#define TY_FREE_BIT (1ull << 63)
+#define TY_SIZE_MASK (~TY_FREE_BIT)
 
 static inline uint64_t *hdr_of(void *obj) { return (uint64_t *)((char *)obj - TY_HDR); }
 
@@ -68,22 +117,80 @@ void ty_gc_register_static(void *p) {
   roots_static[nroots_static++] = p;
 }
 
-static int in_heap(char *p) {
-  for (tychunk *c = chunks; c; c = c->next) {
-    if (p >= c->mem && p < c->mem + c->used) return 1;
-  }
-  return 0;
+/* The inlined fast path in tyrt.h bumps ty_bump and nothing else, so the head
+   chunk's `used` watermark trails behind it. Every reader of `used` has to see
+   the true watermark first: the slow allocator would otherwise hand out memory
+   the fast path already handed out (two live objects in one block), and
+   valid_obj/the sweep walk would stop below the watermark and leave live
+   objects above it untraced. */
+static void sync_head_used(void) {
+  if (chunks && ty_bump >= chunks->mem && ty_bump <= chunks->mem + chunks->cap)
+    chunks->used = (size_t)(ty_bump - chunks->mem);
+}
+
+static tychunk *valid_obj_last = NULL;
+
+/* valid_obj_forget drops the last-chunk cache: the sweep frees whole chunks,
+   and a stale pointer would be a use after free. */
+static void valid_obj_forget(void) { valid_obj_last = NULL; }
+
+/* obj_in_chunk answers for one chunk: 1 valid object, 0 not an object, -1 the
+   address is not in this chunk at all. */
+static int obj_in_chunk(tychunk *c, char *p) {
+  if (p < c->mem || p + TY_HDR > c->mem + c->used) return -1;
+  /* The map is indexed by block header, and `p` is a payload, so step back a
+     header first. A p that lies below the chunk's first payload wraps the
+     index and is rejected by the bound below. */
+  size_t i = (size_t)(p - TY_HDR - c->mem) / TY_ALIGN;
+  if (i >= c->cap / TY_ALIGN) return -1;
+  if (!(c->starts[i >> 3] & (uint8_t)(1u << (i & 7)))) return 0; /* interior word */
+  uint64_t sz = *(uint64_t *)(p - TY_HDR);
+  if (sz & TY_FREE_BIT) return 0; /* freed: the payload is a free list link */
+  return sz >= TY_HDR;
 }
 
 static int valid_obj(char *p) {
   if (((uintptr_t)p) & (TY_ALIGN - 1)) return 0;
+  /* A collection tests thousands of candidate words, and they are almost always
+     in the chunk the previous one was in, so the last chunk that answered is
+     tried first: walking the whole list every time makes a collection
+     quadratic in the number of chunks. ty_gc clears the cache, because the
+     sweep can free the chunk it points at. */
+  if (valid_obj_last) {
+    int r = obj_in_chunk(valid_obj_last, p);
+    if (r >= 0) return r;
+  }
   for (tychunk *c = chunks; c; c = c->next) {
-    if (p >= c->mem && p + TY_HDR <= c->mem + c->used) {
-      uint64_t sz = *(uint64_t *)(p - TY_HDR);
-      if (sz >= TY_HDR && ((uintptr_t)(p - TY_HDR)) % TY_ALIGN == 0) return 1;
+    if (c == valid_obj_last) continue;
+    int r = obj_in_chunk(c, p);
+    if (r >= 0) {
+      valid_obj_last = c;
+      return r;
     }
   }
   return 0;
+}
+
+#define TY_START_BYTES(cap) (((cap) / TY_ALIGN + 7) / 8)
+
+static void mark_block_start(tychunk *c, char *p) {
+  size_t i = (size_t)(p - c->mem) / TY_ALIGN;
+  if (i < c->cap / TY_ALIGN) c->starts[i >> 3] |= (uint8_t)(1u << (i & 7));
+}
+
+/* Rebuilds the block-start map by walking every chunk's size words. The walk
+   uses the same rule as the sweep, so the two passes agree on where blocks
+   begin. */
+static void build_block_starts(void) {
+  for (tychunk *c = chunks; c; c = c->next) {
+    memset(c->starts, 0, TY_START_BYTES(c->cap));
+    for (char *p = c->mem; p < c->mem + c->used;) {
+      int64_t sz = (int64_t)(*(uint64_t *)p & TY_SIZE_MASK);
+      if (sz < (int64_t)TY_HDR) break;
+      mark_block_start(c, p);
+      p += sz;
+    }
+  }
 }
 
 static void *mark_stack[1 << 20];
@@ -100,9 +207,19 @@ static void mark_value(void *p) {
   if (mark_sp < (1 << 20)) mark_stack[mark_sp++] = p;
 }
 
+/* Whether a class describes an array. Class identity is the primary test because
+   the emitted array class is registered without the array flag; the flag covers
+   the built-in class the runtime installs and anything that sets it. Without one
+   of the two, an array is traced as a plain object: its payload is not a set of
+   reference fields, so its elements are never marked and a live array hands its
+   elements to the sweep. */
+static int is_array_class(tyclass *c) {
+  return c && ((c->flags & TY_CLS_ARRAY) || c == TY_ARRAY);
+}
+
 static void trace_object(void *obj) {
   tyclass *c = ((tyobj *)obj)->cls;
-  if (c && (c->flags & 2)) { /* array */
+  if (is_array_class(c)) { /* array */
     tyarr *a = (tyarr *)obj;
     if (a->refs) {
       void **d = (void **)a->data;
@@ -119,6 +236,8 @@ static void trace_object(void *obj) {
 
 void ty_gc(void) {
   if (gc_disabled) return;
+  sync_head_used();
+  build_block_starts();
   mark_sp = 0;
   /* roots: shadow stack */
   for (int64_t i = 0; i < ty_sp; i++) mark_value(ty_roots[i]);
@@ -157,29 +276,43 @@ void ty_gc(void) {
     tychunk *c = *pp;
     int64_t live = 0;
     for (char *p = c->mem; p < c->mem + c->used;) {
-      uint64_t sz = *(uint64_t *)p;
-      if (*(uint64_t *)(p + 8) & TY_MARK_BIT) live += (int64_t)sz;
+      uint64_t raw = *(uint64_t *)p;
+      int64_t sz = (int64_t)(raw & TY_SIZE_MASK);
+      if (sz < (int64_t)TY_HDR) break; /* never walk off a damaged chunk */
+      if (!(raw & TY_FREE_BIT) && (*(uint64_t *)(p + 8) & TY_MARK_BIT)) live += sz;
       p += sz;
     }
     if (live == 0 && c != chunks) {
       *pp = c->next;
       free(c->mem);
+      free(c->starts);
       free(c);
       continue;
     }
     for (char *p = c->mem; p < c->mem + c->used;) {
-      uint64_t sz = *(uint64_t *)p;
-      uint64_t *h = (uint64_t *)(p + 8);
-      if (*h & TY_MARK_BIT) {
-        *h &= ~(uint64_t)TY_MARK_BIT;
+      uint64_t raw = *(uint64_t *)p;
+      int64_t sz = (int64_t)(raw & TY_SIZE_MASK);
+      if (sz < (int64_t)TY_HDR) break;
+      if (raw & TY_FREE_BIT) {
+        /* The lists above were emptied, so a block that was already free has no
+           list to be on any more: link it back in. Leaving it alone made every
+           block freed before this collection unreachable to the allocator for
+           the rest of the program, so demand the free lists could have served
+           grew the heap by a fresh chunk instead. The blocks of a chunk that is
+           released wholesale above never reach here, so nothing is linked into
+           memory that is about to be freed. */
+        ty_free_block(p + TY_HDR, (size_t)sz);
+      } else if (*(uint64_t *)(p + 8) & TY_MARK_BIT) {
+        *(uint64_t *)(p + 8) &= ~(uint64_t)TY_MARK_BIT;
       } else {
-        ty_free_block(p + TY_HDR, sz);
+        ty_free_block(p + TY_HDR, (size_t)sz);
       }
       p += sz;
     }
     live_bytes += live;
     pp = &c->next;
   }
+  valid_obj_forget();
   if (chunks) {
     ty_bump = chunks->mem + chunks->used;
     ty_bump_end = chunks->mem + chunks->cap;
@@ -201,6 +334,9 @@ static int size_class(size_t sz) {
 void ty_free_block(void *payload, size_t total) {
   int k = size_class(total);
   void *p = (char *)payload - TY_HDR;
+  /* the free list link lives in the second header word, so the block is marked
+     free first: the collector reads that bit before the link */
+  *(uint64_t *)p = (uint64_t)total | TY_FREE_BIT;
   if (k >= 0) {
     *(void **)((char *)p + 8) = freelist[k];
     freelist[k] = p;
@@ -222,9 +358,16 @@ static void *alloc_slow(size_t total) {
     void **pp = &bigfree;
     while (*pp) {
       void *p = *pp;
-      uint64_t sz = *(uint64_t *)p;
+      uint64_t sz = *(uint64_t *)p & TY_SIZE_MASK;
       if (sz >= total) {
         *pp = *(void **)((char *)p + 8);
+        /* The caller rewrites this block's size word to `total`. A larger block
+           reused for a smaller request has to give its tail back here, or the
+           tail becomes a hole the chunk walk reads as a payload-sized header --
+           it would then free an interior address and the next allocation could
+           land inside a live object. Both sizes are 16-aligned, so the tail is
+           never smaller than a header. */
+        if (sz > total) ty_free_block((char *)p + total + TY_HDR, (size_t)(sz - total));
         return p;
       }
       pp = (void **)((char *)p + 8);
@@ -234,6 +377,7 @@ static void *alloc_slow(size_t total) {
 }
 
 void *ty_alloc_slow(size_t total) {
+  sync_head_used();
   if (ty_alloc_since > ty_gc_threshold) ty_gc();
   void *p = alloc_slow(total);
   if (p) {
@@ -246,19 +390,30 @@ void *ty_alloc_slow(size_t total) {
   }
   tychunk *c = chunks;
   if (!c || c->used + total > c->cap) {
-    ty_gc();
-    p = alloc_slow(total);
-    if (p) {
-      ty_alloc_since += (int64_t)total;
-      *(uint64_t *)p = (uint64_t)total;
-      *(uint64_t *)((char *)p + 8) = 0;
-      void *obj = (char *)p + TY_HDR;
-      memset(obj, 0, total - TY_HDR);
-      return obj;
+    /* A full chunk is not a reason to collect. ty_gc_threshold is the adaptive
+       budget for this heap (twice the live set after the last collection, with
+       a 4MB floor) and the free lists were already consulted above, so a
+       collection here would only re-trace a live set that the threshold has not
+       asked for yet: a workload with a large live set collected once per 256KB
+       of allocation, hundreds of full traces where a handful were due. Collect
+       only when the threshold says so; otherwise grow the heap, which the next
+       threshold crossing pays for. */
+    if (ty_alloc_since > ty_gc_threshold) {
+      ty_gc();
+      p = alloc_slow(total);
+      if (p) {
+        ty_alloc_since += (int64_t)total;
+        *(uint64_t *)p = (uint64_t)total;
+        *(uint64_t *)((char *)p + 8) = 0;
+        void *obj = (char *)p + TY_HDR;
+        memset(obj, 0, total - TY_HDR);
+        return obj;
+      }
     }
     size_t cap = total > TY_CHUNK ? ((total + TY_CHUNK - 1) & ~(size_t)(TY_CHUNK - 1)) : TY_CHUNK;
     c = (tychunk *)malloc(sizeof(tychunk));
     c->mem = (char *)malloc(cap);
+    c->starts = (uint8_t *)calloc(TY_START_BYTES(cap), 1);
     c->cap = cap;
     c->used = 0;
     c->next = chunks;
@@ -294,6 +449,7 @@ void *ty_alloc_arr(int64_t len, size_t elemsize) {
   size_t bytes = (size_t)len * elemsize;
   if (len != 0 && bytes / (size_t)len != elemsize) ty_throw((tyobj *)ty_negarr());
   tyarr *a = (tyarr *)ty_alloc(sizeof(tyarr) + bytes);
+  a->obj.cls = array_class();
   a->len = len;
   a->data = (char *)a + sizeof(tyarr);
   a->esize = (int32_t)elemsize;
@@ -345,6 +501,10 @@ void *ty_cce(tyclass *from, tyclass *to) {
   char buf[256];
   snprintf(buf, sizeof buf, "class %s cannot be cast to class %s", from ? from->name : "?", to ? to->name : "?");
   ty_throw(make_ex(TY_CCE, buf));
+  return NULL;
+}
+void *ty_arraystore(void) {
+  ty_throw(make_ex(TY_ARRAYSTORE, "array element type mismatch"));
   return NULL;
 }
 void *ty_negarr(void) {
@@ -448,11 +608,22 @@ int32_t ty_str_hash(tystr *s) {
   return h;
 }
 
+/* The identity hash of an object, which is what Object.hashCode means for a
+   class that does not override it. The generated Object.hashCode wrapper calls
+   this function, and that wrapper is what a non-overriding class has in its
+   vtable slot, so this must NOT dispatch: doing so would call itself.
+
+   An overriding class is reached by dispatching at the call site instead, which
+   the emitter does for any receiver whose static type has subclasses. The
+   address is stable because the collector never moves objects. */
 int32_t ty_obj_hash(void *o) {
   if (!o) return 0;
-  return ((int32_t (*)(void *))((tyobj *)o)->cls->vtable[1])(o);
+  uintptr_t p = (uintptr_t)o;
+  return (int32_t)((p >> 4) ^ (p >> 32) ^ (p >> 20));
 }
 
+/* Object.equals for a class that does not override it. Same reasoning as above:
+   identity, and the call site dispatches when an override may exist. */
 int32_t ty_obj_eq(void *a, void *b) { return a == b; }
 
 tystr *ty_str_of_long(int64_t v) {
@@ -685,85 +856,90 @@ int32_t ty_str_toint(tystr *s) { return s ? (int32_t)strtoll(s->data, NULL, 10) 
 /* JEP 507: a primitive type pattern matches when the boxed value survives the
    conversion to the pattern's type unchanged. Widening between integral types
    is always exact; everything else is checked by converting back. */
-int32_t ty_prim_match(void *o, int32_t kind, void *out) {
+int32_t ty_prim_match(void *o, int32_t kind, void *out, int32_t boxed) {
   if (!o) return 0;
   tyclass *c = ((tyobj *)o)->cls;
   if (!(c->flags & 4)) return 0; /* not a box at all */
 
+  int32_t bk = 0;
+  for (int32_t i = 1; i <= 8; i++) {
+    if (c == TY_BOX[i]) {
+      bk = i;
+      break;
+    }
+  }
+
+  /* JEP 507 has two rules and the static type of the operand picks which one
+     applies (javac 25 --enable-preview was the oracle for both):
+
+     - A reference operand carries a box, and the box has to be exactly the
+       pattern's type: an Integer matches `int i` but not `long l`, even though
+       the value would convert exactly.
+     - A primitive operand (the compiler boxes it to get here, hence the flag)
+       matches when the conversion to the pattern's type is exact, so
+       `long v = 5; v instanceof int i` is true and 5000000000L is not. */
+  if (boxed) {
+    if (bk != kind) return 0;
+    switch (kind) {
+    case 1: *(int32_t *)out = ((tyboolbox *)o)->v; return 1;
+    case 2: *(int8_t *)out = ((tybytebox *)o)->v; return 1;
+    case 3: *(int16_t *)out = ((tyshortbox *)o)->v; return 1;
+    case 4: *(uint16_t *)out = ((tycharbox *)o)->v; return 1;
+    case 5: *(int32_t *)out = ((tyintbox *)o)->v; return 1;
+    case 6: *(int64_t *)out = ((tylongbox *)o)->v; return 1;
+    case 7: *(float *)out = ((tyfloatbox *)o)->v; return 1;
+    case 8: *(double *)out = ((tydoublebox *)o)->v; return 1;
+    }
+    return 0;
+  }
+
   int64_t iv = 0;
   double dv = 0;
   int is_floating = 0;
-  if (c == TY_BOX[1]) {
-    /* a Boolean is only a boolean: it carries no number to convert */
-    if (kind != 1) return 0;
-    iv = ((tyboolbox *)o)->v;
-  }
-  else if (c == TY_BOX[2]) iv = ((tybytebox *)o)->v;
-  else if (c == TY_BOX[3]) iv = ((tyshortbox *)o)->v;
-  else if (c == TY_BOX[4]) iv = ((tycharbox *)o)->v;
-  else if (c == TY_BOX[5]) iv = ((tyintbox *)o)->v;
-  else if (c == TY_BOX[6]) iv = ((tylongbox *)o)->v;
-  else if (c == TY_BOX[7]) { dv = ((tyfloatbox *)o)->v; is_floating = 1; }
-  else if (c == TY_BOX[8]) { dv = ((tydoublebox *)o)->v; is_floating = 1; }
-  else return 0;
+  if (bk == 0) return 0;
+  if (bk == 1) return 0; /* a Boolean is only a boolean; it carries no number */
+  if (bk == 2) iv = ((tybytebox *)o)->v;
+  else if (bk == 3) iv = ((tyshortbox *)o)->v;
+  else if (bk == 4) iv = ((tycharbox *)o)->v;
+  else if (bk == 5) iv = ((tyintbox *)o)->v;
+  else if (bk == 6) iv = ((tylongbox *)o)->v;
+  else if (bk == 7) { dv = ((tyfloatbox *)o)->v; is_floating = 1; }
+  else if (bk == 8) { dv = ((tydoublebox *)o)->v; is_floating = 1; }
 
   switch (kind) {
-  case 1: /* boolean: only a Boolean matches */
-    if (c != TY_BOX[1]) return 0;
-    *(int32_t *)out = (int32_t)iv;
-    return 1;
-  case 2: /* byte */
+  case 1: return 0;
+  case 2:
     if (is_floating) { if (dv != (double)(int8_t)dv) return 0; iv = (int64_t)dv; }
     if (iv < -128 || iv > 127) return 0;
     *(int8_t *)out = (int8_t)iv;
     return 1;
-  case 3: /* short */
+  case 3:
     if (is_floating) { if (dv != (double)(int16_t)dv) return 0; iv = (int64_t)dv; }
     if (iv < -32768 || iv > 32767) return 0;
     *(int16_t *)out = (int16_t)iv;
     return 1;
-  case 4: /* char */
+  case 4:
     if (is_floating) { if (dv != (double)(uint16_t)dv) return 0; iv = (int64_t)dv; }
     if (iv < 0 || iv > 65535) return 0;
     *(uint16_t *)out = (uint16_t)iv;
     return 1;
-  case 5: /* int */
+  case 5:
     if (is_floating) { if (dv != (double)(int32_t)dv) return 0; iv = (int64_t)dv; }
     if (iv < INT32_MIN || iv > INT32_MAX) return 0;
     *(int32_t *)out = (int32_t)iv;
     return 1;
-  case 6: /* long */
-    if (is_floating) {
-      if (dv < -9223372036854775808.0 || dv >= 9223372036854775808.0) return 0;
-      if (dv != (double)(int64_t)dv) return 0;
-      iv = (int64_t)dv;
-    }
+  case 6:
+    if (is_floating) { if (dv != (double)(int64_t)dv) return 0; iv = (int64_t)dv; }
     *(int64_t *)out = iv;
     return 1;
-  case 7: /* float: the value has to survive the trip through a float */
-    if (!is_floating) {
-      float f = (float)iv;
-      if ((double)f != (double)iv) return 0;
-      *(float *)out = f;
-      return 1;
-    }
-    if (dv < -3.4028234663852886e38 || dv > 3.4028234663852886e38) return 0;
-    if ((double)(float)dv != dv) return 0;
-    *(float *)out = (float)dv;
-    return 1;
-  case 8: /* double */
-    if (!is_floating) {
-      double d = (double)iv;
-      if (d < -9223372036854775808.0 || d >= 9223372036854775808.0) {
-        /* the integral value is out of range for an exact double */
-        return 0;
-      }
-      if ((int64_t)d != iv) return 0;
-      *(double *)out = d;
-      return 1;
-    }
-    *(double *)out = dv;
-    return 1;
+  case 7:
+    if (is_floating) { *(float *)out = (float)dv; return 1; }
+    *(float *)out = (float)iv;
+    return (int64_t)*(float *)out == iv;
+  case 8:
+    if (is_floating) { *(double *)out = dv; return 1; }
+    *(double *)out = (double)iv;
+    return (int64_t)*(double *)out == iv;
   }
   return 0;
 }
@@ -778,6 +954,7 @@ int64_t ty_array_len(tyarr *a) {
 tyarr *ty_array_clone(tyarr *a, int64_t elemsize) {
   if (!a) ty_npe();
   tyarr *r = ty_alloc_arr(a->len, (size_t)elemsize);
+  r->obj.cls = array_class();
   r->esize = a->esize;
   r->refs = a->refs;
   memcpy(r->data, a->data, (size_t)(a->len * elemsize));

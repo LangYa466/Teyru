@@ -76,9 +76,16 @@ type lexer struct {
 	nl    bool
 	toks  []Token
 	diags *source.Diagnostics
+	// offs, when set, maps an offset in src back to the offset in f.Text it came
+	// from. The sub-lexer that decodes a text block runs on the de-indented
+	// content, so without it a diagnostic there would point at the wrong place.
+	offs []int
 }
 
 func (l *lexer) errf(off int, code, format string, args ...any) {
+	if l.offs != nil && off < len(l.offs) {
+		off = l.offs[off]
+	}
 	l.diags.Errorf(source.Pos{File: l.f, Off: off}, code, format, args...)
 }
 
@@ -152,6 +159,13 @@ func (l *lexer) run() {
 }
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// afterMinus reports whether the token just emitted is the operator '-', which
+// is the only position where a literal may hold a value that does not fit.
+func (l *lexer) afterMinus() bool {
+	n := len(l.toks)
+	return n > 0 && l.toks[n-1].Kind == Op && l.toks[n-1].Text == "-"
+}
 
 func isIdentStart(s string) bool {
 	r, _ := utf8.DecodeRuneInString(s)
@@ -234,9 +248,14 @@ func (l *lexer) escape(sb *strings.Builder) {
 			}
 		}
 		l.errf(l.pos, "TY-SYN-0005", "invalid unicode escape")
+	case '"', '\'', '\\':
+		sb.WriteByte(c)
 	case '\n':
 		// line continuation inside text blocks
 	default:
+		// The backslash is dropped, so decoding it silently would turn "\q" into
+		// "q" without any sign that the escape was not recognised.
+		l.errf(l.pos-1, "TY-SYN-0011", "invalid escape sequence \\%c", c)
 		sb.WriteByte(c)
 	}
 }
@@ -289,9 +308,21 @@ func (l *lexer) textBlock() {
 		l.emit(Token{Kind: StringLit, Off: start, End: l.pos})
 		return
 	}
-	raw := strings.ReplaceAll(l.src[l.pos:l.pos+end], "\r\n", "\n")
+	contentStart, contentEnd := l.pos, l.pos+end
+	raw := strings.ReplaceAll(l.src[contentStart:contentEnd], "\r\n", "\n")
 	l.pos += end + 3
 	lines := strings.Split(raw, "\n")
+	// lineOff[i] is where lines[i] starts in the source. Escapes are decoded on
+	// the de-indented text, so a diagnostics has to be mapped back through it.
+	lineOff := make([]int, len(lines))
+	lineOff[0] = contentStart
+	for i, off := 1, contentStart; i < len(lines); i++ {
+		for off < contentEnd && l.src[off] != '\n' {
+			off++
+		}
+		off++
+		lineOff[i] = off
+	}
 	minIndent := -1
 	for i, ln := range lines {
 		last := i == len(lines)-1
@@ -304,22 +335,31 @@ func (l *lexer) textBlock() {
 		}
 	}
 	var out strings.Builder
+	// offs[i] is the source offset of out[i], which is what the escape decoder
+	// below reports against.
+	offs := make([]int, 0, len(raw))
 	for i, ln := range lines {
 		last := i == len(lines)-1
+		base := lineOff[i]
 		if len(ln) >= minIndent && minIndent > 0 {
 			ln = ln[minIndent:]
+			base += minIndent
 		} else if strings.TrimSpace(ln) == "" {
 			ln = ""
 		}
 		ln = strings.TrimRight(ln, " \t")
+		for j := 0; j < len(ln); j++ {
+			offs = append(offs, base+j)
+		}
 		out.WriteString(ln)
 		if !last {
 			out.WriteByte('\n')
+			offs = append(offs, lineOff[i+1]-1)
 		}
 	}
 	// decode escapes
 	s := out.String()
-	sub := &lexer{f: l.f, src: s, diags: l.diags}
+	sub := &lexer{f: l.f, src: s, diags: l.diags, offs: offs}
 	var sb strings.Builder
 	for sub.pos < len(s) {
 		if s[sub.pos] == '\\' {
@@ -400,10 +440,8 @@ done:
 			kind = FloatLit
 			l.pos++
 		case 'd', 'D':
-			if !isHex {
-				kind = DoubleLit
-				l.pos++
-			}
+			kind = DoubleLit
+			l.pos++
 		}
 	}
 	if isFloat && kind != FloatLit {
@@ -441,7 +479,11 @@ done:
 			if kind == IntLit && v > 0xFFFFFFFF {
 				l.errf(start, "TY-SYN-0010", "integer literal out of range")
 			}
-		} else if v > limit {
+		} else if v > limit || (v == limit && !l.afterMinus()) {
+			// limit itself is the smallest value that overflows: the parser folds
+			// a minus in front of a literal, which is the only way -2147483648
+			// and -9223372036854775808L can be written (parser.go parseUnary).
+			// Anywhere else the value would wrap around to the negative boundary.
 			l.errf(start, "TY-SYN-0010", "integer literal out of range")
 		}
 		t.Int = v

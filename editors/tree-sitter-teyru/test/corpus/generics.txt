@@ -1,0 +1,275 @@
+==================
+a generic class with bounded type parameters
+==================
+
+class Node<T extends Comparable<T>> {
+  private T value
+  private Node<T> next
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (type_parameters
+      (type_parameter
+        (identifier)
+        (generic_type
+          (scoped_identifier
+            (identifier))
+          (type_arguments
+            (scoped_identifier
+              (identifier))))))
+    (class_body
+      (field_declaration
+        (modifiers)
+        (scoped_identifier
+          (identifier))
+        (variable_declarator
+          (identifier)))
+      (field_declaration
+        (modifiers)
+        (generic_type
+          (scoped_identifier
+            (identifier))
+          (type_arguments
+            (scoped_identifier
+              (identifier))))
+        (variable_declarator
+          (identifier))))))
+
+==================
+a generic method with its own type parameters
+==================
+
+class C {
+  public <U extends Comparable<U>> boolean bigger(U a, U b) {
+    return a.compareTo(b) > 0
+  }
+
+  static <A, B> B run(Fn<A, B> f, A a) {
+    return f.apply(a)
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (modifiers)
+        (type_parameters
+          (type_parameter
+            (identifier)
+            (generic_type
+              (scoped_identifier
+                (identifier))
+              (type_arguments
+                (scoped_identifier
+                  (identifier))))))
+        (primitive_type)
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (scoped_identifier
+              (identifier))
+            (identifier))
+          (formal_parameter
+            (scoped_identifier
+              (identifier))
+            (identifier)))
+        (block
+          (return_statement
+            (binary_expression
+              (method_invocation
+                (identifier)
+                (identifier)
+                (argument_list
+                  (identifier)))
+              (decimal_integer_literal)))))
+      (method_declaration
+        (modifiers)
+        (type_parameters
+          (type_parameter
+            (identifier))
+          (type_parameter
+            (identifier)))
+        (scoped_identifier
+          (identifier))
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (generic_type
+              (scoped_identifier
+                (identifier))
+              (type_arguments
+                (scoped_identifier
+                  (identifier))
+                (scoped_identifier
+                  (identifier))))
+            (identifier))
+          (formal_parameter
+            (scoped_identifier
+              (identifier))
+            (identifier)))
+        (block
+          (return_statement
+            (method_invocation
+              (identifier)
+              (identifier)
+              (argument_list
+                (identifier)))))))))
+
+==================
+wildcards and nested type arguments
+==================
+
+class C {
+  void f(List<? extends Number> a, Map<String, List<Integer>> b, List<? super Integer> c) {
+    System.out.println(a.size() + b.size() + c.size())
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (generic_type
+              (scoped_identifier
+                (identifier))
+              (type_arguments
+                (wildcard
+                  (scoped_identifier
+                    (identifier)))))
+            (identifier))
+          (formal_parameter
+            (generic_type
+              (scoped_identifier
+                (identifier))
+              (type_arguments
+                (scoped_identifier
+                  (identifier))
+                (generic_type
+                  (scoped_identifier
+                    (identifier))
+                  (type_arguments
+                    (scoped_identifier
+                      (identifier))))))
+            (identifier))
+          (formal_parameter
+            (generic_type
+              (scoped_identifier
+                (identifier))
+              (type_arguments
+                (wildcard
+                  (scoped_identifier
+                    (identifier)))))
+            (identifier)))
+        (block
+          (expression_statement
+            (method_invocation
+              (field_access
+                (identifier)
+                (identifier))
+              (identifier)
+              (argument_list
+                (binary_expression
+                  (binary_expression
+                    (method_invocation
+                      (identifier)
+                      (identifier)
+                      (argument_list))
+                    (method_invocation
+                      (identifier)
+                      (identifier)
+                      (argument_list)))
+                  (method_invocation
+                    (identifier)
+                    (identifier)
+                    (argument_list)))))))))))
+
+==================
+the diamond and a qualified generic type
+==================
+
+class C {
+  void f() {
+    ArrayList<String> a = new ArrayList<>()
+    java.util.List<String> b = new java.util.ArrayList<String>()
+    System.out.println(a.size() + b.size())
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters)
+        (block
+          (local_variable_declaration
+            (generic_type
+              (scoped_identifier
+                (identifier))
+              (type_arguments
+                (scoped_identifier
+                  (identifier))))
+            (variable_declarator
+              (identifier)
+              (object_creation_expression
+                (generic_type
+                  (scoped_identifier
+                    (identifier))
+                  (type_arguments))
+                (argument_list))))
+          (local_variable_declaration
+            (generic_type
+              (scoped_identifier
+                (identifier)
+                (identifier)
+                (identifier))
+              (type_arguments
+                (scoped_identifier
+                  (identifier))))
+            (variable_declarator
+              (identifier)
+              (object_creation_expression
+                (generic_type
+                  (scoped_identifier
+                    (identifier)
+                    (identifier)
+                    (identifier))
+                  (type_arguments
+                    (scoped_identifier
+                      (identifier))))
+                (argument_list))))
+          (expression_statement
+            (method_invocation
+              (field_access
+                (identifier)
+                (identifier))
+              (identifier)
+              (argument_list
+                (binary_expression
+                  (method_invocation
+                    (identifier)
+                    (identifier)
+                    (argument_list))
+                  (method_invocation
+                    (identifier)
+                    (identifier)
+                    (argument_list)))))))))))

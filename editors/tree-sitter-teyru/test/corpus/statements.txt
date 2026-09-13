@@ -1,0 +1,422 @@
+==================
+if, else if and else
+==================
+
+class C {
+  void f(int n) {
+    if (n > 0) {
+      n = 1
+    } else if (n == 0) {
+      n = 2
+    } else {
+      n = 3
+    }
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (primitive_type)
+            (identifier)))
+        (block
+          (if_statement
+            (parenthesized_expression
+              (binary_expression
+                (identifier)
+                (decimal_integer_literal)))
+            (block
+              (expression_statement
+                (assignment_expression
+                  (identifier)
+                  (decimal_integer_literal))))
+            (if_statement
+              (parenthesized_expression
+                (binary_expression
+                  (identifier)
+                  (decimal_integer_literal)))
+              (block
+                (expression_statement
+                  (assignment_expression
+                    (identifier)
+                    (decimal_integer_literal))))
+              (block
+                (expression_statement
+                  (assignment_expression
+                    (identifier)
+                    (decimal_integer_literal)))))))))))
+
+==================
+while and do-while
+==================
+
+class C {
+  void f(int n) {
+    while (n > 0) {
+      n--
+    }
+    do {
+      n++
+    } while (n < 3)
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (primitive_type)
+            (identifier)))
+        (block
+          (while_statement
+            (parenthesized_expression
+              (binary_expression
+                (identifier)
+                (decimal_integer_literal)))
+            (block
+              (expression_statement
+                (update_expression
+                  (identifier)))))
+          (do_statement
+            (block
+              (expression_statement
+                (update_expression
+                  (identifier))))
+            (parenthesized_expression
+              (binary_expression
+                (identifier)
+                (decimal_integer_literal)))))))))
+
+==================
+a basic for uses colons in its header
+==================
+
+class C {
+  void f() {
+    for (int i = 0 : i < 3 : i++) {
+      System.out.println(i)
+    }
+    for ( : : ) {
+      return
+    }
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters)
+        (block
+          (for_statement
+            (local_variable_declaration
+              (primitive_type)
+              (variable_declarator
+                (identifier)
+                (decimal_integer_literal)))
+            (binary_expression
+              (identifier)
+              (decimal_integer_literal))
+            (update_expression
+              (identifier))
+            (block
+              (expression_statement
+                (method_invocation
+                  (field_access
+                    (identifier)
+                    (identifier))
+                  (identifier)
+                  (argument_list
+                    (identifier))))))
+          (for_statement
+            (block
+              (return_statement))))))))
+
+==================
+an enhanced for iterates
+==================
+
+class C {
+  void f(int[] xs) {
+    for (int x : xs) {
+      System.out.println(x)
+    }
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (array_type
+              (primitive_type))
+            (identifier)))
+        (block
+          (enhanced_for_statement
+            (primitive_type)
+            (identifier)
+            (identifier)
+            (block
+              (expression_statement
+                (method_invocation
+                  (field_access
+                    (identifier)
+                    (identifier))
+                  (identifier)
+                  (argument_list
+                    (identifier)))))))))))
+
+==================
+labels, break and continue
+==================
+
+class C {
+  void f() {
+    int i = 0
+    outer:
+    for ( : : ) {
+      i++
+      for (int j = 0 : j < 3 : j++) {
+        if (j == 1) {
+          continue outer
+        }
+        if (i > 2) {
+          break outer
+        }
+      }
+    }
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters)
+        (block
+          (local_variable_declaration
+            (primitive_type)
+            (variable_declarator
+              (identifier)
+              (decimal_integer_literal)))
+          (labeled_statement
+            (identifier)
+            (for_statement
+              (block
+                (expression_statement
+                  (update_expression
+                    (identifier)))
+                (for_statement
+                  (local_variable_declaration
+                    (primitive_type)
+                    (variable_declarator
+                      (identifier)
+                      (decimal_integer_literal)))
+                  (binary_expression
+                    (identifier)
+                    (decimal_integer_literal))
+                  (update_expression
+                    (identifier))
+                  (block
+                    (if_statement
+                      (parenthesized_expression
+                        (binary_expression
+                          (identifier)
+                          (decimal_integer_literal)))
+                      (block
+                        (continue_statement
+                          (identifier))))
+                    (if_statement
+                      (parenthesized_expression
+                        (binary_expression
+                          (identifier)
+                          (decimal_integer_literal)))
+                      (block
+                        (break_statement
+                          (identifier))))))))))))))
+
+==================
+assert, throw and synchronized
+==================
+
+class C {
+  void f(Object lock) {
+    assert lock != null
+    assert lock != null : "lock"
+    synchronized (lock) {
+      System.out.println("held")
+    }
+    throw new IllegalStateException("boom")
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (scoped_identifier
+              (identifier))
+            (identifier)))
+        (block
+          (assert_statement
+            (binary_expression
+              (identifier)
+              (null_literal)))
+          (assert_statement
+            (binary_expression
+              (identifier)
+              (null_literal))
+            (string_literal))
+          (synchronized_statement
+            (parenthesized_expression
+              (identifier))
+            (block
+              (expression_statement
+                (method_invocation
+                  (field_access
+                    (identifier)
+                    (identifier))
+                  (identifier)
+                  (argument_list
+                    (string_literal))))))
+          (throw_statement
+            (object_creation_expression
+              (scoped_identifier
+                (identifier))
+              (argument_list
+                (string_literal)))))))))
+
+==================
+try, catch, finally and resources
+==================
+
+class C {
+  void f() {
+    try {
+      System.out.println("body")
+    } catch (RuntimeException e) {
+      System.out.println(e)
+    } finally {
+      System.out.println("done")
+    }
+    try (make("expr")
+         local) {
+      System.out.println("in body")
+    } catch (Exception e) {
+      System.out.println(e)
+    }
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters)
+        (block
+          (try_statement
+            (block
+              (expression_statement
+                (method_invocation
+                  (field_access
+                    (identifier)
+                    (identifier))
+                  (identifier)
+                  (argument_list
+                    (string_literal)))))
+            (catch_clause
+              (scoped_identifier
+                (identifier))
+              (identifier)
+              (block
+                (expression_statement
+                  (method_invocation
+                    (field_access
+                      (identifier)
+                      (identifier))
+                    (identifier)
+                    (argument_list
+                      (identifier))))))
+            (finally_clause
+              (block
+                (expression_statement
+                  (method_invocation
+                    (field_access
+                      (identifier)
+                      (identifier))
+                    (identifier)
+                    (argument_list
+                      (string_literal)))))))
+          (try_statement
+            (resource_specification
+              (method_invocation
+                (identifier)
+                (argument_list
+                  (string_literal)))
+              (identifier))
+            (block
+              (expression_statement
+                (method_invocation
+                  (field_access
+                    (identifier)
+                    (identifier))
+                  (identifier)
+                  (argument_list
+                    (string_literal)))))
+            (catch_clause
+              (scoped_identifier
+                (identifier))
+              (identifier)
+              (block
+                (expression_statement
+                  (method_invocation
+                    (field_access
+                      (identifier)
+                      (identifier))
+                    (identifier)
+                    (argument_list
+                      (identifier))))))))))))

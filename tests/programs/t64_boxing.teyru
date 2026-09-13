@@ -1,0 +1,47 @@
+class Main {
+  public static void main(String[] args) {
+    Byte b = Byte.valueOf((byte) 7)
+    Byte nb = Byte.valueOf((byte) -128)
+    System.out.println(b.byteValue())
+    System.out.println(b.hashCode())
+    System.out.println(b.toString())
+    System.out.println(nb.byteValue())
+    System.out.println(nb.hashCode())
+    System.out.println(nb.toString())
+
+    Short s = Short.valueOf((short) 300)
+    Short ns = Short.valueOf((short) -32768)
+    System.out.println(s.shortValue())
+    System.out.println(s.hashCode())
+    System.out.println(s.toString())
+    System.out.println(ns.shortValue())
+    System.out.println(ns.hashCode())
+    System.out.println(ns.toString())
+
+    Byte auto = 42
+    byte unboxed = auto
+    Short autos = 300
+    short unboxeds = autos
+    System.out.println(auto + " " + unboxed + " " + autos + " " + unboxeds)
+
+    Long a = Long.valueOf(5L)
+    Long c = Long.valueOf(9L)
+    System.out.println(a.compareTo(c))
+    System.out.println(c.compareTo(a))
+    System.out.println(a.compareTo(Long.valueOf(5L)))
+    Comparable<Long> la = a
+    System.out.println(la.compareTo(c))
+
+    Double d5 = Double.valueOf(5.0)
+    Double d9 = Double.valueOf(9.0)
+    System.out.println(d5.compareTo(d9))
+    System.out.println(d9.compareTo(d5))
+    System.out.println(d5.compareTo(Double.valueOf(5.0)))
+
+    String empty = ""
+    System.out.println(empty.equals(Integer.valueOf(0)))
+    System.out.println("abcdefghijkl".equals(Integer.valueOf(12)))
+    System.out.println("abc".equals("abc"))
+    System.out.println("abc".equals(null))
+  }
+}

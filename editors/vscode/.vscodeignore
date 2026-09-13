@@ -1,0 +1,9 @@
+# Only the manifest, the language configuration, the grammar and the snippets
+# are needed at run time. Everything else stays out of the .vsix.
+
+.vscode/**
+tools/**
+node_modules/**
+*.vsix
+*.log
+.gitignore

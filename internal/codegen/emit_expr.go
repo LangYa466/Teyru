@@ -2,9 +2,11 @@ package codegen
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/LangYa466/Teyru/internal/ast"
+	"github.com/LangYa466/Teyru/internal/sema"
 	"github.com/LangYa466/Teyru/internal/util"
 )
 
@@ -271,9 +273,6 @@ func (e *Emitter) strLit(s string) string {
 	return fmt.Sprintf("((tystr*)&S%d)", id)
 }
 
-// finishStrings rewrites static string globals so their data pointer is valid.
-func (e *Emitter) stringGlobals() string { return "" }
-
 func (e *Emitter) ident(v *ast.Ident) string {
 	switch r := v.Ref.(type) {
 	case *ast.Field:
@@ -321,6 +320,25 @@ func (e *Emitter) outerAccess(target *ast.Class) string {
 // outerFieldAccess reads a field that belongs to an enclosing class.
 func (e *Emitter) outerFieldAccess(f *ast.Field) string {
 	return "((" + cname(f.Owner) + "*)" + e.outerAccess(f.Owner) + ")->f_" + mangle(f.Name)
+}
+
+// nativeIsFinal reports whether the runtime helper a native method maps to is
+// the implementation that will actually run.
+//
+// Object.toString, hashCode and equals are native, but they are also the three
+// methods a class is most likely to override. Calling the runtime helper
+// directly for a receiver whose static type is Object would skip the override,
+// so an overridable method of a class that has subclasses is dispatched through
+// the vtable instead, and the vtable slot holds the runtime wrapper.
+func (e *Emitter) nativeIsFinal(m *ast.Method) bool {
+	if m == nil {
+		return true
+	}
+	if m.IsStatic() || m.Mods.Has(ast.ModFinal) || m.Mods.Has(ast.ModPrivate) {
+		return true
+	}
+	// a receiver typed as a class with no subclasses cannot dispatch anywhere else
+	return m.Owner == nil || len(m.Owner.Subclasses) == 0
 }
 
 // clinitCall initializes a class before its static state is touched, matching
@@ -384,7 +402,7 @@ func (e *Emitter) selectExpr(v *ast.Select) string {
 	}
 	if s, ok := v.Ref.(string); ok && s == "length" {
 		arr := e.tmpRef(e.expr(v.X))
-		return "(" + arr + " ? " + arr + "->len : (int64_t)ty_aioobe(0, 0))"
+		return "(" + arr + " ? " + arr + "->len : (int64_t)(intptr_t)ty_npe())"
 	}
 	if f, ok := v.Ref.(*ast.Field); ok {
 		if f.Mods.Has(ast.ModStatic) {
@@ -396,23 +414,40 @@ func (e *Emitter) selectExpr(v *ast.Select) string {
 	return "0"
 }
 
-// boundCheck wraps an array access with an inline range test.
-func (e *Emitter) boundCheck(a, i string) string {
+// boundCheck wraps an array access with the two tests Java applies, in Java's
+// order: a null reference throws NullPointerException, and a non-null array has
+// its index tested against the length, throwing ArrayIndexOutOfBoundsException.
+// The index expression is evaluated before either test, as it is in Java.
+//
+// The result is the address of the checked element rather than its index. The
+// tests have to run before the element is formed, which a plain subscript
+// cannot promise: C may load the array's data pointer before it evaluates the
+// subscript, dereferencing a null array instead of throwing.
+func (e *Emitter) boundCheck(a, i, slot string) string {
 	n := e.tmpName()
-	return "({ tyarr* " + n + " = (tyarr*)" + a + "; int64_t _i = (int64_t)(" + i + ");" +
-		" (_i < 0 || _i >= " + n + "->len) ? (int64_t)(intptr_t)ty_aioobe(_i, " + n + "->len), (int64_t)0 : _i; })"
+	k := e.tmpName()
+	return "({ tyarr* " + n + " = (tyarr*)" + a + "; int64_t " + k + " = (int64_t)(" + i + ");" +
+		" if (!" + n + ") ty_npe();" +
+		" if (" + k + " < 0 || " + k + " >= " + n + "->len) ty_aioobe(" + k + ", " + n + "->len);" +
+		" (" + slot + "*)" + n + "->data + " + k + "; })"
+}
+
+// elemSlot is the C type of the slot an array of elem holds: a reference is
+// stored as an untyped pointer, a primitive as its own value.
+func (e *Emitter) elemSlot(elem ast.Type) string {
+	if e.isRef(elem) {
+		return "void*"
+	}
+	return e.ctype(elem)
 }
 
 func (e *Emitter) indexExpr(v *ast.Index) string {
-	a := e.tmpRef(e.expr(v.X))
-	i := e.expr(v.Index)
 	elem := v.GetType()
-	cast := e.ctype(elem)
-	idx := e.boundCheck(a, i)
+	elemPtr := "(*" + e.boundCheck(e.expr(v.X), e.expr(v.Index), e.elemSlot(elem)) + ")"
 	if e.isRef(elem) {
-		return "(((" + cast + ")((void**)((tyarr*)" + a + ")->data)[" + idx + "]))"
+		return "(((" + e.ctype(elem) + ")" + elemPtr + "))"
 	}
-	return "((((" + cast + "*)((tyarr*)" + a + ")->data)[" + idx + "]))"
+	return "(" + elemPtr + ")"
 }
 
 func (e *Emitter) cast(v *ast.Cast) string {
@@ -432,8 +467,7 @@ func (e *Emitter) cast(v *ast.Cast) string {
 	if ct, ok := dst.(*ast.ClassType); ok {
 		return "((" + cname(ct.Class) + "*)ty_checkcast((tyobj*)" + e.refExpr(v.X) + ", &cls_" + mangle(ct.Class.Full) + "))"
 	}
-	if arr, ok := dst.(*ast.ArrayType); ok {
-		_ = arr
+	if _, ok := dst.(*ast.ArrayType); ok {
 		return "((tyarr*)ty_checkcast((tyobj*)" + e.refExpr(v.X) + ", &cls_" + mangle(e.prog.ArrayClass().Full) + "))"
 	}
 	return "(" + e.ctype(dst) + ")(" + inner + ")"
@@ -441,11 +475,8 @@ func (e *Emitter) cast(v *ast.Cast) string {
 
 func (e *Emitter) instanceOf(v *ast.InstanceOf) string {
 	if e.patternVars != nil {
-		if ok, isPrim := e.patternOK[v]; isPrim {
-			return "(" + ok + " != 0)"
-		}
 		if name, ok := e.patternVars[v]; ok {
-			return "(" + name + " != NULL)"
+			return e.assignPattern(v, name)
 		}
 	}
 	if prim, isPrim := e.prog.Erased(v.Type.Resolved).(*ast.PrimType); isPrim {
@@ -463,6 +494,91 @@ func (e *Emitter) instanceOf(v *ast.InstanceOf) string {
 	return "ty_instanceof((tyobj*)" + e.refExpr(v.X) + ", " + target + ")"
 }
 
+// assignPattern renders a pattern whose variables hoistPatterns declared before
+// the loop. The test and the assignment travel together as one statement
+// expression, so the variable is bound on every evaluation of the condition —
+// which is what Java does — instead of once, when the loop was entered, which
+// would leave the body reading the value of the first iteration forever.
+//
+// The source expression is read once into a temporary: it may have side effects
+// (`xs[next()] instanceof String s`), and the test and the value that is bound
+// have to agree on the one reading.
+func (e *Emitter) assignPattern(v *ast.InstanceOf, name string) string {
+	src := "(" + e.expr(v.X) + ")"
+	if prim, isPrim := e.prog.Erased(v.Type.Resolved).(*ast.PrimType); isPrim {
+		// a primitive pattern asks about the value, so the match is recorded in
+		// the flag declareExprPattern left beside the value, and the value
+		// itself is written only when it converted exactly
+		okName := e.patternOK[v]
+		return "({ " + name + " = 0; " + okName + " = ty_prim_match((void*)" + src + ", " +
+			fmt.Sprint(prim.Kind) + ", &" + name + ", " + fmt.Sprint(e.primOperandBoxed(v)) + "); " +
+			okName + " != 0; })"
+	}
+	ct := e.ctype(v.Type.Resolved)
+	obj := e.tmpName()
+	var b strings.Builder
+	b.WriteString("({ void* " + obj + " = (void*)" + src + "; ")
+	if len(v.Binding.Decomp) == 0 {
+		// the variable holds the value only when the type test succeeds, which is
+		// what `x instanceof T t` means as a condition
+		fmt.Fprintf(&b, "%s = ty_instanceof(%s, %s) ? (%s)%s : NULL; ", name, obj, e.instTarget(v), ct, obj)
+		fmt.Fprintf(&b, "%s != NULL; })", name)
+		return b.String()
+	}
+	// The components are part of the binding, so they are read out of the record
+	// again whenever it matches. A nested pattern's own components are read
+	// under a test of their own, and the flag is what carries the outcome out of
+	// the expression: a component that is not there, or is of the wrong type,
+	// clears it, and the pattern as a whole does not match.
+	ok := e.tmpName()
+	fmt.Fprintf(&b, "int32_t %s = 0; ", ok)
+	fmt.Fprintf(&b, "%s = ty_instanceof(%s, %s) ? (%s)%s : NULL; ", name, obj, e.instTarget(v), ct, obj)
+	inner := e.capture(func() {
+		e.line("%s = 1;\n", ok)
+		e.emitComponentReads(e.planComponents(v.Binding, name), ok)
+	})
+	fmt.Fprintf(&b, "if (%s) { %s } ", name, inner)
+	fmt.Fprintf(&b, "%s != 0; })", ok)
+	return b.String()
+}
+
+// primOperandBoxed reports whether the operand of a primitive type pattern is a
+// reference and therefore carries a box, which JEP 507 matches against the
+// pattern's type exactly. A primitive operand is boxed by the caller to reach
+// the runtime, and for those only the conversion has to be exact, so the two
+// cases travel as a flag (javac 25 --enable-preview agrees with both rules).
+func (e *Emitter) primOperandBoxed(v *ast.InstanceOf) int {
+	// Semantic analysis boxes a primitive operand so the runtime sees an object,
+	// which turns the operand into a conversion whose source is primitive. That
+	// conversion is the only trace of "the operand was a primitive", and it is
+	// what decides between JEP 507's two rules; an operand that was already a
+	// reference is boxed all the same but has no such conversion under it.
+	for x := v.X; ; {
+		c, ok := x.(*ast.Conv)
+		if !ok {
+			return operandIsBox(e.prog, x.GetType())
+		}
+		if _, isPrim := c.X.GetType().(*ast.PrimType); isPrim {
+			return 0
+		}
+		x = c.X
+	}
+}
+
+// operandIsBox reports whether a static type is a reference, and the operand
+// therefore carries a box. Program.Erased cannot answer this: it erases a type
+// variable, but it is not a test for primitiveness and it rewrites a primitive
+// type rather than returning it unchanged.
+func operandIsBox(p *sema.Program, t ast.Type) int {
+	if tv, ok := t.(*ast.TypeVarType); ok {
+		t = p.Erased(tv)
+	}
+	if _, isPrim := t.(*ast.PrimType); isPrim {
+		return 0
+	}
+	return 1
+}
+
 // primMatchExpr renders the run time question a primitive type pattern asks,
 // as a statement expression that yields a boolean.
 func (e *Emitter) primMatchExpr(v *ast.InstanceOf, prim *ast.PrimType) string {
@@ -471,7 +587,7 @@ func (e *Emitter) primMatchExpr(v *ast.InstanceOf, prim *ast.PrimType) string {
 	ok := e.tmpName()
 	inner := e.capture(func() {
 		e.line("%s %s = 0;\n", e.ctype(prim), val)
-		e.line("int32_t %s = ty_prim_match((void*)%s, %d, &%s);\n", ok, src, prim.Kind, val)
+		e.line("int32_t %s = ty_prim_match((void*)%s, %d, &%s, %d);\n", ok, src, prim.Kind, val, e.primOperandBoxed(v))
 	})
 	return "({ " + inner + " " + ok + " != 0; })"
 }
@@ -508,12 +624,25 @@ func (e *Emitter) unaryInner(v *ast.Unary) string {
 		if v.Op == "--" {
 			op = "- 1"
 		}
+		decl, ref := e.lvalueTemp(v.X)
 		if v.Postfix {
-			return "((" + e.lvalue(v.X) + ") += " + op + ", (" + e.lvalue(v.X) + ") - (" + op + "))"
+			// the value of a postfix update is the one the target held before it
+			return "({ " + decl + ref + " += " + op + "; " + ref + " - (" + op + "); })"
 		}
-		return "((" + e.lvalue(v.X) + ") += " + op + ")"
+		return "({ " + decl + ref + " += " + op + "; })"
 	}
 	return x
+}
+
+// lvalueTemp binds an lvalue to a temporary pointer. An update or a compound
+// assignment needs the target twice, and repeating the lvalue would evaluate an
+// index or a receiver with side effects a second time; dereferencing the shared
+// temporary keeps that to one evaluation. The declaration is spliced into a
+// statement expression by the caller.
+func (e *Emitter) lvalueTemp(x ast.Expr) (string, string) {
+	n := e.tmpName()
+	t := e.ctype(x.GetType())
+	return t + "* " + n + " = (" + t + "*)&(" + e.lvalue(x) + "); ", "(*" + n + ")"
 }
 
 // lvalue renders an assignable expression. Static targets are returned without
@@ -538,14 +667,7 @@ func (e *Emitter) lvalue(x ast.Expr) string {
 		}
 		return "0"
 	case *ast.Index:
-		a := e.tmpRef(e.expr(v.X))
-		i := e.expr(v.Index)
-		elem := v.GetType()
-		idx := e.boundCheck(a, i)
-		if e.isRef(elem) {
-			return "((((void**)((tyarr*)" + a + ")->data)[" + idx + "]))"
-		}
-		return "((((" + e.ctype(elem) + "*)((tyarr*)" + a + ")->data)[" + idx + "]))"
+		return "(*" + e.boundCheck(e.expr(v.X), e.expr(v.Index), e.elemSlot(v.GetType())) + ")"
 	}
 	return e.expr(x)
 }
@@ -595,6 +717,14 @@ func (e *Emitter) foldBinary(v *ast.Binary) (string, bool) {
 		return "", false
 	}
 	x, y := int64(xl.Int), int64(yl.Int)
+	// JLS 15.19: only the low bits of the count are significant, and how many
+	// depends on the type the shift is performed in -- not on the int64 used
+	// here. Masking with the long width would fold an int `a << 32` to 0 where
+	// Java gives 1.
+	mask := uint((1 << shiftBitsInt) - 1)
+	if wide {
+		mask = (1 << shiftBitsLong) - 1
+	}
 	var r int64
 	switch v.Op {
 	case "+":
@@ -620,9 +750,9 @@ func (e *Emitter) foldBinary(v *ast.Binary) (string, bool) {
 	case "^":
 		r = x ^ y
 	case "<<":
-		r = x << (uint(y) & 63)
+		r = x << (uint(y) & mask)
 	case ">>":
-		r = x >> (uint(y) & 63)
+		r = x >> (uint(y) & mask)
 	default:
 		return "", false
 	}
@@ -634,6 +764,110 @@ func (e *Emitter) foldBinary(v *ast.Binary) (string, bool) {
 		kind = ast.LitLong
 	}
 	return e.literal(&ast.Literal{Kind: kind, Int: uint64(r)}), true
+}
+
+// flatOps are the operators whose left-deep runs are spelled as one flat chain.
+// Each is left-associative in C with the same meaning as in Teyru, so dropping
+// the parentheses cannot change the value. Division and remainder are absent
+// because their grouping matters, and `>>>` has its own unsigned emission.
+var flatOps = map[string]bool{
+	"+": true, "-": true, "*": true, "&": true, "|": true, "^": true,
+	"<<": true, ">>": true, "&&": true, "||": true,
+}
+
+// flattenable reports whether a binary node is a left-deep run of one operator
+// that can be spelled flat. A chain such as `a + b + c + ...` otherwise hands
+// the C compiler one parenthesis level per term, which overflows its parser on
+// a chain of a few thousand terms; the flat spelling compiles.
+func (e *Emitter) flattenable(v *ast.Binary) bool {
+	if !flatOps[v.Op] {
+		return false
+	}
+	// a string `+` concatenates rather than adds, and is emitted as a chain of
+	// runtime calls already
+	if _, ok := v.GetType().(*ast.PrimType); !ok {
+		return false
+	}
+	b, ok := v.X.(*ast.Binary)
+	return ok && e.flatSpine(v, b)
+}
+
+// flatSpine reports whether b continues a left-deep run of v's operator: the
+// same operator, and not a constant that the nested spelling would have folded
+// instead of computing in C.
+func (e *Emitter) flatSpine(v, b *ast.Binary) bool {
+	if b.Op != v.Op {
+		return false
+	}
+	_, folds := e.foldBinary(b)
+	return !folds
+}
+
+// flatChain renders a left-deep run of one operator as a single chain, with the
+// operands in their original order and each rendered as the nested spelling
+// rendered it. Only the left spine is flattened: a run on the right, as in
+// `a - (b - c)`, keeps its parentheses because its grouping differs.
+func (e *Emitter) flatChain(v *ast.Binary) string {
+	if b, ok := v.X.(*ast.Binary); ok && e.flatSpine(v, b) {
+		return e.flatChain(b) + " " + v.Op + " " + e.flatRight(v.Y, v)
+	}
+	return e.flatOperand(v.X, v) + " " + v.Op + " " + e.flatRight(v.Y, v)
+}
+
+// flatOperand renders one operand of a chain: a short-circuit operator tests
+// its operands, any other coerces them.
+func (e *Emitter) flatOperand(x ast.Expr, v *ast.Binary) string {
+	if v.Op == "&&" || v.Op == "||" {
+		return e.cond(x)
+	}
+	return e.operand(x, v.OpType)
+}
+
+// flatRight renders the right operand of a flattened link. For a shift that
+// operand is the count, and a flattened chain has to mask it exactly like the
+// nested spelling does, or the two spellings of one expression disagree.
+func (e *Emitter) flatRight(y ast.Expr, v *ast.Binary) string {
+	s := e.flatOperand(y, v)
+	if v.Op == "<<" || v.Op == ">>" {
+		return shiftCount(s, v.OpType)
+	}
+	return s
+}
+
+// shiftBitsInt and shiftBitsLong are the number of low bits of a shift count
+// that JLS 15.19 leaves significant: 5 for the int family, 6 for long. Every
+// other bit of the count is discarded, so an int `a << 33` shifts by 1. C
+// instead leaves a shift whose count reaches the operand width undefined, and
+// clang at -O1 and -O2 folds such a shift to an arbitrary value or lets a stack
+// address through, so masking is what keeps the emitted program defined rather
+// than an optimisation.
+const (
+	shiftBitsInt  = 5
+	shiftBitsLong = 6
+)
+
+// shiftType is the type a shift whose left operand has type t is performed in:
+// JLS 5.6 promotes every integral type but long to int.
+func shiftType(t ast.Type) ast.Type {
+	if ast.IsPrim(t, ast.Long) {
+		return ast.TLong
+	}
+	return ast.TInt
+}
+
+// shiftCount renders an already-rendered shift count reduced to the bits of
+// shiftBitsInt/shiftBitsLong. The count is masked as an unsigned value, so a
+// negative one wraps the way Java's does (`a << -1` shifts by 31), and the
+// masked count is cast back to the signed type the shift is performed in: a
+// count of unsigned type would drag the shifted operand into unsigned
+// arithmetic under the usual conversions and quietly turn `>>` into a logical
+// shift. left is the type of the operand being shifted.
+func shiftCount(count string, left ast.Type) string {
+	ut, st, bits := "uint32_t", "int32_t", shiftBitsInt
+	if ast.IsPrim(left, ast.Long) {
+		ut, st, bits = "uint64_t", "int64_t", shiftBitsLong
+	}
+	return "(" + st + ")((" + ut + ")(" + count + ") & " + strconv.Itoa((1<<bits)-1) + ")"
 }
 
 func (e *Emitter) binary(v *ast.Binary) string {
@@ -649,7 +883,11 @@ func (e *Emitter) binary(v *ast.Binary) string {
 		if ast.IsPrim(v.OpType, ast.Byte) || ast.IsPrim(v.OpType, ast.Short) || ast.IsPrim(v.OpType, ast.Char) {
 			ut = "uint32_t"
 		}
-		return "(" + e.ctype(v.GetType()) + ")((" + ut + ")(" + e.expr(v.X) + ") >> " + e.expr(v.Y) + ")"
+		return "(" + e.ctype(v.GetType()) + ")((" + ut + ")(" + e.expr(v.X) + ") >> " +
+			shiftCount(e.operand(v.Y, v.OpType), v.OpType) + ")"
+	}
+	if e.flattenable(v) {
+		return "(" + e.flatChain(v) + ")"
 	}
 	lt, rt := v.X.GetType(), v.Y.GetType()
 	switch v.Op {
@@ -670,6 +908,11 @@ func (e *Emitter) binary(v *ast.Binary) string {
 	}
 	x := e.operand(v.X, v.OpType)
 	y := e.operand(v.Y, v.OpType)
+	// C makes a shift whose count reaches the operand width undefined, so the
+	// count of `<<` and `>>` is masked before it is emitted
+	if v.Op == "<<" || v.Op == ">>" {
+		y = shiftCount(y, v.OpType)
+	}
 	return "(" + x + " " + v.Op + " " + y + ")"
 }
 
@@ -691,14 +934,8 @@ func (e *Emitter) operand(x ast.Expr, op ast.Type) string {
 }
 
 func (e *Emitter) equality(v *ast.Binary, lt, rt ast.Type) string {
-	neg := ""
-	if v.Op == "!=" {
-		neg = "!"
-	}
 	ls, lsOk := lt.(*ast.PrimType)
 	rs, rsOk := rt.(*ast.PrimType)
-	_ = ls
-	_ = rs
 	switch {
 	case lsOk && rsOk:
 		return "(" + e.expr(v.X) + " " + v.Op + " " + e.expr(v.Y) + ")"
@@ -712,9 +949,10 @@ func (e *Emitter) equality(v *ast.Binary, lt, rt ast.Type) string {
 		}
 		return "(" + x + " " + v.Op + " " + y + ")"
 	}
-	if e.isStringType(lt) && e.isStringType(rt) {
-		return "(" + neg + "ty_str_eq((tystr*)" + e.expr(v.X) + ", (tystr*)" + e.expr(v.Y) + "))"
-	}
+	// `==` on two String references is a reference comparison, as in Java: two
+	// strings built separately are equal only under equals(). Literals are
+	// interned per program by strLit, so `a == "abc"` is still true, and so is a
+	// comparison against a concatenation of literals folded at compile time.
 	return "(" + e.expr(v.X) + " " + v.Op + " " + e.expr(v.Y) + ")"
 }
 
@@ -750,18 +988,24 @@ func isFloating(t ast.Type) bool {
 
 // concat renders Java string concatenation.
 func (e *Emitter) concat(v *ast.Binary) string {
-	parts := []string{}
+	return e.concatFrom(e.stringOperand(v.X), v.Y)
+}
+
+// concatFrom builds the concatenation of an already-rendered left operand with
+// the string parts of x. It is used when the left operand is a value read
+// through a bound temporary rather than an expression of its own.
+func (e *Emitter) concatFrom(first string, x ast.Expr) string {
+	parts := []string{first}
 	var collect func(ast.Expr)
-	collect = func(x ast.Expr) {
-		if b, ok := x.(*ast.Binary); ok && b.Op == "+" && e.isStringType(b.GetType()) {
+	collect = func(y ast.Expr) {
+		if b, ok := y.(*ast.Binary); ok && b.Op == "+" && e.isStringType(b.GetType()) {
 			collect(b.X)
 			collect(b.Y)
 			return
 		}
-		parts = append(parts, e.stringOperand(x))
+		parts = append(parts, e.stringOperand(y))
 	}
-	collect(v.X)
-	collect(v.Y)
+	collect(x)
 	out := parts[0]
 	for _, p := range parts[1:] {
 		out = "ty_str_concat(" + out + ", " + p + ")"
@@ -808,11 +1052,21 @@ func (e *Emitter) targetClinit(x ast.Expr) string {
 
 func (e *Emitter) assign(v *ast.Assign) string {
 	pre := e.targetClinit(v.X)
-	lv := e.lvalue(v.X)
-	if pre != "" {
-		return "(" + pre + e.assignInner(v, lv) + ")"
+	if v.Op == "=" {
+		lv := e.lvalue(v.X)
+		if pre != "" {
+			return "(" + pre + e.assignInner(v, lv) + ")"
+		}
+		return e.assignInner(v, lv)
 	}
-	return e.assignInner(v, lv)
+	// a compound assignment reads the target as well as writing it, so the
+	// target is bound once and both uses go through the temporary
+	decl, ref := e.lvalueTemp(v.X)
+	expr := "({ " + decl + e.assignInner(v, ref) + "; })"
+	if pre != "" {
+		return "(" + pre + expr + ")"
+	}
+	return expr
 }
 
 func (e *Emitter) assignInner(v *ast.Assign, lv string) string {
@@ -820,17 +1074,25 @@ func (e *Emitter) assignInner(v *ast.Assign, lv string) string {
 		return "(" + lv + " = " + e.coerce(e.expr(v.Y), v.Y.GetType(), v.X.GetType()) + ")"
 	}
 	if v.Op == "+=" && e.isStringType(v.X.GetType()) {
-		// string += is concatenation
-		return "(" + lv + " = (tystr*)" + e.concat(&ast.Binary{
-			ExprBase: ast.ExprBase{Pos: v.Pos, T: v.X.GetType()}, Op: "+", X: v.X, Y: v.Y}) + ")"
+		// string += is concatenation; the left operand is the value the target
+		// holds before the store
+		return "(" + lv + " = (tystr*)" + e.concatFrom("(tystr*)"+lv, v.Y) + ")"
 	}
 	op := v.Op[:len(v.Op)-1]
-	if op == ">>>" {
-		ut := "uint32_t"
-		if ast.IsPrim(v.X.GetType(), ast.Long) {
-			ut = "uint64_t"
+	// a compound shift masks its count exactly like the binary form; the target
+	// also gives the type the count is unboxed to, since sema leaves the
+	// operation type of a compound assignment unset
+	if op == "<<" || op == ">>" || op == ">>>" {
+		st := shiftType(v.X.GetType())
+		count := shiftCount(e.operand(v.Y, st), st)
+		if op == ">>>" {
+			ut := "uint32_t"
+			if ast.IsPrim(st, ast.Long) {
+				ut = "uint64_t"
+			}
+			return "(" + lv + " = (" + e.ctype(v.X.GetType()) + ")((" + ut + ")" + lv + " >> " + count + "))"
 		}
-		return "(" + lv + " = (" + e.ctype(v.X.GetType()) + ")((" + ut + ")" + lv + " >> " + e.expr(v.Y) + "))"
+		return "(" + lv + " " + op + "= " + count + ")"
 	}
 	if op == "/" || op == "%" {
 		xt := v.X.GetType()
@@ -898,7 +1160,7 @@ func (e *Emitter) callExpr(v *ast.Call) string {
 			recv = e.expr(v.Recv)
 		}
 	}
-	if _, ok := nativeTable[nativeKey(m)]; ok {
+	if _, ok := nativeTable[nativeKey(m)]; ok && e.nativeIsFinal(m) {
 		return e.nativeCall(m, recv, v.Args)
 	}
 	name := e.cfunc(m)
@@ -921,30 +1183,51 @@ func (e *Emitter) callExpr(v *ast.Call) string {
 		return name + "(" + a + ")"
 	}
 	if (m.Selector >= 0 || m.VIndex >= 0) && !m.Mods.Has(ast.ModPrivate) {
-		return e.virtCall(m, cname(m.Owner)+"*", recv, v.Args)
+		return e.virtCallTemp(v.Recv, m, v.Args)
 	}
 	return name + "(" + a + ")"
 }
 
+// virtCallTemp dispatches a virtual call whose receiver may be an expression
+// rather than a variable. The receiver is both dereferenced for the vtable
+// lookup and passed as the first argument, so it is evaluated once into a
+// temporary that every use shares; otherwise a receiver such as make() would
+// run again for each use.
+func (e *Emitter) virtCallTemp(recv ast.Expr, m *ast.Method, args []ast.Expr) string {
+	rt := cname(m.Owner) + "*"
+	n := e.tmpName()
+	return "({ " + rt + " " + n + " = (" + rt + ")" + e.expr(recv) + "; " +
+		e.virtCall(m, rt, n, args) + "; })"
+}
+
 // virtCall dispatches through the vtable or, for interface receivers, the itable.
+//
+// Both lookups read the receiver, so a null one has to be answered the way Java
+// answers it: a NullPointerException, not a segmentation fault. The receiver is
+// a variable or a temporary by the time it gets here (virtCallTemp binds
+// anything else), so the test evaluates nothing twice and costs one branch,
+// which the conditional operator keeps out of the call itself.
 func (e *Emitter) virtCall(m *ast.Method, recvT, recv string, args []ast.Expr) string {
 	if recvT == "" {
 		recvT = "void*"
 	}
+	var call string
 	if m.Selector >= 0 {
 		fn := "((void*)ty_itab((tyobj*)" + recv + ", " + fmt.Sprint(m.Selector) + "))"
-		return e.indirect(m, fn, "void*", recv, args)
+		call = e.indirect(m, fn, "void*", recv, args)
+	} else {
+		fn := "((" + recv + ")->obj.cls->vtable[" + fmt.Sprint(m.VIndex) + "])"
+		call = e.indirect(m, fn, recvT, recv, args)
 	}
-	fn := "((" + recv + ")->obj.cls->vtable[" + fmt.Sprint(m.VIndex) + "])"
-	return e.indirect(m, fn, recvT, recv, args)
+	if ret := e.ctype(m.Result); ret != "void" {
+		return "((" + recv + ") ? (" + call + ") : (" + ret + ")((intptr_t)ty_npe()))"
+	}
+	return "((" + recv + ") ? (void)(" + call + ") : (void)ty_npe())"
 }
 
 // indirect builds a call through a runtime-resolved function pointer.
 func (e *Emitter) indirect(m *ast.Method, fn, recvT, recv string, args []ast.Expr) string {
 	ret := e.ctype(m.Result)
-	if ret == "void" {
-		ret = "void"
-	}
 	var ps []string
 	if !m.IsStatic() {
 		ps = append(ps, recvT)

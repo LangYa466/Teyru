@@ -1,0 +1,48 @@
+// A try-with-resources opens each resource exactly once. The supplier here
+// counts its calls, so a close that evaluated the resource expression again
+// would show up in the count.
+class Main {
+  static int made = 0
+
+  static Res make(String tag) {
+    made++
+    return new Res(tag)
+  }
+
+  static void inner() {
+    Res local = make("local")
+    try (make("expr")
+         local) {
+      System.out.println("in body")
+    }
+    System.out.println("after inner")
+  }
+
+  public static void main(String[] args) {
+    inner()
+    Res held = make("held")
+    try (held) {
+      System.out.println("variable")
+    }
+    try {
+      try (make("throws")) {
+        throw new RuntimeException("boom")
+      }
+    } catch (RuntimeException e) {
+      System.out.println("caught " + e.getMessage())
+    }
+    System.out.println("made=" + made)
+  }
+}
+
+class Res implements AutoCloseable {
+  String tag
+
+  Res(String tag) {
+    this.tag = tag
+  }
+
+  public void close() {
+    System.out.println("close " + tag)
+  }
+}

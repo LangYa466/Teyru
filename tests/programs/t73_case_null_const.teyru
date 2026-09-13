@@ -1,0 +1,102 @@
+// A `case null` beside constant labels. Java lets a switch on a String, an enum
+// or a box ask for null as well as for the constants, and each of these switches
+// used to answer wrongly: the constant labels are not C case labels when a null
+// arm is present, the null arm cannot be a C case label at all, and a label
+// whose selector is a String, an enum or a box was compared as the pointer it
+// is held in rather than as the value Java compares.
+//
+// The .expected file is what javac 25.0.3 prints for the same program (javac 21
+// prints the same; nothing here is a preview feature). Every switch below is
+// also written in a file the same shape as this one and run with java, because
+// the answers are the whole point of the test.
+class Main {
+  // one constant label and a null arm: the constants all fell onto the null
+  // arm, so f("a") answered "N"
+  static String f(String s) {
+    return switch (s) {
+      case "a" -> "A"
+      case null -> "N"
+      default -> "D"
+    }
+  }
+
+  // two constant labels and a null arm: both labels came out as the same C
+  // case label, and the generated C did not compile at all
+  static String g(String s) {
+    return switch (s) {
+      case "a" -> "A"
+      case "b" -> "B"
+      case null -> "N"
+      default -> "D"
+    }
+  }
+
+  enum Color { RED, GREEN, BLUE }
+
+  // an enum selector with a null arm: the ordinal of the case did not decide
+  // anything any more, so RED, GREEN and BLUE all answered "D" while null,
+  // the one value the switch never had a label for, answered "R"
+  static String h(Color c) {
+    return switch (c) {
+      case RED -> "R"
+      case GREEN -> "G"
+      case null -> "N"
+      default -> "D"
+    }
+  }
+
+  // a constant label next to a type pattern, with no null arm: the constant was
+  // compared as a pointer against a case index and never matched
+  static String k(String s) {
+    return switch (s) {
+      case "a" -> "A"
+      case String x -> "S"
+    }
+  }
+
+  // a switch on a box, which `case null` is what allows to be written at all:
+  // the chain holds the box, so a label compared the box itself and answered
+  // with the default for every value, the ones the labels name included
+  static String bi(Integer k) {
+    return switch (k) {
+      case 1 -> "one"
+      case null -> "null"
+      default -> "other"
+    }
+  }
+
+  static String bc(Character c) {
+    return switch (c) {
+      case 'a' -> "A"
+      case null -> "null"
+      default -> "other"
+    }
+  }
+
+  static String bb(Byte b) {
+    return switch (b) {
+      case 3 -> "three"
+      case null -> "null"
+      default -> "other"
+    }
+  }
+
+  static String bs(Short s) {
+    return switch (s) {
+      case 5 -> "five"
+      case null -> "null"
+      default -> "other"
+    }
+  }
+
+  public static void main(String[] args) {
+    System.out.println(f("a") + f("z") + f(null))
+    System.out.println(g("a") + g("b") + g(null))
+    System.out.println(h(Color.RED) + " " + h(Color.GREEN) + " " + h(Color.BLUE) + " " + h(null))
+    System.out.println(k("a") + k("z"))
+    System.out.println(bi(1) + " " + bi(2) + " " + bi(null))
+    System.out.println(bc('a') + " " + bc('b') + " " + bc(null))
+    System.out.println(bb((byte) 3) + " " + bb((byte) 4) + " " + bb(null))
+    System.out.println(bs((short) 5) + " " + bs((short) 6) + " " + bs(null))
+  }
+}

@@ -37,6 +37,9 @@ type Emitter struct {
 	retType   ast.Type // declared result type of the method being emitted
 	curLambda *ast.Lambda
 	switchID  int
+	// static type of the selector of the switch being emitted: a primitive type
+	// pattern in a case asks about a box only when the selector is a reference
+	switchSel ast.Type
 	switchCur int
 	// labels attached to the statement being emitted right now; a loop
 	// consumes them and turns them into its continue and break targets
@@ -293,9 +296,6 @@ func (e *Emitter) emitClassMeta(cl *ast.Class) {
 				continue
 			}
 			if impl := e.prog.Implements(cl, m); impl != nil {
-				if _, isAbs := impl.SynthKind, false; isAbs {
-					_ = isAbs
-				}
 				imap[m.Selector] = "(void*)" + e.cfunc(impl)
 			}
 		}
@@ -663,8 +663,20 @@ func (e *Emitter) entry() string {
 	b.WriteString(e.clinitRefs())
 	b.WriteString("  TY_STRING = &cls_" + mangle(e.prog.Builtins.String.Full) + ";\n")
 	b.WriteString("  TY_OBJECT = &cls_" + mangle(e.prog.Builtins.Object.Full) + ";\n")
-	for k, cl := range e.prog.Builtins.Boxes {
-		fmt.Fprintf(&b, "  TY_BOX[%d] = &cls_%s;\n", int(k), mangle(cl.Full))
+	// the arrays the compiler creates get this class, so `a instanceof Object`,
+	// `(Object) a` and `"" + a` behave, and the collector can see that an array's
+	// elements are references and trace them
+	b.WriteString("  TY_ARRAY = &cls_" + mangle(e.prog.ArrayClass().Full) + ";\n")
+	// sorted: iterating the map directly would emit TY_BOX assignments in a
+	// different order every run, so two builds of one program would not produce
+	// the same C and the output could not be diffed
+	boxKinds := make([]int, 0, len(e.prog.Builtins.Boxes))
+	for k := range e.prog.Builtins.Boxes {
+		boxKinds = append(boxKinds, int(k))
+	}
+	sort.Ints(boxKinds)
+	for _, k := range boxKinds {
+		fmt.Fprintf(&b, "  TY_BOX[%d] = &cls_%s;\n", k, mangle(e.prog.Builtins.Boxes[ast.PrimKind(k)].Full))
 	}
 	for _, pair := range [][2]any{
 		{"TY_NPE", e.prog.Builtins.NPE}, {"TY_AIOOBE", e.prog.Builtins.AIOOBE},
@@ -672,6 +684,7 @@ func (e *Emitter) entry() string {
 		{"TY_NEGARR", e.prog.Builtins.NegArr}, {"TY_ASSERT", e.prog.Builtins.Assertion},
 		{"TY_ILLARG", e.prog.Builtins.IllArg}, {"TY_ILLSTATE", e.prog.Builtins.IllState},
 		{"TY_NOSUCHELEM", e.prog.Builtins.NoSuchElem}, {"TY_UNSUP", e.prog.Builtins.Unsup},
+		{"TY_ARRAYSTORE", e.prog.Builtins.ArrayStore},
 	} {
 		if cl, ok := pair[1].(*ast.Class); ok && cl != nil {
 			fmt.Fprintf(&b, "  %s = &cls_%s;\n", pair[0], mangle(cl.Full))
@@ -692,7 +705,10 @@ func (e *Emitter) entry() string {
 	}
 	recv := ""
 	if !main.IsStatic() {
-		fmt.Fprintf(&b, "  %s _main_obj = (%s)ty_alloc(sizeof(%s));\n", cname(main.Owner), cname(main.Owner), cname(main.Owner))
+		// the class is a C struct, so the instance an instance main runs on is
+		// its pointer; spelling these without the `*` emitted C that does not
+		// compile for a compact file with `void main(String[] args)`
+		fmt.Fprintf(&b, "  %s* _main_obj = (%s*)ty_alloc(sizeof(%s));\n", cname(main.Owner), cname(main.Owner), cname(main.Owner))
 		fmt.Fprintf(&b, "  _main_obj->obj.cls = &cls_%s;\n", mangle(main.Owner.Full))
 		recv = "_main_obj, "
 	}
@@ -707,9 +723,6 @@ func (e *Emitter) entry() string {
 	b.WriteString("  return 0;\n}\n")
 	return b.String()
 }
-
-// emitStringTable writes the interned string literals collected so far.
-func (e *Emitter) emitStringTable() string { return "" }
 
 // capture runs fn with a fresh output buffer and returns what it wrote.
 func (e *Emitter) capture(fn func()) string {

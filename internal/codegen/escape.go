@@ -313,7 +313,16 @@ func (w *escWalk) expr(x ast.Expr) {
 			w.escapes = true
 		}
 	case *ast.Select:
-		w.receiver(v.X)
+		if w.isTarget(v.X) {
+			// Reading a field of the object is safe only when the field cannot
+			// hold the object again. `c.next` where next is a Cell is the object
+			// itself, and handing that to anybody lets it outlive the frame.
+			if w.canHoldTarget(v) {
+				w.mark("read a reference field that can hold the object")
+			}
+			return
+		}
+		w.expr(v.X)
 	case *ast.Index:
 		w.expr(v.X)
 		w.expr(v.Index)
@@ -388,6 +397,20 @@ func (w *escWalk) expr(x ast.Expr) {
 	default:
 		w.mark(fmt.Sprintf("unhandled expression %T", x))
 	}
+}
+
+// canHoldTarget reports whether the value of a field read could be the object
+// itself: the field's type is the object's class, one of its supertypes, or an
+// interface or type variable it could satisfy.
+func (w *escWalk) canHoldTarget(sel *ast.Select) bool {
+	f, ok := sel.Ref.(*ast.Field)
+	if !ok || f == nil {
+		return true // unknown: assume it could
+	}
+	if !w.e.isRef(f.Type) {
+		return false
+	}
+	return w.e.prog.IsSubtype(sel.GetType(), w.target.Type) || w.e.prog.IsSubtype(w.target.Type, sel.GetType())
 }
 
 // assign walks `X = Y` (or a compound assignment).

@@ -3,11 +3,14 @@ package teyru
 interface List<T> extends Iterable<T> {
   int size()
   T get(int i)
+  T set(int i, T v)
   void add(T v)
   void addAll(List<T> other)
   boolean isEmpty()
   boolean contains(T v)
   int indexOf(T v)
+  boolean remove(T v)
+  void clear()
 }
 
 interface Map<K, V> {
@@ -19,6 +22,7 @@ interface Map<K, V> {
   int size()
   boolean isEmpty()
   List<K> keys()
+  List<V> values()
 }
 
 class ArrayList<T> implements List<T>, Iterable<T> {
@@ -38,7 +42,7 @@ class ArrayList<T> implements List<T>, Iterable<T> {
 
   public ArrayList(List<T> other) {
     items = new Object[other.size() > 0 ? other.size() : 1]
-    addAll(other)
+    appendAll(other)
   }
 
   public int size() {
@@ -58,6 +62,13 @@ class ArrayList<T> implements List<T>, Iterable<T> {
   }
 
   public void addAll(List<T> other) {
+    // a copy first: addAll(this) would otherwise walk a list it is growing.
+    // The copy constructor uses appendAll, so this does not recurse.
+    ArrayList<T> copy = new ArrayList<T>(other)
+    appendAll(copy)
+  }
+
+  private void appendAll(List<T> other) {
     for (T v : other) {
       add(v)
     }
@@ -102,6 +113,16 @@ class ArrayList<T> implements List<T>, Iterable<T> {
       }
     }
     return -1
+  }
+
+  // removes the first element equal to v, like Java's List.remove(Object)
+  public boolean remove(T v) {
+    int i = indexOf(v)
+    if (i < 0) {
+      return false
+    }
+    removeAt(i)
+    return true
   }
 
   public void clear() {
@@ -200,7 +221,13 @@ class HashMap<K, V> implements Map<K, V> {
     if (count * 4 >= keys.length * 3) {
       rehash()
     }
-    int slot = slotOf(key)
+    int existing = findSlot(key)
+    if (existing >= 0) {
+      // the key is already there: replace, do not count it twice
+      values[existing] = value
+      return
+    }
+    int slot = emptySlot(key)
     keys[slot] = key
     values[slot] = value
     count++
@@ -222,27 +249,37 @@ class HashMap<K, V> implements Map<K, V> {
     return out
   }
 
+  public List<V> values() {
+    ArrayList<V> out = new ArrayList<V>(count > 0 ? count : 1)
+    for (int i = 0 : i < keys.length : i++) {
+      if (keys[i] != null) {
+        out.add((V) values[i])
+      }
+    }
+    return out
+  }
+
   public V get(K key) {
     if (key == null) {
       return null
     }
-    int slot = slotOf(key)
-    if (keys[slot] == null || keys[slot].equals(key)) {
-      return (V) values[slot]
+    int slot = findSlot(key)
+    if (slot < 0) {
+      return null
     }
-    return null
+    return (V) values[slot]
   }
 
   public boolean containsKey(K key) {
-    return key != null && keys[slotOf(key)] != null
+    return key != null && findSlot(key) >= 0
   }
 
   public V remove(K key) {
     if (key == null) {
       return null
     }
-    int slot = slotOf(key)
-    if (keys[slot] == null) {
+    int slot = findSlot(key)
+    if (slot < 0) {
       return null
     }
     V old = (V) values[slot]
@@ -250,6 +287,35 @@ class HashMap<K, V> implements Map<K, V> {
     values[slot] = null
     count--
     return old
+  }
+
+  // findSlot returns where key sits, or -1 when it is absent. Probing is
+  // linear, so two keys that land in the same slot no longer evict each other.
+  private int findSlot(K key) {
+    int start = slotOf(key)
+    for (int probe = 0 : probe < keys.length : probe++) {
+      int slot = (start + probe) & mask
+      if (keys[slot] == null) {
+        return -1
+      }
+      if (keys[slot].equals(key)) {
+        return slot
+      }
+    }
+    return -1
+  }
+
+  // emptySlot returns the first free slot on key's probe chain, where an insert
+  // has to go for findSlot to see it again.
+  private int emptySlot(K key) {
+    int start = slotOf(key)
+    for (int probe = 0 : probe < keys.length : probe++) {
+      int slot = (start + probe) & mask
+      if (keys[slot] == null) {
+        return slot
+      }
+    }
+    return start
   }
 
   public String toString() {
@@ -285,8 +351,9 @@ class HashMap<K, V> implements Map<K, V> {
     for (int i = 0 : i < oldKeys.length : i++) {
       if (oldKeys[i] != null) {
         K k = (K) oldKeys[i]
-        keys[slotOf(k)] = oldKeys[i]
-        values[slotOf(k)] = oldValues[i]
+        int slot = emptySlot(k)
+        keys[slot] = oldKeys[i]
+        values[slot] = oldValues[i]
         count++
       }
     }

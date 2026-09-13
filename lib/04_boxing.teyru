@@ -43,10 +43,14 @@ class Long extends Object implements Comparable<Long> {
   public static native String toString(long v)
 }
 
-class Float extends Object {
+class Float extends Object implements Comparable<Float> {
   public static native float parseFloat(String s)
   public static native Float valueOf(float v)
+  public static native int compare(float a, float b)
   public native float floatValue()
+  public native int hashCode()
+  public native boolean equals(Object o)
+  public native int compareTo(Float o)
   public native String toString()
 }
 
@@ -63,12 +67,15 @@ class Double extends Object implements Comparable<Double> {
   public static native String toString(double v)
 }
 
-class Character extends Object {
+class Character extends Object implements Comparable<Character> {
   public static native Character valueOf(char c)
   public static native boolean isDigit(char c)
   public static native boolean isLetter(char c)
   public static native boolean isWhitespace(char c)
   public native char charValue()
+  public native int hashCode()
+  public native boolean equals(Object o)
+  public native int compareTo(Character o)
   public native String toString()
 }
 

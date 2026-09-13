@@ -11,7 +11,7 @@
 
 | 元件 | 用途 | 授權 | 散布方式 |
 |---|---|---|---|
-| Go 標準函式庫（`go1.24` 以上） | 建置 `cmd/teyru` 與 `internal/*` | BSD-3-Clause（Copyright The Go Authors） | 不散布，使用者自行安裝 |
+| Go 標準函式庫（`go1.26` 以上） | 建置 `cmd/teyru` 與 `internal/*` | BSD-3-Clause（Copyright The Go Authors） | 不散布，使用者自行安裝 |
 
 Go 標準函式庫以 BSD 3-Clause 授權釋出，條文見
 <https://go.dev/LICENSE>。本專案未修改標準函式庫，也未將其嵌入產物。
@@ -48,9 +48,9 @@ Go 標準函式庫以 BSD 3-Clause 授權釋出，條文見
 | 元件 | 用途 | 授權 |
 |---|---|---|
 | Go 測試框架（`testing`） | `go test ./...` | BSD-3-Clause（Go 標準函式庫的一部分） |
-| OpenJDK / HotSpot | **只用於** `bench/bench.sh` 的對照量測 | GPL-2.0 with Classpath Exception |
+| OpenJDK / HotSpot | **只用於** `scripts/bench.sh` 的對照量測 | GPL-2.0 with Classpath Exception |
 
-`bench/bench.sh` 需要 `java` / `javac` 才會執行 JVM 那一半；若系統沒有安裝，
+`scripts/bench.sh` 需要 `java` / `javac` 才會執行 JVM 那一半；若系統沒有安裝，
 腳本只會跳過該部分，不影響 Teyru 的建置與測試。JVM 不是 Teyru 的執行環境，
 也不是任何產物的依賴。
 

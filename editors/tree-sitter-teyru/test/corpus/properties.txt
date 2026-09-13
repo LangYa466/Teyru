@@ -1,0 +1,203 @@
+==================
+a property with a getter and a setter
+==================
+
+class Person {
+  public String name
+  private int age
+
+  public int years {
+    get {
+      return field
+    }
+    set {
+      if (value < 0) {
+        field = 0
+      } else {
+        field = value
+      }
+    }
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (field_declaration
+        (modifiers)
+        (scoped_identifier
+          (identifier))
+        (variable_declarator
+          (identifier)))
+      (field_declaration
+        (modifiers)
+        (primitive_type)
+        (variable_declarator
+          (identifier)))
+      (field_declaration
+        (modifiers)
+        (primitive_type)
+        (variable_declarator
+          (identifier)))
+      (accessor_block
+        (accessor
+          (block
+            (return_statement
+              (identifier))))
+        (accessor
+          (block
+            (if_statement
+              (parenthesized_expression
+                (binary_expression
+                  (identifier)
+                  (decimal_integer_literal)))
+              (block
+                (expression_statement
+                  (assignment_expression
+                    (identifier)
+                    (decimal_integer_literal))))
+              (block
+                (expression_statement
+                  (assignment_expression
+                    (identifier)
+                    (identifier)))))))))))
+
+==================
+a read-only property
+==================
+
+class Person {
+  public String name
+  public String label {
+    get {
+      return name
+    }
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (field_declaration
+        (modifiers)
+        (scoped_identifier
+          (identifier))
+        (variable_declarator
+          (identifier)))
+      (field_declaration
+        (modifiers)
+        (scoped_identifier
+          (identifier))
+        (variable_declarator
+          (identifier)))
+      (accessor_block
+        (accessor
+          (block
+            (return_statement
+              (identifier))))))))
+
+==================
+an accessor with modifiers and an annotation
+==================
+
+class Person {
+  private int stored
+
+  public int age {
+    @Deprecated
+    get {
+      return field
+    }
+
+    private set {
+      field = value
+    }
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (field_declaration
+        (modifiers)
+        (primitive_type)
+        (variable_declarator
+          (identifier)))
+      (field_declaration
+        (modifiers)
+        (primitive_type)
+        (variable_declarator
+          (identifier)))
+      (accessor_block
+        (accessor
+          (annotation
+            (scoped_identifier
+              (identifier)))
+          (block
+            (return_statement
+              (identifier))))
+        (accessor
+          (modifiers)
+          (block
+            (expression_statement
+              (assignment_expression
+                (identifier)
+                (identifier)))))))))
+
+==================
+a setter with its own parameter name
+==================
+
+class Person {
+  private String name
+
+  public String name {
+    get {
+      return field
+    }
+    set(v) {
+      field = v
+    }
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (identifier)
+    (class_body
+      (field_declaration
+        (modifiers)
+        (scoped_identifier
+          (identifier))
+        (variable_declarator
+          (identifier)))
+      (field_declaration
+        (modifiers)
+        (scoped_identifier
+          (identifier))
+        (variable_declarator
+          (identifier)))
+      (accessor_block
+        (accessor
+          (block
+            (return_statement
+              (identifier))))
+        (accessor
+          (setter_parameter
+            (identifier))
+          (block
+            (expression_statement
+              (assignment_expression
+                (identifier)
+                (identifier)))))))))

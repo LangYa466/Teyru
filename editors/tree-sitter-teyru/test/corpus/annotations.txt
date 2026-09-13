@@ -1,0 +1,199 @@
+==================
+annotations on declarations and members
+==================
+
+@Getter
+@Setter
+class Counter {
+  static int made = 0
+  int value = 4
+  @Getter(AccessLevel.NONE) int hidden = 9
+
+  Counter() {
+    made++
+  }
+}
+
+---
+
+(source_file
+  (class_declaration
+    (annotation
+      (scoped_identifier
+        (identifier)))
+    (annotation
+      (scoped_identifier
+        (identifier)))
+    (identifier)
+    (class_body
+      (field_declaration
+        (modifiers)
+        (primitive_type)
+        (variable_declarator
+          (identifier)
+          (decimal_integer_literal)))
+      (field_declaration
+        (primitive_type)
+        (variable_declarator
+          (identifier)
+          (decimal_integer_literal)))
+      (field_declaration
+        (annotation
+          (scoped_identifier
+            (identifier))
+          (annotation_argument_list
+            (annotation_argument
+              (field_access
+                (identifier)
+                (identifier)))))
+        (primitive_type)
+        (variable_declarator
+          (identifier)
+          (decimal_integer_literal)))
+      (constructor_declaration
+        (identifier)
+        (formal_parameters)
+        (block
+          (expression_statement
+            (update_expression
+              (identifier))))))))
+
+==================
+annotation arguments: names, arrays and nested annotations
+==================
+
+@Tag(value = "a", order = 2)
+@Wraps({@Tag("x"), @Tag("y")})
+@Numbers({1, -2, 3})
+class C {
+}
+
+---
+
+(source_file
+  (class_declaration
+    (annotation
+      (scoped_identifier
+        (identifier))
+      (annotation_argument_list
+        (annotation_argument
+          (identifier)
+          (string_literal))
+        (annotation_argument
+          (identifier)
+          (decimal_integer_literal))))
+    (annotation
+      (scoped_identifier
+        (identifier))
+      (annotation_argument_list
+        (annotation_argument
+          (element_value_array_initializer
+            (annotation
+              (scoped_identifier
+                (identifier))
+              (annotation_argument_list
+                (annotation_argument
+                  (string_literal))))
+            (annotation
+              (scoped_identifier
+                (identifier))
+              (annotation_argument_list
+                (annotation_argument
+                  (string_literal))))))))
+    (annotation
+      (scoped_identifier
+        (identifier))
+      (annotation_argument_list
+        (annotation_argument
+          (element_value_array_initializer
+            (decimal_integer_literal)
+            (decimal_integer_literal)
+            (decimal_integer_literal)))))
+    (identifier)
+    (class_body)))
+
+==================
+a dotted annotation name and a dotted value
+==================
+
+@lombok.Getter(AccessLevel.NONE)
+class C {
+  int hidden = 1
+}
+
+---
+
+(source_file
+  (class_declaration
+    (annotation
+      (scoped_identifier
+        (identifier)
+        (identifier))
+      (annotation_argument_list
+        (annotation_argument
+          (field_access
+            (identifier)
+            (identifier)))))
+    (identifier)
+    (class_body
+      (field_declaration
+        (primitive_type)
+        (variable_declarator
+          (identifier)
+          (decimal_integer_literal))))))
+
+==================
+an annotation type with default values
+==================
+
+@interface Tag {
+  String value() default ""
+
+  int priority() default 1
+
+  String[] names() default {"a", "b"}
+
+  Tag nested() default @Tag(value = "x", priority = 2)
+}
+
+---
+
+(source_file
+  (annotation_type_declaration
+    (identifier)
+    (annotation_type_body
+      (annotation_method_declaration
+        (scoped_identifier
+          (identifier))
+        (identifier)
+        (formal_parameters)
+        (string_literal))
+      (annotation_method_declaration
+        (primitive_type)
+        (identifier)
+        (formal_parameters)
+        (decimal_integer_literal))
+      (annotation_method_declaration
+        (array_type
+          (scoped_identifier
+            (identifier)))
+        (identifier)
+        (formal_parameters)
+        (element_value_array_initializer
+          (string_literal)
+          (string_literal)))
+      (annotation_method_declaration
+        (scoped_identifier
+          (identifier))
+        (identifier)
+        (formal_parameters)
+        (annotation
+          (scoped_identifier
+            (identifier))
+          (annotation_argument_list
+            (annotation_argument
+              (identifier)
+              (string_literal))
+            (annotation_argument
+              (identifier)
+              (decimal_integer_literal))))))))

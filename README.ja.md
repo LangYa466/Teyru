@@ -7,7 +7,7 @@
 文法は Java 開発者にとって見慣れたものです（クラス、インターフェース、ジェネリクス、
 ラムダ、例外、record、enum、annotation）。一方でセミコロンを廃止し、ネイティブ
 プロパティを追加し、**ネイティブ機械語**として動作します。コンパイラはプログラム全体を
-C に落とし、clang/LLVM（または gcc）が実行ファイルにします。ランタイムは約二千行の C で、
+C に落とし、clang/LLVM（または gcc）が実行ファイルにします。ランタイムは約 1500 行の C で、
 保守的マークアンドスイープ GC、文字列、配列、例外を自前で実装しており、仮想マシンは
 一切ありません。
 
@@ -33,6 +33,7 @@ Teyru ソース (.teyru)
 - [言語ツアー](#言語ツアー)
 - [対応している言語機能](#対応している言語機能)
 - [標準ライブラリ](#標準ライブラリ)
+- [エディタとツール](#エディタとツール)
 - [プロジェクト構成](#プロジェクト構成)
 - [ランタイムモデル](#ランタイムモデル)
 - [Java との違い](#java-との違い)
@@ -49,13 +50,13 @@ Teyru ソース (.teyru)
 | 指標 | Teyru（ネイティブ） | Java（HotSpot） | 差 |
 |---|---|---|---|
 | 起動 100 回の合計 | **0.068 s**（1 回 0.68 ms） | 1.97 s（1 回 19.8 ms） | **約 29 倍速い** |
-| 実行ファイルの大きさ | **33 KB** | JDK ランタイム約 200 MB | 約 6000 倍小さい |
+| 実行ファイルの大きさ | **35 KB** | JDK ランタイム約 200 MB | 約 5900 倍小さい |
 | ピークメモリ（hello） | **2.1 MB** | 50.2 MB | **約 24 倍少ない** |
-| `bench_fib` 再帰 | **0.0060 s** | 0.0259 s | **4.3 倍速い** |
-| `bench_loop` ループと整数演算 | **0.0208 s** | 0.0430 s | **2.1 倍速い** |
-| `bench_oop` オブジェクトと仮想呼び出し | **0.0044 s** | 0.0261 s | **5.9 倍速い** |
-| `bench_string` 文字列処理 | **0.0096 s** | 0.0542 s | **5.7 倍速い** |
-| `bench_alloc` 短命オブジェクトの確保 | **0.0232 s** | 0.0288 s | **1.24 倍速い** |
+| `bench_fib` 再帰 | **0.0060 s** | 0.0264 s | **4.4 倍速い** |
+| `bench_loop` ループと整数演算 | **0.0209 s** | 0.0429 s | **2.1 倍速い** |
+| `bench_oop` オブジェクトと仮想呼び出し | **0.0044 s** | 0.0253 s | **5.8 倍速い** |
+| `bench_string` 文字列処理 | **0.0093 s** | 0.0554 s | **6.0 倍速い** |
+| `bench_alloc` 短命オブジェクトの確保 | **0.0233 s** | 0.0308 s | **1.3 倍速い** |
 
 **速さの理由：**
 
@@ -78,13 +79,15 @@ Teyru ソース (.teyru)
 だけです。フィールド、配列、戻り値、他のオブジェクトへ渡したものはヒープと
 マークアンドスイープに残り、オブジェクトが長生きして繰り返し回収される負荷では
 HotSpot の世代別の仮定が勝ります。上の数値はすべてプロセス起動を含むため絶対値は
-小さい。`sh scripts/bench.sh` で再現できる。
+小さい。再現方法は `sh scripts/bench.sh` で、5 本のプログラム、起動 100 回、実行ファイルの
+大きさ、ピークメモリはこのスクリプトが計測します（大きさの行の JDK ランタイムは計測
+マシンにインストールされているランタイムで、スクリプトは計測しません）。
 
 ---
 
 ## クイックスタート
 
-**Go 1.24+** と **clang**（または gcc）が必要です。
+**Go 1.26+** と **clang**（または gcc）が必要です。
 
 ```sh
 # コンパイラをビルド
@@ -237,6 +240,10 @@ class Main {
 annotation processor は不要です。
 
 ```teyru
+import lombok.Data
+import lombok.AllArgsConstructor
+import lombok.Builder
+
 @Data
 @AllArgsConstructor
 @Builder
@@ -245,8 +252,13 @@ class Person {
   private int age
 }
 
-Person p = Person.builder().name("ada").age(36).build()
-System.out.println(p.getName() + " " + p.getAge())
+class Main {
+  public static void main(String[] args) {
+    Person p = Person.builder().name("ada").age(36).build()
+    System.out.println(p.getName() + " " + p.getAge())
+    System.out.println(p)
+  }
+}
 ```
 
 完全な一覧と差異は **[docs/lombok.md](docs/lombok.md)** にあります
@@ -266,6 +278,7 @@ JEP 512 コンパクトソースファイルとインスタンス `main`（暗�
 JEP 440 レコードパターン、JEP 441 switch のパターンと `when` ガード、
 JEP 507 プリミティブ型パターン（`case int i`、`o instanceof int i`、正確な変換）、
 JEP 456 未使用変数 `_`、JEP 395 record、JEP 394 `instanceof` パターン、
+JEP 409 sealed クラス（`sealed`／`permits`／`non-sealed`）、
 JEP 378 テキストブロック、JEP 361 switch 式、JEP 286 `var`。
 
 ### 対応している言語機能
@@ -290,10 +303,10 @@ JEP 378 テキストブロック、JEP 361 switch 式、JEP 286 `var`。
 `Object`、`String`、`StringBuilder`、`Math`、`System`、`PrintStream`、
 `Iterable`／`Iterator`、`Comparable`、`AutoCloseable`、`Cloneable`、`Enum`、`Record`、
 八つのプリミティブラッパー（`Byte`／`Short`／`Integer`／`Long`／`Float`／`Double`／
-`Character`／`Boolean`）、コレクション（`List`／`ArrayList`／`HashMap`）、および
-`Character`／`Boolean`）、そして `Throwable` ファミリ（`Exception`、`RuntimeException`、
-`NullPointerException`、`ArrayIndexOutOfBoundsException`、`ArithmeticException`、
-`ClassCastException`、`IllegalArgumentException`、`IllegalStateException`、
+`Character`／`Boolean`）、コレクション（`List`／`ArrayList`／`Map`／`HashMap`）、そして
+`Throwable` ファミリ（`Exception`、`RuntimeException`、`NullPointerException`、
+`ArrayIndexOutOfBoundsException`、`ArithmeticException`、`ClassCastException`、
+`IllegalArgumentException`、`IllegalStateException`、`IndexOutOfBoundsException`、
 `NoSuchElementException`、`NegativeArraySizeException`、`AssertionError`、
 `UnsupportedOperationException`）。
 
@@ -307,7 +320,18 @@ JEP 378 テキストブロック、JEP 361 switch 式、JEP 286 `var`。
 teyru build --native-header native.h program.teyru   # 実装すべき宣言を出力
 teyru build --native impl.c program.teyru            # 一緒にコンパイル
 ```
-スコープ制限です。
+
+---
+
+## エディタとツール
+
+- **VS Code**: `editors/vscode/` が `.teyru` の TextMate 構文ハイライト、言語設定、
+  スニペットを提供します。`npx @vscode/vsce package` でパッケージし、
+  `code --install-extension teyru-0.1.0.vsix` でインストールします。
+- **tree-sitter**: `editors/tree-sitter-teyru/` はハイライトクエリ、インデントクエリ、
+  corpus テストを備えた完全な文法で、Neovim、Helix、Zed などから使えます。
+- GitHub は現在も `.teyru` を Java として表示します。linguist に Teyru の定義が
+  まだ無いためで、`.gitattributes` が最も近い文法に対応づけています。
 
 ---
 
@@ -316,6 +340,7 @@ teyru build --native impl.c program.teyru            # 一緒にコンパイル
 | パス | 役割 |
 |---|---|
 | `cmd/teyru` | CLI エントリ（`build`／`run`／`emit`／`emit-llvm`／`version`） |
+| `internal/driver` | コンパイル手順：前後段をつなぎ、C コンパイラを呼び、native ソースと出力オプションを扱う |
 | `internal/source` | ファイル、位置変換、診断 |
 | `internal/lexer` | 字句解析。改行はトークンにせず「直前に改行があるか」を各トークンに記録 |
 | `internal/parser` | 再帰下降。改行の有意性と前置の完結性で文の終わりを決める |
@@ -326,9 +351,11 @@ teyru build --native impl.c program.teyru            # 一緒にコンパイル
 | `internal/runtime/src` | C ランタイム：GC、文字列、配列、例外、boxing、Math／System／StringBuilder |
 | `lib` | Teyru で書かれた標準ライブラリ |
 | `tests/programs` | エンドツーエンドのテストプログラムと期待出力（`go test` が逐一比較） |
+| `tests/native` | native メソッドの連携テスト：Teyru の宣言、C の実装、期待出力（`TestNative`） |
 | `examples` | サンプルと JVM 比較用 benchmark（`bench_*.teyru` と `.java`） |
 | `scripts` | 開発スクリプト：`bench.sh`、`pre-commit` フック |
 | `docs` | 言語リファレンス、診断コード、アーキテクチャ |
+| `editors` | エディタ支援：VS Code 拡張と tree-sitter 文法 |
 
 ---
 
@@ -412,7 +439,8 @@ sh scripts/bench.sh       # JVM との比較（java がある場合のみ JVM �
 ```
 
 テストを追加するには `tests/programs/` に `xxx.teyru` と `xxx.expected` を置きます。
-コマンドライン引数が必要なら `xxx.args`（1 行に 1 引数）も追加してください。
+コマンドライン引数が必要なら `xxx.args`（1 行に 1 引数）を、プログラムが**失敗する
+べき**なら `xxx.exit`（終了ステータス）と `xxx.experr`（stderr に出す内容）も追加してください。
 `go test` が残りを処理します。
 
 コントリビュートの前に [AGENTS.md](AGENTS.md) を読んでください。

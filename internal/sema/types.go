@@ -436,25 +436,48 @@ func (c *Checker) constEval(e ast.Expr) constValue {
 			}
 			return constValue{}
 		}
+		// The width of the promoted operand decides everything here. An int
+		// result wraps to 32 bits, a shift uses the low 5 bits of its count (the
+		// low 6 for a long, JLS 15.19), and a long result keeps the long kind so
+		// that the literal is spelled as one. Folding with a fixed 63-bit mask
+		// and a fixed int kind gave `1 << 32` as 4294967296 and `-8 >> 33` as -1
+		// where Java has 1 and -4, and it reached both static final inlining and
+		// switch case labels.
+		wide := a.kind == ast.LitLong || b.kind == ast.LitLong
+		narrow := func(x int64) constValue {
+			if wide {
+				return constValue{i: x, kind: ast.LitLong, ok: true}
+			}
+			return constValue{i: int64(int32(x)), kind: ast.LitInt, ok: true}
+		}
+		mask := uint(31) /* the low 5 bits of the count address an int */
+		if wide {
+			mask = 63 /* the low 6 address a long */
+		}
 		switch v.Op {
 		case "+":
-			return constValue{i: a.i + b.i, kind: ast.LitInt, ok: true}
+			return narrow(a.i + b.i)
 		case "-":
-			return constValue{i: a.i - b.i, kind: ast.LitInt, ok: true}
+			return narrow(a.i - b.i)
 		case "*":
-			return constValue{i: a.i * b.i, kind: ast.LitInt, ok: true}
+			return narrow(a.i * b.i)
 		case "/":
 			if b.i != 0 {
-				return constValue{i: a.i / b.i, kind: ast.LitInt, ok: true}
+				return narrow(a.i / b.i)
 			}
 		case "%":
 			if b.i != 0 {
-				return constValue{i: a.i % b.i, kind: ast.LitInt, ok: true}
+				return narrow(a.i % b.i)
 			}
 		case "<<":
-			return constValue{i: a.i << uint(b.i&63), kind: ast.LitInt, ok: true}
+			return narrow(a.i << (uint(b.i) & mask))
 		case ">>":
-			return constValue{i: a.i >> uint(b.i&63), kind: ast.LitInt, ok: true}
+			return narrow(a.i >> (uint(b.i) & mask))
+		case ">>>":
+			if wide {
+				return narrow(int64(uint64(a.i) >> (uint(b.i) & mask)))
+			}
+			return narrow(int64(uint32(a.i) >> (uint(b.i) & mask)))
 		}
 	case *ast.Ident:
 		if f, ok := v.Ref.(*ast.Field); ok {
@@ -477,6 +500,3 @@ func (c *Checker) constEval(e ast.Expr) constValue {
 	}
 	return constValue{}
 }
-
-// fieldSlotType returns the fields of cl including inherited, in slot order.
-func (c *Checker) allFields(cl *ast.Class) []*ast.Field { return cl.InstFields }
