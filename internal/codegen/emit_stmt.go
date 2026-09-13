@@ -503,8 +503,16 @@ func (e *Emitter) argsFor(recv string, list []ast.Expr, m *ast.Method, call *ast
 			// passing a bare 7 where an Object* goes -- the value was never
 			// boxed, and the callee read address 7.
 			if m.Varargs && len(m.Params) > 0 && i >= len(m.Params)-1 {
-				if arr, ok := m.Params[len(m.Params)-1].(*ast.ArrayType); ok {
+				last := m.Params[len(m.Params)-1]
+				if arr, ok := last.(*ast.ArrayType); ok {
 					want = arr.Elem
+					// An argument that is already the array is passed through
+					// as one: `printf("%d", new Object[]{n})` hands over the
+					// array, and coercing it to the element type would wrap it
+					// in a second array whose single element is the first.
+					if _, isArr := a.GetType().(*ast.ArrayType); isArr {
+						want = last
+					}
 				}
 			} else if i < len(m.Params) {
 				want = m.Params[i]
