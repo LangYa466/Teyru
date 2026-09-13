@@ -87,16 +87,9 @@ func FieldLayout(fields []*ast.Field, extraRefs []ast.Type) (refOffsets []int64,
 }
 
 // IsRef reports whether a value of this type is an object reference at run time.
-func IsRef(t ast.Type) bool {
-	switch t.(type) {
-	case *ast.ClassType, *ast.ArrayType, ast.NullType, *ast.WildcardType, *ast.TypeVarType:
-		return true
-	}
-	return false
-}
+// The definition is ast.IsRef: util may import ast but not the other way round,
+// and two copies of the list of reference kinds would be free to drift.
+func IsRef(t ast.Type) bool { return ast.IsRef(t) }
 
 // IsPrim reports whether a value of this type is a primitive at run time.
-func IsPrim(t ast.Type) bool {
-	_, ok := t.(*ast.PrimType)
-	return ok
-}
+func IsPrim(t ast.Type) bool { return ast.IsPrimType(t) }

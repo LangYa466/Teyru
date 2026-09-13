@@ -127,6 +127,15 @@ func IsRef(t Type) bool {
 	return false
 }
 
+// IsPrimType reports whether t is a primitive type of any kind. Together with
+// IsRef this is the single definition of which types are references: util
+// delegates here, because the dependency only runs util -> ast, and a second
+// list of reference kinds in util would be free to drift from this one.
+func IsPrimType(t Type) bool {
+	_, ok := t.(*PrimType)
+	return ok
+}
+
 // IsPrim reports whether t is a primitive of kind k.
 func IsPrim(t Type, k PrimKind) bool {
 	p, ok := t.(*PrimType)
