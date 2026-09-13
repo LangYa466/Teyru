@@ -663,6 +663,10 @@ func (e *Emitter) entry() string {
 	b.WriteString(e.clinitRefs())
 	b.WriteString("  TY_STRING = &cls_" + mangle(e.prog.Builtins.String.Full) + ";\n")
 	b.WriteString("  TY_OBJECT = &cls_" + mangle(e.prog.Builtins.Object.Full) + ";\n")
+	// the arrays the compiler creates get this class, so `a instanceof Object`,
+	// `(Object) a` and `"" + a` behave, and the collector can see that an array's
+	// elements are references and trace them
+	b.WriteString("  TY_ARRAY = &cls_" + mangle(e.prog.ArrayClass().Full) + ";\n")
 	// sorted: iterating the map directly would emit TY_BOX assignments in a
 	// different order every run, so two builds of one program would not produce
 	// the same C and the output could not be diffed
@@ -701,10 +705,7 @@ func (e *Emitter) entry() string {
 	}
 	recv := ""
 	if !main.IsStatic() {
-		// the class is a C struct, so the instance the instance main runs on is
-		// its pointer; spelling these without the `*` emitted C that does not
-		// compile for a compact file with `void main(String[] args)`
-		fmt.Fprintf(&b, "  %s* _main_obj = (%s*)ty_alloc(sizeof(%s));\n", cname(main.Owner), cname(main.Owner), cname(main.Owner))
+		fmt.Fprintf(&b, "  %s _main_obj = (%s)ty_alloc(sizeof(%s));\n", cname(main.Owner), cname(main.Owner), cname(main.Owner))
 		fmt.Fprintf(&b, "  _main_obj->obj.cls = &cls_%s;\n", mangle(main.Owner.Full))
 		recv = "_main_obj, "
 	}

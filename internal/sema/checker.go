@@ -92,6 +92,13 @@ func Check(files []*ast.File, diags *source.Diagnostics) *Program {
 		c.todo = c.todo[1:]
 		t()
 	}
+	// the array class is created on demand, by whichever code path asks for it
+	// first. Force it here, before the list is snapshotted: the emitter writes
+	// `&cls_teyru_Array` for every array cast, instanceof and array literal, so
+	// a program that only creates one -- `(Object) new int[1]` -- used to emit a
+	// reference to a class that was never declared (the C backend then failed
+	// with "use of undeclared identifier 'cls_teyru_Array'").
+	c.arrayClass()
 	for _, cl := range c.classes {
 		c.layout(cl)
 	}

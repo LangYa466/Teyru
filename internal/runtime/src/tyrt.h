@@ -54,6 +54,7 @@ struct tyclass {
 
 /* Class handles installed by generated startup code. */
 extern tyclass *TY_STRING;
+extern tyclass *TY_ARRAY;
 extern tyclass *TY_BOX[9];
 extern tyclass *TY_OBJECT;
 
@@ -88,6 +89,9 @@ void *ty_assertfail(const char *msg);
    back into the runtime. */
 /* class flags: the class has been initialised */
 #define TY_CLS_INIT 8
+/* the class describes an array: its payload is a tyarr whose element slots the
+   collector has to trace when the array holds references */
+#define TY_CLS_ARRAY 2
 #define TY_HDR 16
 #define TY_ALIGN 16
 extern char *ty_bump;

@@ -18,11 +18,47 @@ void __asan_unpoison_memory_region(void *, size_t);
 
 tycatch *ty_cur_catch = NULL;
 tyclass *TY_STRING = NULL;
+tyclass *TY_ARRAY = NULL;
 tyclass *TY_BOX[9] = {0};
 tyclass *TY_OBJECT = NULL;
 
 tyclass *TY_NPE, *TY_AIOOBE, *TY_ARITH, *TY_CCE, *TY_NEGARR, *TY_ASSERT;
 tyclass *TY_ILLARG, *TY_ILLSTATE, *TY_NOSUCHELEM, *TY_UNSUP, *TY_ARRAYSTORE;
+
+/* The class an array carries. The generated startup installs the program's own
+   array class in TY_ARRAY; a program that links the runtime without that
+   startup (hand-written C) would otherwise allocate arrays with no class at
+   all, and every class-driven path -- instanceof, casts, string conversion and
+   the collector's element tracing -- would be blind to them, which is how
+   object arrays came to lose their elements. This built-in class keeps the
+   runtime self-sufficient. It carries TY_CLS_ARRAY so the collector recognises
+   it, and its super is bound to TY_OBJECT the first time an array is made, so a
+   program that installs an Object class still gets working instanceof. The
+   vtable mirrors the generated array class slot for slot (toString, hashCode,
+   equals, getClass, clone) and spells toString the way it does. */
+static tystr *default_array_tostring(void *o) {
+  (void)o;
+  return ty_str_intern("[array]");
+}
+static int32_t default_array_hashcode(void *o) { return ty_obj_hash(o); }
+static int32_t default_array_equals(void *a, void *b) { return a == b; }
+static void *default_array_getclass(void *o) { return ty_class_of(o); }
+static void *default_array_clone(void *o) {
+  tyarr *a = (tyarr *)o;
+  return ty_array_clone(a, a->esize);
+}
+static void *default_array_vt[5] = {
+    (void *)default_array_tostring, (void *)default_array_hashcode,
+    (void *)default_array_equals, (void *)default_array_getclass,
+    (void *)default_array_clone};
+static tyclass default_array_cls = {"[array]", -1, TY_CLS_ARRAY, NULL, 0, NULL, 5,
+                                    default_array_vt, NULL, 0, 0, NULL, 0, NULL, 0, NULL};
+
+static tyclass *array_class(void) {
+  if (TY_ARRAY) return TY_ARRAY;
+  if (!default_array_cls.super) default_array_cls.super = TY_OBJECT;
+  return &default_array_cls;
+}
 
 /* ------------------------------------------------------------------ GC */
 
@@ -145,9 +181,19 @@ static void mark_value(void *p) {
   if (mark_sp < (1 << 20)) mark_stack[mark_sp++] = p;
 }
 
+/* Whether a class describes an array. Class identity is the primary test because
+   the emitted array class is registered without the array flag; the flag covers
+   the built-in class the runtime installs and anything that sets it. Without one
+   of the two, an array is traced as a plain object: its payload is not a set of
+   reference fields, so its elements are never marked and a live array hands its
+   elements to the sweep. */
+static int is_array_class(tyclass *c) {
+  return c && ((c->flags & TY_CLS_ARRAY) || c == TY_ARRAY);
+}
+
 static void trace_object(void *obj) {
   tyclass *c = ((tyobj *)obj)->cls;
-  if (c && (c->flags & 2)) { /* array */
+  if (is_array_class(c)) { /* array */
     tyarr *a = (tyarr *)obj;
     if (a->refs) {
       void **d = (void **)a->data;
@@ -222,7 +268,14 @@ void ty_gc(void) {
       int64_t sz = (int64_t)(raw & TY_SIZE_MASK);
       if (sz < (int64_t)TY_HDR) break;
       if (raw & TY_FREE_BIT) {
-        /* already on a free list: leave the link word alone */
+        /* The lists above were emptied, so a block that was already free has no
+           list to be on any more: link it back in. Leaving it alone made every
+           block freed before this collection unreachable to the allocator for
+           the rest of the program, so demand the free lists could have served
+           grew the heap by a fresh chunk instead. The blocks of a chunk that is
+           released wholesale above never reach here, so nothing is linked into
+           memory that is about to be freed. */
+        ty_free_block(p + TY_HDR, (size_t)sz);
       } else if (*(uint64_t *)(p + 8) & TY_MARK_BIT) {
         *(uint64_t *)(p + 8) &= ~(uint64_t)TY_MARK_BIT;
       } else {
@@ -310,15 +363,25 @@ void *ty_alloc_slow(size_t total) {
   }
   tychunk *c = chunks;
   if (!c || c->used + total > c->cap) {
-    ty_gc();
-    p = alloc_slow(total);
-    if (p) {
-      ty_alloc_since += (int64_t)total;
-      *(uint64_t *)p = (uint64_t)total;
-      *(uint64_t *)((char *)p + 8) = 0;
-      void *obj = (char *)p + TY_HDR;
-      memset(obj, 0, total - TY_HDR);
-      return obj;
+    /* A full chunk is not a reason to collect. ty_gc_threshold is the adaptive
+       budget for this heap (twice the live set after the last collection, with
+       a 4MB floor) and the free lists were already consulted above, so a
+       collection here would only re-trace a live set that the threshold has not
+       asked for yet: a workload with a large live set collected once per 256KB
+       of allocation, hundreds of full traces where a handful were due. Collect
+       only when the threshold says so; otherwise grow the heap, which the next
+       threshold crossing pays for. */
+    if (ty_alloc_since > ty_gc_threshold) {
+      ty_gc();
+      p = alloc_slow(total);
+      if (p) {
+        ty_alloc_since += (int64_t)total;
+        *(uint64_t *)p = (uint64_t)total;
+        *(uint64_t *)((char *)p + 8) = 0;
+        void *obj = (char *)p + TY_HDR;
+        memset(obj, 0, total - TY_HDR);
+        return obj;
+      }
     }
     size_t cap = total > TY_CHUNK ? ((total + TY_CHUNK - 1) & ~(size_t)(TY_CHUNK - 1)) : TY_CHUNK;
     c = (tychunk *)malloc(sizeof(tychunk));
@@ -359,6 +422,7 @@ void *ty_alloc_arr(int64_t len, size_t elemsize) {
   size_t bytes = (size_t)len * elemsize;
   if (len != 0 && bytes / (size_t)len != elemsize) ty_throw((tyobj *)ty_negarr());
   tyarr *a = (tyarr *)ty_alloc(sizeof(tyarr) + bytes);
+  a->obj.cls = array_class();
   a->len = len;
   a->data = (char *)a + sizeof(tyarr);
   a->esize = (int32_t)elemsize;
@@ -863,6 +927,7 @@ int64_t ty_array_len(tyarr *a) {
 tyarr *ty_array_clone(tyarr *a, int64_t elemsize) {
   if (!a) ty_npe();
   tyarr *r = ty_alloc_arr(a->len, (size_t)elemsize);
+  r->obj.cls = array_class();
   r->esize = a->esize;
   r->refs = a->refs;
   memcpy(r->data, a->data, (size_t)(a->len * elemsize));
