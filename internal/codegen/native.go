@@ -52,14 +52,15 @@ var nativeTable = map[string]nativeFn{
 	"String.compareTo(String)":  {fn: "ty_str_cmp", recv: "tystr*"},
 	"String.concat(String)":     {fn: "ty_str_concat", recv: "tystr*"},
 	"String.toString()":         {fn: "ty_str_ident", recv: "tystr*"},
-	"String.(String)":           {fn: "ty_str_copy", recv: "tystr*"},
-	"String.valueOf(I)":         {fn: "ty_str_of_int"},
-	"String.valueOf(J)":         {fn: "ty_str_of_long"},
-	"String.valueOf(D)":         {fn: "ty_str_of_double"},
-	"String.valueOf(F)":         {fn: "ty_str_of_float"},
-	"String.valueOf(Z)":         {fn: "ty_str_of_bool"},
-	"String.valueOf(C)":         {fn: "ty_str_of_char"},
-	"String.valueOf(Object)":    {fn: "ty_str_of_obj"},
+	// constructors are named <init> by the parser
+	"String.<init>(String)":  {fn: "ty_str_copy", recv: "tystr*"},
+	"String.valueOf(I)":      {fn: "ty_str_of_int"},
+	"String.valueOf(J)":      {fn: "ty_str_of_long"},
+	"String.valueOf(D)":      {fn: "ty_str_of_double"},
+	"String.valueOf(F)":      {fn: "ty_str_of_float"},
+	"String.valueOf(Z)":      {fn: "ty_str_of_bool"},
+	"String.valueOf(C)":      {fn: "ty_str_of_char"},
+	"String.valueOf(Object)": {fn: "ty_str_of_obj"},
 
 	// ---- boxed primitives
 	"Integer.intValue()":         {fn: "ty_unbox_int", recv: "void*"},
