@@ -2694,6 +2694,32 @@ missing:
   return NULL;
 }
 
+/* pick_arg answers with the argument one conversion uses. Java's `%<` reuses
+   the argument the previous conversion used and leaves the running count where
+   it was, so "%s %<s" prints the same argument twice; anything else takes the
+   next one, or the one an explicit "N$" named. A null reference is a value, so
+   "there was no previous" is its own flag rather than a null argument. */
+static void *pick_arg(tyarr *args, int64_t *ai, int64_t fixed, void **last, int *have_last,
+                      int relative, tystr *fmt, int64_t spec0, int64_t speclen) {
+  if (relative) {
+    if (!*have_last) {
+      char msg[80];
+      int64_t n = speclen;
+      if (n > 48) n = 48;
+      memcpy(msg, "Format specifier '", 18);
+      memcpy(msg + 18, fmt->data + spec0, (size_t)n);
+      msg[18 + n] = '\'';
+      msg[19 + n] = 0;
+      ty_throw(ty_illarg(msg));
+    }
+    return *last;
+  }
+  void *o = next_arg(args, ai, fixed, fmt, spec0, speclen);
+  *last = o;
+  *have_last = 1;
+  return o;
+}
+
 /* ------------------------------------------------------- format assembly */
 
 /* Only the conversions Java defines for String.format are here. The ones this
@@ -2704,6 +2730,8 @@ missing:
 tystr *ty_str_format(tystr *fmt, tyarr *args) {
   fmtbuf out;
   int64_t i = 0, ai = 0, fixed = -1;
+  void *last = NULL;
+  int have_last = 0, relative = 0;
   if (!fmt) ty_npe();
   fmtb_init(&out);
   while (i < fmt->len) {
@@ -2722,6 +2750,7 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
        order. It stands before the flags, so it is read first -- but only when
        a '$' follows, because the same digits are otherwise a width. */
     fixed = -1;
+    relative = 0;
     {
       int64_t save = i, idx = 0;
       while (i < fmt->len && TY_ASCII_DIGIT(fmt->data[i])) {
@@ -2730,6 +2759,11 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
       }
       if (i > save && i < fmt->len && fmt->data[i] == '$') {
         fixed = idx - 1;
+        i++;
+      } else if (i == save && i < fmt->len && fmt->data[i] == '<') {
+        /* `%<` names the previous argument, so it is read where the "N$"
+           would have been */
+        relative = 1;
         i++;
       } else {
         i = save;
@@ -2811,7 +2845,7 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
 
     switch (conv) {
       case 's': case 'S': case 'b': case 'B': case 'h': case 'H': case 'c': case 'C': {
-        void *o = next_arg(args, &ai, fixed, fmt, spec0, i - spec0);
+        void *o = pick_arg(args, &ai, fixed, &last, &have_last, relative, fmt, spec0, i - spec0);
         char *heap = NULL;
         const char *body;
         int64_t blen, k;
@@ -2859,7 +2893,7 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
         break;
       }
       case 'd': case 'o': case 'x': case 'X': {
-        void *o = next_arg(args, &ai, fixed, fmt, spec0, i - spec0);
+        void *o = pick_arg(args, &ai, fixed, &last, &have_last, relative, fmt, spec0, i - spec0);
         int kind;
         int64_t v;
         char raw[32], grp[80];
@@ -2918,7 +2952,7 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
         break;
       }
       case 'e': case 'E': case 'f': case 'g': case 'G': case 'a': case 'A': {
-        void *o = next_arg(args, &ai, fixed, fmt, spec0, i - spec0);
+        void *o = pick_arg(args, &ai, fixed, &last, &have_last, relative, fmt, spec0, i - spec0);
         double v;
         int upper = conv == 'E' || conv == 'G' || conv == 'A';
         fmtbuf body, t;
