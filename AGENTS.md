@@ -152,11 +152,12 @@ source → lexer → parser → ast → sema → codegen
 ## 10. 已知限制（不要當成已完成）
 
 - checked exception 沒有編譯期檢查。
-- `sealed` 家族沒有窮盡性檢查。
-- 沒有反射、執行緒、`java.util` 集合、檔案與網路 I/O。
+- `sealed` 的 `permits` 子句沒有被驗證：沒有 `permits` 的 sealed 型別在 switch
+  窮盡性上被視為不可判定而要求 `default`。
+- 沒有反射、沒有執行緒（`java.util` 集合、`java.io`、`java.net` 都有）。
 - 與 Java 生態不相容（沒有 JAR、沒有 JDK 類別庫、沒有 JNI）。
 - GC 為保守式標記清除，非分代；大量短命物件的情境仍落後 HotSpot 的逃逸分析。
-- `switch` 的 `case null` 尚未支援。
+- 型別推論比 javac 弱一層，界線見 `docs/language.md` §12 第 11 條。
 
 ---
 
