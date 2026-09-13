@@ -175,6 +175,10 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 | TY-TYP-0092 | `a primitive pattern needs a name to bind the value to` | 原生型別 pattern 一定要綁定變數：`o instanceof int i`，不能只寫 `o instanceof int`。 |
 | TY-TYP-0093 | `boolean cannot be converted to %s` | `boolean` 只能和 `boolean` pattern 配對。 |
 | TY-TYP-0094 | `primitive pattern %s needs a boxed value, found %s` | 選擇子既不是參考型別也不是原生數值。 |
+| TY-IO-0101 | 模組檔本身的錯誤（`teyru.mod` 無法解析、版本語法不對…） | 訊息來自 `internal/mod`，指出檔案與原因。 |
+| TY-IO-0102 | `cannot read package %s: %v` | 匯入的套件在模組快取裡找不到，或它的原始檔讀不出來。先跑 `teyru mod tidy` 或 `teyru get`。 |
+| TY-IO-0103 | `teyru.sum` 的雜湊不符 | 快取裡的模組內容與 `teyru.sum` 記的不一樣。要嘛是依賴被改過，要嘛是快取被動過；建置會停下來而不是用下去。 |
+| TY-IO-0104 | `%s declares package %s, but %s in the same directory declares %s` | 同一個目錄裡的兩個檔案宣告了不同的套件。 |
 | TY-TYP-0095 | `cannot infer the type arguments of %s(%s)` | 泛型方法的型別引數推不出來：沒有帶型別的引數，也沒有目標型別可用（lambda 參數最常見）。寫出型別引數或給一個有型別的引數。 |
 | TY-TYP-0096 | `switch expression does not cover all possible input values` | switch **運算式**必須窮盡：`int`／`String` 選擇子一定要有 `default`，列舉選擇子要涵蓋每一個常數。switch 陳述式不受此限。 |
 | TY-TYP-0097 | `native methods %s and %s both need the C symbol %s` | 兩個多載 native 方法編碼後得到同一個 C 符號（例如類別名 `AI` 與 `int[]`）。改名或改參數型別。 |

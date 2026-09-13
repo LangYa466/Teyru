@@ -1,0 +1,4 @@
+// The recorded hash of a tree that is not the one in the cache: the build has
+// to stop rather than compile a module version whose bytes changed.
+example.com/greeting v0.1.0 h1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+example.com/greeting v0.1.0/teyru.mod h1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
