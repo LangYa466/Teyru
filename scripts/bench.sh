@@ -8,8 +8,19 @@
 #   RUNS=1 sh scripts/bench.sh     # single run
 set -e
 cd "$(dirname "$0")/.."
-BIN=${BIN:-./teyru}
-[ -x "$BIN" ] || go build -o "$BIN" ./cmd/teyru
+# The compiler is built from the tree being measured, unless BIN names one to
+# use instead (that is how an older commit's numbers are reproduced). It used
+# to fall back to ./teyru when that file happened to exist, so a stale binary
+# left in the working directory silently produced the whole table: the
+# published size row came from a build of a completely different source tree.
+BIN=${BIN:-}
+BIN_TEMP=
+if [ -z "$BIN" ]; then
+  BIN=$(mktemp "${TMPDIR:-/tmp}/teyru-bench.XXXXXX")
+  BIN_TEMP=$BIN
+  go build -o "$BIN" ./cmd/teyru
+fi
+[ -x "$BIN" ] || { echo "bench: $BIN is not an executable" >&2; exit 1; }
 RUNS=${RUNS:-3}
 JAVA=${JAVA:-1}
 
@@ -78,7 +89,7 @@ done
 # is the installed JDK runtime, which is a property of the measuring machine
 # rather than of the program, so it is not measured here.
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP"; [ -z "$BIN_TEMP" ] || rm -f "$BIN_TEMP"' EXIT
 
 cat > "$TMP/hello.teyru" <<'EOF'
 class Hello {
