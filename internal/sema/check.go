@@ -2075,13 +2075,23 @@ func (ctx *methodCtx) checkNewArray(v *ast.NewArray) {
 		}
 		_ = i
 	}
+	levels := len(v.Dims) + v.Extra
 	if v.Init != nil {
-		v.Init.Elem = elem
+		// The braces are one array's worth of elements, so the initializer's
+		// element type is the created type with one dimension taken off:
+		// `new int[][]{{1, 2}}` makes an int[][], and its one element is an
+		// int[]. Handing the initializer the whole type instead made every
+		// element of a multi-dimensional literal answer to the wrong type --
+		// `new int[][]{ new int[]{1, 2} }` was asked for an int.
+		init := elem
+		for i := 0; i < levels-1; i++ {
+			init = &ast.ArrayType{Elem: init}
+		}
+		v.Init.Elem = init
 		ctx.checkArrayInit(v.Init, nil)
-		elem = v.Init.Elem
 	}
 	t := elem
-	for i := 0; i < len(v.Dims)+v.Extra; i++ {
+	for i := 0; i < levels; i++ {
 		t = &ast.ArrayType{Elem: t}
 	}
 	v.SetType(t)
@@ -3643,7 +3653,7 @@ func (ctx *methodCtx) checkLambda(lam *ast.Lambda, want ast.Type) {
 		lam.SetType(ast.ErrorType{})
 		return
 	}
-	bind := bindings(ct.Class, ct.Args)
+	bind := c.samBindings(ct, sam)
 	params := make([]ast.Type, len(sam.Params))
 	for i, p := range sam.Params {
 		params[i] = c.wildToBound(c.subst(p, bind))
@@ -3729,6 +3739,30 @@ func (ctx *methodCtx) checkLambda(lam *ast.Lambda, want ast.Type) {
 	c.layout(cl)
 }
 
+// samBindings maps the type variables of the interface that *declares* the
+// single abstract method onto what they are at the use site.
+//
+// `interface Un2<T> extends Function<T, T>` declares nothing itself: its one
+// abstract method is Function's apply, and the T in apply's signature belongs
+// to Function. Binding only ct's own variables leaves that T unsubstituted, so
+// an inferred lambda parameter comes out as the bare variable and `n ->
+// n.intValue()` is looked up on Object. Walking the inheritance path first and
+// then through ct's own arguments is what makes it Integer.
+func (c *Checker) samBindings(ct *ast.ClassType, sam *ast.Method) map[*ast.TypeVar]ast.Type {
+	bind := bindings(ct.Class, ct.Args)
+	if sam.Owner == nil || sam.Owner == ct.Class {
+		return bind
+	}
+	sup := c.asSuper(ct, sam.Owner)
+	if sup == nil {
+		return bind
+	}
+	for k, v := range bindings(sam.Owner, sup.Args) {
+		bind[k] = c.subst(v, bind)
+	}
+	return bind
+}
+
 // singleAbstract finds the functional interface method.
 func (c *Checker) singleAbstract(ct *ast.ClassType) *ast.Method {
 	var found *ast.Method
@@ -3773,7 +3807,7 @@ func (ctx *methodCtx) checkMethodRef(mr *ast.MethodRef, want ast.Type) {
 		mr.SetType(ast.ErrorType{})
 		return
 	}
-	bind := bindings(ct.Class, ct.Args)
+	bind := c.samBindings(ct, sam)
 	params := make([]ast.Type, len(sam.Params))
 	for i, p := range sam.Params {
 		params[i] = c.wildToBound(c.subst(p, bind))
