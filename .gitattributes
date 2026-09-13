@@ -11,3 +11,14 @@
 *.teyru diff=java
 *.expected linguist-detectable=false
 *.args linguist-detectable=false
+
+# The tree-sitter parser is generated from grammar.js by the tree-sitter CLI,
+# and the headers beside it are copied from tree-sitter itself. parser.c alone
+# is 113k lines: without these markers linguist counts it as C and the language
+# bar reports a C project with a Go compiler attached. Marking them generated
+# also collapses them in pull request diffs, which is what a file nobody edits
+# by hand should do.
+editors/tree-sitter-teyru/src/parser.c linguist-generated=true
+editors/tree-sitter-teyru/src/node-types.json linguist-generated=true
+editors/tree-sitter-teyru/src/grammar.json linguist-generated=true
+editors/tree-sitter-teyru/src/tree_sitter/* linguist-vendored=true
