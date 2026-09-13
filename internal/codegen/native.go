@@ -7,6 +7,7 @@ import (
 
 	"github.com/LangYa466/Teyru/internal/ast"
 	"github.com/LangYa466/Teyru/internal/sema"
+	"github.com/LangYa466/Teyru/internal/util"
 )
 
 // nativeFn maps a prelude native method onto a runtime helper.
@@ -660,6 +661,13 @@ type SelectorDecl struct {
 	Iface    string
 	Method   string
 	Selector int
+	// Params are the parameter types, erased. They are part of the macro name
+	// because an overloaded interface method is otherwise two `#define`s of the
+	// same name with different values -- `List.listIterator()` and
+	// `List.listIterator(int)` both spelled TY_SEL_LIST_LISTITERATOR, and the
+	// second definition silently wins. A C caller has to be able to name the
+	// one it means.
+	Params string
 }
 
 // InterfaceSelectors lists every interface method of a program with its
@@ -683,7 +691,12 @@ func InterfaceSelectors(p *sema.Program) []SelectorDecl {
 				if m.Selector < 0 || m.IsStatic() || m.IsCtor {
 					continue
 				}
-				out = append(out, SelectorDecl{Iface: cl.Name, Method: m.Name, Selector: m.Selector})
+				var desc strings.Builder
+				for _, p := range m.Params {
+					desc.WriteString(util.Descriptor(p))
+				}
+				out = append(out, SelectorDecl{Iface: cl.Name, Method: m.Name,
+					Selector: m.Selector, Params: desc.String()})
 			}
 		}
 	}

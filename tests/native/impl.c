@@ -31,6 +31,6 @@ int32_t tyn_Native_scale_I(void *self, int32_t v) {
 int32_t tyn_Native_apply_Transform_I(void *t, int32_t v) {
   /* call the Teyru object back through its interface table */
   int32_t (*fn)(void *, int32_t) =
-      (int32_t (*)(void *, int32_t))ty_itab(t, TY_SEL_TRANSFORM_TRANSFORM);
+      (int32_t (*)(void *, int32_t))ty_itab(t, TY_SEL_TRANSFORM_TRANSFORM_I);
   return fn(t, v);
 }
