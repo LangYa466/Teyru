@@ -272,10 +272,9 @@ func (c *Checker) responseBody(r routeSpec, call ast.Expr) []ast.Stmt {
 	// class -- and a type with no mapping is reported at the mapping rather than
 	// at the first request.
 	cl := ct2(rt)
-	pair := c.jsonAdapterFor(cl, r.method.Pos)
-	if cl == nil || pair == nil || pair.writer == nil {
+	if cl == nil {
 		c.errf(r.method.Pos, "TY-TYP-0111",
-			"%s answers with %s, which has no JSON mapping; return a String or HttpResponse, or a class the binding can walk",
+			"%s answers with %s, which is not a class the response can carry",
 			r.method.Name, r.returns)
 		return []ast.Stmt{exprStmtOf(call), returnOf(newEmptyResponse())}
 	}
@@ -287,7 +286,7 @@ func (c *Checker) responseBody(r routeSpec, call ast.Expr) []ast.Stmt {
 			Vars: []*ast.VarDeclarator{{Pos: pos(), Name: "res", Init: newEmptyResponse()}}},
 		exprStmtOf(assignTo(sel(id("res"), "contentType"), strLit("application/json; charset=utf-8"))),
 		exprStmtOf(assignTo(sel(id("res"), "body"),
-			callNamed(callNamed(id(cl.Full), pair.writer.Name, id("out")), "toString"))),
+			callNamed(callNamed(id("JsonBinding"), "writeTo", id("out")), "toString"))),
 		returnOf(id("res")),
 	}
 }
@@ -330,12 +329,14 @@ func (c *Checker) jsonBodyExpr(raw ast.Expr, want ast.Type, pos source.Pos) ast.
 	if !ok || ct.Class == nil || ct.Class == c.b.Object || ct.Class.Special == "String" {
 		return nil
 	}
-	pair := c.jsonAdapterFor(ct.Class, pos)
-	if pair == nil || pair.reader == nil {
-		return nil
-	}
-	return callNamed(id(ct.Class.Full), pair.reader.Name,
-		callNamed(id("JsonParser"), "parseString", raw))
+	// The binding reads the class at run time, so the generated handler hands it
+	// the class rather than a reader the compiler wrote: a body of a class the
+	// compiler never saw bound parses just the same.
+	body := callNamed(id("JsonBinding"), "readFrom", raw, c.classLitOf(ct.Class))
+	// The witness is written out: Teyru infers less than javac, and the class
+	// the body is read into is known here.
+	body.TypeArgs = []*ast.TypeExpr{{Pos: pos, Name: ct.Class.Full, Resolved: &ast.ClassType{Class: ct.Class}}}
+	return body
 }
 
 // paramExpr builds the expression that produces one handler argument.
@@ -444,7 +445,7 @@ func (c *Checker) webEnumValue(cl *ast.Class) *ast.Method {
 		return ms[0]
 	}
 	stmts := enumLookupChain(cl, id("s"))
-	stmts = append(stmts, throwOf(newObjNamed("TypeMismatchException",
+	stmts = append(stmts, throwOf(newObj(c.programClass("TypeMismatchException"),
 		callNamed(id("WebConvert"), "mismatch", id("s"), id("param"), strLit(cl.Name)))))
 	m := c.newSynthMethod(cl, name, ast.ModPublic|ast.ModStatic, &ast.ClassType{Class: cl},
 		[]ast.Type{c.strType, c.strType}, []string{"s", "param"}, blockOf(stmts...), "")

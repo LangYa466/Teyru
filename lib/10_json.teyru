@@ -2024,6 +2024,27 @@ class Gson {
     }
     return JsonParser.parseString(json)
   }
+
+  /* Gson's fromJson(json, Class): the class's fields are read off the class
+     itself, which is what Gson's reflection does and what this binding does now.
+     The type parameter is Gson's own spelling -- `Person p = gson.fromJson(s,
+     Person.class)` -- and the cast it saves the caller is the one the compiler
+     writes here. */
+  public <T> T fromJson(String json, Class type) {
+    if (json == null || json.length() == 0) {
+      return null
+    }
+    // the witness is written out: this language infers less than javac does, and
+    // a value returned as the method's own type parameter is not enough to
+    // resolve readFrom's
+    return JsonBinding.<T>readFrom(json, type)
+  }
+
+  /* Gson's toJson(Object): the value's own class answers, so a call whose static
+     type says nothing about the value still writes what it is. */
+  public String toJson(Object value) {
+    return toJson(JsonBinding.writeTo(value))
+  }
 }
 
 class GsonBuilder {

@@ -3,15 +3,16 @@ package teyru
 // The annotations Gson's binding reads, and the runtime side of the binding.
 //
 // Gson binds an object to JSON by reflection, at the moment toJson/fromJson is
-// called. Here the binding is resolved by the compiler instead: when a program
-// writes `gson.fromJson(s, Pet.class)` or `gson.toJson(pet)`, the compiler knows
-// the class and generates a reader and a writer for it, then rewrites the call
-// to use them. A Java file that binds a class changes only in the cast it does
-// not need -- see docs/json.md.
+// called. This used to be the compiler's work -- it generated a reader and a
+// writer per bound class and rewrote each call to use them -- and the binding
+// now reads the class with java.lang.reflect instead (lib/27_json_binding.teyru),
+// the way Gson does. What that buys is a class the compiler never saw bound
+// still binding, and one less thing the compiler has to know about.
 //
-// What that buys is the same as the container's: a field whose type has no
-// mapping is a compile error rather than a runtime IllegalArgumentException
-// from deep inside a reflective adapter.
+// The annotations below are the ones the binding reads: @SerializedName for a
+// member's name. Gson's `alternate` is not declared -- an annotation element
+// with an array default is not something this language's annotation syntax has,
+// and an element without a default would have to be written at every use.
 
 // @SerializedName renames a field in the JSON, as Gson's does.
 //
@@ -59,63 +60,63 @@ interface JsonWriter2 {
   JsonElement write(Object v)
 }
 
-// JsonBinding is the table the compiler fills: one reader and one writer per
-// class it generated them for. A call whose type the compiler could not see --
-// `toJson(someObject)` where the static type is Object -- falls back to this
-// table at runtime, keyed by the object's own class, which is the one case
-// where Gson's reflection has no compile-time equivalent.
+// JsonBinding is where a class becomes JSON: one reader and one writer per
+// class, built from the class itself the first time it is asked for (see
+// lib/27_json_binding.teyru). A call whose type says nothing about the value --
+// `toJson(someObject)` where the static type is Object -- answers from the
+// object's own class, which is what Gson's reflection does.
 class JsonBinding {
   private static Map<String, JsonReader2> readers = new HashMap<String, JsonReader2>()
   private static Map<String, JsonWriter2> writers = new HashMap<String, JsonWriter2>()
 
-  public static void bind(String typeName, JsonReader2 reader, JsonWriter2 writer) {
-    readers.put(typeName, reader)
-    writers.put(typeName, writer)
-  }
-
+  /* One reader per class, built the first time the class is asked about by
+     looking at its fields. The compiler used to generate these and register
+     them; now the class answers for itself, which is what Gson does and what
+     makes a class the compiler never saw bound bind anyway. */
   public static JsonReader2 reader(Class type) {
     if (type == null) {
       return null
     }
-    return readers.get(type.getName())
+    JsonReader2 r = readers.get(type.getName())
+    if (r == null) {
+      r = new ReflectReader(type)
+      readers.put(type.getName(), r)
+    }
+    return r
   }
 
   public static JsonWriter2 writer(Class type) {
     if (type == null) {
       return null
     }
-    return writers.get(type.getName())
+    JsonWriter2 w = writers.get(type.getName())
+    if (w == null) {
+      w = new ReflectWriter(type)
+      writers.put(type.getName(), w)
+    }
+    return w
   }
 
+  // bound answers how many classes the binding has built a writer for. It was
+  // how many the compiler registered; now it counts what has been asked for,
+  // which answers the same question a program has -- is this class bound?
   public static int bound() {
     return writers.size()
   }
 
-  // readFrom is fromJson for a type the compiler could not see: an object's own
-  // class answers, which is what reflection would have done.
-  public static Object readFrom(String json, Class type) {
+  // readFrom is fromJson with a class the call site knows. The type parameter
+  // is the caller's: `Person p = JsonBinding.readFrom(json, Person.class)` needs
+  // no cast, and the cast is erased like every other.
+  public static <T> T readFrom(String json, Class type) {
     JsonReader2 r = reader(type)
     if (r == null) {
-      throw new JsonParseException("no JSON binding for " + type.getName())
+      throw new JsonParseException("no JSON binding for a null class")
     }
-    return r.read(JsonParser.parseString(json))
+    return (T) r.read(JsonParser.parseString(json))
   }
 
-  // writeTo is toJson for a type the compiler could not see.
+  // writeTo is toJson for a value whose static type says nothing about it.
   public static JsonElement writeTo(Object v) {
-    if (v == null) {
-      return JsonNull.INSTANCE
-    }
-    // a value that is already a tree is written as it stands: an Object field
-    // holds whatever arrived, and a JsonObject read out of one has to survive
-    // being written back rather than being looked up as a class
-    if (v instanceof JsonElement) {
-      return (JsonElement) v
-    }
-    JsonWriter2 w = writer(v.getClass())
-    if (w == null) {
-      throw new JsonParseException("no JSON binding for " + v.getClass().getName())
-    }
-    return w.write(v)
+    return JsonConvert.from(v)
   }
 }
