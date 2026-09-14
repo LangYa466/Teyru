@@ -22,6 +22,15 @@ class Sha1 {
   static native byte[] of(byte[] data)
 }
 
+// WebSocketMapping declares that a class answers a WebSocket on a path. It is
+// what @GetMapping is to a controller: the class implements WebSocketHandler,
+// the annotation says where it is reachable, and the scanner registers it --
+// so a WebSocket is declared the way everything else in this library is, and a
+// handler that is a bean can be injected like any other.
+@interface WebSocketMapping {
+  String value() default ""
+}
+
 // WebSocketSession is one connection after the upgrade: what a program sends on
 // and what tells it the connection ended.
 class WebSocketSession {
@@ -308,5 +317,31 @@ class WebSocketConnection {
       out[have.length + i] = more[i]
     }
     return out
+  }
+}
+
+// WebSocketScanner registers the WebSockets a program declares, the way
+// RouteScanner registers the routes: it reads the annotation off each class the
+// container holds and hands the server the handler the class is.
+class WebSocketScanner {
+  public static int register(ApplicationContext ctx, HttpServer server) {
+    int n = 0
+    for (Class c : BeanRegistry.registered()) {
+      Annotation a = BeanScanner.has(c.getAnnotations(), "WebSocketMapping")
+      if (a == null) {
+        continue
+      }
+      String path = a.stringValue("value")
+      if (path.length() == 0) {
+        path = "/" + c.getSimpleName().toLowerCase()
+      }
+      Object handler = ctx.getBean(c)
+      if (handler instanceof WebSocketHandler == false) {
+        throw new IllegalStateException(c.getName() + " is annotated @WebSocketMapping but does not implement WebSocketHandler")
+      }
+      server.addWebSocket(path, (WebSocketHandler) handler)
+      n++
+    }
+    return n
   }
 }
