@@ -224,6 +224,7 @@ func (c *Checker) resolveMembers(cl *ast.Class) {
 				t := c.resolveType(menv, p.Type)
 				m.Params = append(m.Params, t)
 				m.ParamNames = append(m.ParamNames, p.Name)
+				m.ParamAnnos = append(m.ParamAnnos, p.Annos)
 				if p.Varargs {
 					if i != len(d.Params)-1 {
 						c.errf(p.Pos, "TY-TYP-0012", "varargs parameter must be last")

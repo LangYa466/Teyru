@@ -690,6 +690,11 @@ type Method struct {
 	Varargs    bool
 	IsCtor     bool
 	Decl       *MethodDecl
+	// ParamAnnos are the annotations written on each parameter, one list per
+	// parameter. They are a parameter's own (Java's getParameterAnnotations),
+	// and where @Value and @Autowired are read from when the container builds
+	// a bean.
+	ParamAnnos [][]*Annotation
 	Accessor   *Accessor
 	Prop       *Field
 	Pos        source.Pos

@@ -321,6 +321,39 @@ int32_t ty_method_anncount(int64_t cm, int32_t declared, int32_t i) {
    index -- constructors are listed in the table but counted separately -- so
    the record is reached through the same lookup the other constructor
    accessors use. */
+/* A parameter's annotations, which is where a @Value or an @Autowired written
+   on a parameter is read from. */
+int32_t ty_method_paramanncount(int64_t cm, int32_t declared, int32_t i, int32_t p) {
+  const tymethod *m = method_at(T(cm), declared, i);
+  if (!m || !m->pnannos || p < 0 || p >= m->nparams) return 0;
+  return m->pnannos[p];
+}
+
+int64_t ty_method_paramannat(int64_t cm, int32_t declared, int32_t i, int32_t p, int32_t at) {
+  const tymethod *m = method_at(T(cm), declared, i);
+  if (!m || !m->pannos || p < 0 || p >= m->nparams) return 0;
+  const tyannotation *list = m->pannos[p];
+  if (!list || at < 0 || at >= m->pnannos[p]) return 0;
+  return H(&list[at]);
+}
+
+/* A constructor's parameter annotations, reached through the constructor
+   lookup rather than the method table: a constructor's index is not a
+   method-table index. */
+int32_t ty_ctor_paramanncount(int64_t cm, int32_t i, int32_t p) {
+  const tymethod *m = ctor_at(T(cm), i);
+  if (!m || !m->pnannos || p < 0 || p >= m->nparams) return 0;
+  return m->pnannos[p];
+}
+
+int64_t ty_ctor_paramannat(int64_t cm, int32_t i, int32_t p, int32_t at) {
+  const tymethod *m = ctor_at(T(cm), i);
+  if (!m || !m->pannos || p < 0 || p >= m->nparams) return 0;
+  const tyannotation *list = m->pannos[p];
+  if (!list || at < 0 || at >= m->pnannos[p]) return 0;
+  return H(&list[at]);
+}
+
 int32_t ty_ctor_anncount(int64_t cm, int32_t i) {
   const tymethod *m = ctor_at(T(cm), i);
   return m ? m->nannos : 0;

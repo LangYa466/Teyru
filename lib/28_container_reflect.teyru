@@ -1,0 +1,296 @@
+package teyru
+
+// The container, built from the classes themselves.
+//
+// Spring resolves beans by reflection while the program starts. This container
+// used to be resolved by the compiler: framework.go wrote a factory and an
+// injector for every bean, because the compiler was the only thing that knew
+// which classes implement an interface. It reads the class now -- the
+// annotations, the constructor, the fields, the @Bean methods -- which is what
+// Spring does, so a bean is wired the same whether or not the compiler saw a
+// lookup for it.
+//
+// What the compiler still hands over is the list of classes. There is no
+// classpath to scan here: a program's classes are the ones the compiler knows
+// about, and BeanRegistry holds the ones that carry a component annotation.
+//
+// The consequences are Spring's own, and they are a change from what this
+// container promised: a missing bean, two candidates for one type, or a
+// dependency loop is now a failure while the container builds -- refresh() --
+// rather than a compile error. That is what Spring gives, and it is what the
+// diagnostics page records.
+
+// BeanScanner reads one class and answers the beans it declares: itself, when
+// it carries a component annotation, and one per @Bean method when it is a
+// @Configuration class.
+class BeanScanner {
+  // componentStereotypes are the annotations that make a class a bean. They are
+  // synonyms, as in Spring: the name says what layer the class belongs to, not
+  // what the container does with it.
+  public static BeanDefinition[] all(Class type) {
+    Annotation[] classAnnos = type.getAnnotations()
+    List<BeanDefinition> out = new ArrayList<BeanDefinition>()
+    if (stereotype(classAnnos) != null) {
+      out.add(of(type, classAnnos))
+    }
+    if (has(classAnnos, "Configuration") != null) {
+      Method[] ms = type.getDeclaredMethods()
+      for (int i = 0 : i < ms.length : i++) {
+        Annotation bean = ms[i].getAnnotation(Bean.class)
+        if (bean == null) {
+          continue
+        }
+        out.add(beanOf(type, ms[i], bean))
+      }
+    }
+    BeanDefinition[] all = new BeanDefinition[out.size()]
+    for (int i = 0 : i < all.length : i++) {
+      all[i] = out.get(i)
+    }
+    return all
+  }
+
+  // stereotype answers with the annotation that makes the class a bean, or null
+  // when it carries none.
+  public static Annotation stereotype(Annotation[] annos) {
+    Annotation a = has(annos, "Component")
+    if (a != null) {
+      return a
+    }
+    a = has(annos, "Service")
+    if (a != null) {
+      return a
+    }
+    a = has(annos, "Repository")
+    if (a != null) {
+      return a
+    }
+    a = has(annos, "Controller")
+    if (a != null) {
+      return a
+    }
+    a = has(annos, "RestController")
+    if (a != null) {
+      return a
+    }
+    // a @Configuration class is a bean too: it is what its @Bean methods are
+    // called on
+    return has(annos, "Configuration")
+  }
+
+  // has answers with the annotation of a simple name, which is how the names
+  // the compiler used to compare are written now: the class of each is asked for
+  // by name, so an annotation declared in another package is found too.
+  public static Annotation has(Annotation[] annos, String simple) {
+    for (int i = 0 : i < annos.length : i++) {
+      if (annos[i].annotationType().getSimpleName().equals(simple)) {
+        return annos[i]
+      }
+    }
+    return null
+  }
+
+  // of is the definition of a class that is its own bean.
+  public static BeanDefinition of(Class type, Annotation[] annos) {
+    BeanDefinition d = new BeanDefinition()
+    d.type = type
+    d.name = beanName(type, stereotype(annos))
+    d.singleton = "prototype".equals(scope(annos)) == false
+    d.primary = has(annos, "Primary") != null
+    d.factory = new ReflectFactory(type, null)
+    d.injector = new ReflectInjector(type)
+    return d
+  }
+
+  // beanOf is the definition of a bean a @Bean method of a @Configuration class
+  // makes. The method's return type is the bean's type -- the container asks the
+  // method rather than a table -- and the method itself is the factory, called
+  // on the configuration bean the container owns.
+  public static BeanDefinition beanOf(Class config, Method m, Annotation bean) {
+    BeanDefinition d = new BeanDefinition()
+    d.type = m.getReturnType()
+    String named = bean.stringValue("value")
+    d.name = named.length() > 0 ? named : m.getName()
+    Annotation[] annos = m.getAnnotations()
+    d.singleton = "prototype".equals(scope(annos)) == false
+    d.primary = has(annos, "Primary") != null
+    d.factory = new ReflectFactory(config, m)
+    d.injector = new ReflectInjector(d.type)
+    return d
+  }
+
+  // beanName is the name a bean is looked up by: @Component("x") if it says so,
+  // otherwise the simple class name with its first letter lowered, which is
+  // Spring's own convention.
+  public static String beanName(Class type, Annotation a) {
+    if (a != null) {
+      String named = a.stringValue("value")
+      if (named.length() > 0) {
+        return named
+      }
+    }
+    String n = type.getSimpleName()
+    if (n.length() == 0) {
+      return n
+    }
+    return n.substring(0, 1).toLowerCase() + n.substring(1)
+  }
+
+  public static String scope(Annotation[] annos) {
+    Annotation a = has(annos, "Scope")
+    if (a == null) {
+      return "singleton"
+    }
+    String v = a.stringValue("value")
+    return v.length() > 0 ? v : "singleton"
+  }
+
+  // valueOf reads a @Value's "${key}" or "${key:default}". The answer is the
+  // key and the fallback, which is all the container needs from it.
+  public static String[] valueOf(Annotation a) {
+    String s = a.stringValue("value")
+    if (s.startsWith("${") == false || s.endsWith("}") == false) {
+      return new String[] { s, null }
+    }
+    String body = s.substring(2, s.length() - 1)
+    int colon = body.indexOf(':')
+    if (colon >= 0) {
+      return new String[] { body.substring(0, colon), body.substring(colon + 1) }
+    }
+    return new String[] { body, null }
+  }
+}
+
+// ReflectFactory builds a bean: it calls the @Bean method when there is one, and
+// otherwise the class's constructor -- the @Autowired one, or the one that takes
+// nothing.
+class ReflectFactory implements BeanFactory {
+  private Class type
+  private Method beanMethod
+
+  public ReflectFactory(Class type, Method beanMethod) {
+    this.type = type
+    this.beanMethod = beanMethod
+  }
+
+  public Object create(ApplicationContext ctx) {
+    if (beanMethod != null) {
+      Object owner = ctx.getBean(beanMethod.getDeclaringClass())
+      return beanMethod.invoke(owner, argumentsOf(beanMethod, ctx))
+    }
+    Constructor ctor = constructorOf(type)
+    return ctor.newInstance(argumentsOf(ctor, ctx))
+  }
+
+  // constructorOf is the constructor the container calls: the @Autowired one, or
+  // the one that takes nothing. Two @Autowired constructors are ambiguous, and a
+  // class with neither cannot be built by injection at all.
+  public static Constructor constructorOf(Class type) {
+    Constructor[] cs = type.getDeclaredConstructors()
+    Constructor picked = null
+    for (int i = 0 : i < cs.length : i++) {
+      if (cs[i].isAnnotationPresent(Autowired.class)) {
+        if (picked != null) {
+          throw new IllegalStateException("two constructors of " + type.getName() + " are annotated @Autowired")
+        }
+        picked = cs[i]
+      }
+    }
+    if (picked != null) {
+      return picked
+    }
+    // A class with one constructor is built through it, whatever it takes: the
+    // annotation is what says which constructor to call when there is a choice.
+    if (cs.length == 1) {
+      return cs[0]
+    }
+    for (int i = 0 : i < cs.length : i++) {
+      if (cs[i].getParameterCount() == 0) {
+        return cs[i]
+      }
+    }
+    throw new IllegalStateException(type.getName() + " has " + cs.length +
+        " constructors and none is annotated @Autowired")
+  }
+
+  // argumentsOf fills one call's arguments from the context, reading each
+  // parameter's own annotations: @Value from the properties, @Autowired by
+  // type. Spring injects by type for a constructor that takes nothing; this
+  // container asks for the annotation, which is what it did when the compiler
+  // checked it, so a parameter with neither is refused rather than guessed at.
+  public static Object[] argumentsOf(Constructor ctor, ApplicationContext ctx) {
+    return args(ctor.getParameterTypes(), ctor.getParameterAnnotations(), ctx,
+        ctor.getDeclaringClass().getName())
+  }
+
+  public static Object[] argumentsOf(Method m, ApplicationContext ctx) {
+    return args(m.getParameterTypes(), m.getParameterAnnotations(), ctx,
+        m.getDeclaringClass().getName())
+  }
+
+  static Object[] args(Class[] types, Annotation[][] annos, ApplicationContext ctx, String owner) {
+    Object[] out = new Object[types.length]
+    for (int i = 0 : i < types.length : i++) {
+      Annotation value = annotationIn(annos[i], "Value")
+      if (value != null) {
+        out[i] = ctx.resolveValue(BeanScanner.valueOf(value), types[i])
+        continue
+      }
+      if (annotationIn(annos[i], "Autowired") == null) {
+        throw new IllegalStateException("parameter " + i + " of " + owner +
+            " is neither @Value nor @Autowired")
+      }
+      out[i] = ctx.getBean(types[i], qualifierIn(annos[i]))
+    }
+    return out
+  }
+
+  // annotationIn finds an annotation of a simple name in one parameter's list.
+  public static Annotation annotationIn(Annotation[] annos, String simple) {
+    return BeanScanner.has(annos, simple)
+  }
+
+  public static String qualifierIn(Annotation[] annos) {
+    Annotation q = BeanScanner.has(annos, "Qualifier")
+    return q == null ? "" : q.stringValue("value")
+  }
+}
+
+// ReflectInjector fills a bean's fields after its constructor ran, and then runs
+// its @PostConstruct methods: an injected field is set before anything the bean
+// does with it, which is what the lifecycle annotation asks for.
+class ReflectInjector implements BeanInjector {
+  private Class type
+
+  public ReflectInjector(Class type) {
+    this.type = type
+  }
+
+  public void inject(Object bean, ApplicationContext ctx) {
+    if (bean == null) {
+      return
+    }
+    Field[] fs = type.getDeclaredFields()
+    for (int i = 0 : i < fs.length : i++) {
+      Annotation[] annos = fs[i].getAnnotations()
+      Annotation value = BeanScanner.has(annos, "Value")
+      if (value != null) {
+        fs[i].setAccessible(true)
+        fs[i].set(bean, ctx.resolveValue(BeanScanner.valueOf(value), fs[i].getType()))
+        continue
+      }
+      if (BeanScanner.has(annos, "Autowired") != null) {
+        Annotation q = BeanScanner.has(annos, "Qualifier")
+        String qualifier = q == null ? "" : q.stringValue("value")
+        fs[i].setAccessible(true)
+        fs[i].set(bean, ctx.getBean(fs[i].getType(), qualifier))
+      }
+    }
+    Method[] ms = type.getDeclaredMethods()
+    for (int i = 0 : i < ms.length : i++) {
+      if (ms[i].isAnnotationPresent(PostConstruct.class)) {
+        ms[i].invoke(bean)
+      }
+    }
+  }
+}

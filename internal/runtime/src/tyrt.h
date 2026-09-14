@@ -116,6 +116,11 @@ typedef struct tymethod {
   int32_t primret; /* primitive kind of the result, else 0 */
   const tyannotation *annos; /* the annotations written on the method, or NULL */
   int32_t nannos;
+  /* reflection: one annotation list per parameter, and how many each holds.
+     A parameter's annotations are written on the parameter, which is where
+     @Value and @Autowired are read from. */
+  const tyannotation *const *pannos;
+  const int32_t *pnannos;
 } tymethod;
 
 struct tyclass {
@@ -471,9 +476,13 @@ int64_t ty_class_annat(int64_t cm, int32_t i);
 int32_t ty_field_anncount(int64_t cm, int32_t declared, int32_t i);
 int64_t ty_field_annat(int64_t cm, int32_t declared, int32_t i, int32_t at);
 int32_t ty_method_anncount(int64_t cm, int32_t declared, int32_t i);
+int32_t ty_method_paramanncount(int64_t cm, int32_t declared, int32_t i, int32_t p);
+int64_t ty_method_paramannat(int64_t cm, int32_t declared, int32_t i, int32_t p, int32_t at);
 int64_t ty_method_annat(int64_t cm, int32_t declared, int32_t i, int32_t at);
 int32_t ty_ctor_anncount(int64_t cm, int32_t i);
 int64_t ty_ctor_annat(int64_t cm, int32_t i, int32_t at);
+int32_t ty_ctor_paramanncount(int64_t cm, int32_t i, int32_t p);
+int64_t ty_ctor_paramannat(int64_t cm, int32_t i, int32_t p, int32_t at);
 
 /* forName: the name is matched against the table the call site passes -- the
    program's own class names, the binary names Java uses ("teyru.List",

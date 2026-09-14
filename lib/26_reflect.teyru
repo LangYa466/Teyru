@@ -459,7 +459,11 @@ class Class {
   static native int fieldAnnCountOf(long cm, boolean declared, int i)
   static native long fieldAnnAtOf(long cm, boolean declared, int i, int at)
   static native int methodAnnCountOf(long cm, boolean declared, int i)
+  static native int paramAnnCountOf(long cm, boolean declared, int i, int p)
+  static native long paramAnnAtOf(long cm, boolean declared, int i, int p, int at)
   static native int ctorAnnCountOf(long cm, int i)
+  static native int ctorParamAnnCountOf(long cm, int i, int p)
+  static native long ctorParamAnnAtOf(long cm, int i, int p, int at)
   static native long ctorAnnAtOf(long cm, int i, int at)
   static native long methodAnnAtOf(long cm, boolean declared, int i, int at)
   /* The last two build a Class object, so the call site hands the runtime this
@@ -1026,6 +1030,22 @@ class Method {
     return getAnnotation(type) != null
   }
 
+  /* Java's getParameterAnnotations: one list per parameter, each holding the
+     annotations written on it. A parameter with none has an empty list. */
+  public Annotation[][] getParameterAnnotations() {
+    int n = getParameterCount()
+    Annotation[][] out = new Annotation[n][]
+    for (int p = 0 : p < n : p++) {
+      int k = Class.paramAnnCountOf(cm, declared, idx, p)
+      Annotation[] list = new Annotation[k]
+      for (int i = 0 : i < k : i++) {
+        list[i] = new Annotation(Class.paramAnnAtOf(cm, declared, idx, p, i))
+      }
+      out[p] = list
+    }
+    return out
+  }
+
   public Object invoke(Object obj, Object... args) {
     return Class.methodInvokeOf(cm, declared, idx, obj, args)
   }
@@ -1113,6 +1133,22 @@ class Constructor {
 
   public boolean isAnnotationPresent(Class type) {
     return getAnnotation(type) != null
+  }
+
+  /* Java's getParameterAnnotations: one list per parameter, each holding the
+     annotations written on it. A parameter with none has an empty list. */
+  public Annotation[][] getParameterAnnotations() {
+    int n = getParameterCount()
+    Annotation[][] out = new Annotation[n][]
+    for (int p = 0 : p < n : p++) {
+      int k = Class.ctorParamAnnCountOf(cm, idx, p)
+      Annotation[] list = new Annotation[k]
+      for (int i = 0 : i < k : i++) {
+        list[i] = new Annotation(Class.ctorParamAnnAtOf(cm, idx, p, i))
+      }
+      out[p] = list
+    }
+    return out
   }
 
   public Object newInstance(Object... args) {
