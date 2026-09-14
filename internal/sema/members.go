@@ -462,7 +462,7 @@ func (c *Checker) resolveFieldDecl(cl *ast.Class, env *typeEnv, d *ast.FieldDecl
 		if isIface {
 			mods |= ast.ModPublic | ast.ModStatic | ast.ModFinal
 		}
-		f := &ast.Field{Name: vd.Name, Type: t, Mods: mods, Pos: vd.Pos, Decl: vd, Storage: true}
+		f := &ast.Field{Name: vd.Name, Type: t, Mods: mods, Pos: vd.Pos, Decl: vd, Storage: true, Annos: d.Annos}
 		vd.Fld = f
 		if d.Accessor != nil {
 			c.resolveProperty(cl, f, d, vd)

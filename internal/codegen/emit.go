@@ -134,6 +134,12 @@ func (e *Emitter) run() {
 	// the metadata of the classes a class literal synthesized, now that the
 	// bodies that may name them have been emitted
 	e.emitPrimClassMeta()
+	// A program that annotates its own classes needs the metadata whether or not
+	// a call site names the reflection API: the frameworks read their
+	// annotations through it.
+	if e.programUsesAnnotations() {
+		e.reflectUsed = true
+	}
 }
 
 // primClassName is the C name of the class a primitive class literal names.
@@ -423,6 +429,13 @@ func (e *Emitter) emitClassMeta(cl *ast.Class) {
 	// The reflection tables, which is what java.lang.reflect reads. They are
 	// written here, with the class, because a reader of the generated C should
 	// find a class's metadata in one place.
+	// The class's own annotations go to the startup-attached group with the
+	// member tables: an annotation names its type, so naming one in the class
+	// object would pin that type's object into every program.
+	annsTbl, nannos := e.emitAnnoTable(mangle(cl.Full), annoListOf(cl))
+	if annsTbl != "NULL" {
+		e.attach(cl, "annos", annsTbl, "tyannotation", nannos, "nannos")
+	}
 	fieldsTbl := e.emitFieldTable(cl)
 	methodsTbl := e.emitMethodTable(cl)
 	constsTbl := e.emitConstTable(cl)

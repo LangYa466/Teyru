@@ -60,6 +60,38 @@ typedef struct tymap {
 #define TY_METH_CTOR 2
 #define TY_METH_VARARGS 4
 
+/* ---- annotations --------------------------------------------------------
+
+   An annotation as this runtime carries it: the annotation type, and its
+   elements as name/value pairs. Java hands back an implementation of the
+   annotation interface, so a program writes ann.value(); that needs a class
+   per annotation type, which the compiler does not synthesize yet, so an
+   element is read by name here. The difference is in AGENTS.md §10. */
+
+#define TY_ANN_UNSUPPORTED 0 /* an element value typing cannot carry yet */
+#define TY_ANN_STRING 1
+#define TY_ANN_INT 2
+#define TY_ANN_LONG 3
+#define TY_ANN_DOUBLE 4
+#define TY_ANN_BOOL 5
+#define TY_ANN_CLASS 6
+#define TY_ANN_ENUM 7
+
+typedef struct tyannoarg {
+  const char *name;
+  int32_t kind;
+  int64_t ival;     /* int, long and boolean */
+  double dval;
+  const char *sval; /* a string, or an enum constant's name */
+  tyclass *cval;    /* a class literal, or the enum's class */
+} tyannoarg;
+
+typedef struct tyannotation {
+  tyclass *type;
+  const tyannoarg *args;
+  int32_t nargs;
+} tyannotation;
+
 typedef struct tyfield {
   const char *name;
   tyclass *type;
@@ -68,6 +100,8 @@ typedef struct tyfield {
   int32_t mods; /* java.lang.reflect.Modifier bits */
   void *addr;   /* address of a static field, NULL for an instance field */
   int32_t prim; /* primitive kind when the type is a primitive, else 0 */
+  const tyannotation *annos; /* the annotations written on the field, or NULL */
+  int32_t nannos;
 } tyfield;
 
 typedef struct tymethod {
@@ -80,6 +114,8 @@ typedef struct tymethod {
   int32_t mods;
   int32_t kind;
   int32_t primret; /* primitive kind of the result, else 0 */
+  const tyannotation *annos; /* the annotations written on the method, or NULL */
+  int32_t nannos;
 } tymethod;
 
 struct tyclass {
@@ -110,6 +146,9 @@ struct tyclass {
   int32_t nmethods;
   void **consts; /* enum constants, in declaration order */
   int32_t nconsts;
+  /* reflection: the annotations written on the class itself */
+  const tyannotation *annos;
+  int32_t nannos;
 };
 
 /* Class handles installed by generated startup code. */
@@ -414,6 +453,28 @@ int64_t ty_class_superof(int64_t cm);
    binary names Java uses ("teyru.List", "main.Outer$Inner"). clscls is the
    program's teyru.Class, which the call site hands over so the object it
    returns is an instance of it. */
+/* Annotations. Every entry takes the handle of a tyannotation record, which is
+   static data: the prelude holds one in a long, the way it holds a class. */
+int64_t ty_ann_type(int64_t ah);
+int32_t ty_ann_argcount(int64_t ah);
+tystr *ty_ann_argname(int64_t ah, int32_t i);
+int32_t ty_ann_argkind(int64_t ah, int32_t i);
+int64_t ty_ann_argint(int64_t ah, int32_t i);
+double ty_ann_argdouble(int64_t ah, int32_t i);
+tystr *ty_ann_argstr(int64_t ah, int32_t i);
+int64_t ty_ann_argclass(int64_t ah, int32_t i);
+int32_t ty_ann_argindex(int64_t ah, tystr *name); /* -1 when absent */
+int32_t ty_ann_same(int64_t a, int64_t b);
+
+int32_t ty_class_anncount(int64_t cm);
+int64_t ty_class_annat(int64_t cm, int32_t i);
+int32_t ty_field_anncount(int64_t cm, int32_t declared, int32_t i);
+int64_t ty_field_annat(int64_t cm, int32_t declared, int32_t i, int32_t at);
+int32_t ty_method_anncount(int64_t cm, int32_t declared, int32_t i);
+int64_t ty_method_annat(int64_t cm, int32_t declared, int32_t i, int32_t at);
+int32_t ty_ctor_anncount(int64_t cm, int32_t i);
+int64_t ty_ctor_annat(int64_t cm, int32_t i, int32_t at);
+
 /* forName: the name is matched against the table the call site passes -- the
    program's own class names, the binary names Java uses ("teyru.List",
    "main.Outer$Inner"). clscls is the program's teyru.Class, handed over so the

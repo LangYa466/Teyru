@@ -188,6 +188,156 @@ static int32_t ctor_count(tyclass *k) {
   return n;
 }
 
+/* ------------------------------------------------------------- annotations */
+
+static const tyannotation *ann_at(int64_t ah) {
+  return (const tyannotation *)(intptr_t)ah;
+}
+
+int64_t ty_ann_type(int64_t ah) {
+  const tyannotation *a = ann_at(ah);
+  return a ? H(a->type) : 0;
+}
+
+int32_t ty_ann_argcount(int64_t ah) {
+  const tyannotation *a = ann_at(ah);
+  return a ? a->nargs : 0;
+}
+
+static const tyannoarg *arg_at(int64_t ah, int32_t i) {
+  const tyannotation *a = ann_at(ah);
+  if (!a || i < 0 || i >= a->nargs) return NULL;
+  return &a->args[i];
+}
+
+tystr *ty_ann_argname(int64_t ah, int32_t i) {
+  const tyannoarg *g = arg_at(ah, i);
+  return g ? ty_str_new(g->name, (int64_t)strlen(g->name)) : NULL;
+}
+
+int32_t ty_ann_argkind(int64_t ah, int32_t i) {
+  const tyannoarg *g = arg_at(ah, i);
+  return g ? g->kind : TY_ANN_UNSUPPORTED;
+}
+
+int64_t ty_ann_argint(int64_t ah, int32_t i) {
+  const tyannoarg *g = arg_at(ah, i);
+  return g ? g->ival : 0;
+}
+
+double ty_ann_argdouble(int64_t ah, int32_t i) {
+  const tyannoarg *g = arg_at(ah, i);
+  return g ? g->dval : 0;
+}
+
+tystr *ty_ann_argstr(int64_t ah, int32_t i) {
+  const tyannoarg *g = arg_at(ah, i);
+  if (!g || !g->sval) return NULL;
+  return ty_str_new(g->sval, (int64_t)strlen(g->sval));
+}
+
+int64_t ty_ann_argclass(int64_t ah, int32_t i) {
+  const tyannoarg *g = arg_at(ah, i);
+  return g && g->cval ? H(g->cval) : 0;
+}
+
+int32_t ty_ann_argindex(int64_t ah, tystr *name) {
+  const tyannotation *a = ann_at(ah);
+  if (!a || !name) return -1;
+  for (int32_t i = 0; i < a->nargs; i++) {
+    const char *have = a->args[i].name;
+    if (strlen(have) == (size_t)name->len && memcmp(have, name->data, (size_t)name->len) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/* Whether two annotations are the same annotation with the same elements,
+   which is Java's annotation equality: same type, same element names, same
+   values. It lives here because the comparison is one loop over the kinds, and
+   written in the prelude it would be that loop once per value kind. */
+int32_t ty_ann_same(int64_t a1, int64_t a2) {
+  const tyannotation *x = ann_at(a1), *y = ann_at(a2);
+  if (x == y) return 1;
+  if (!x || !y) return 0;
+  if (x->type != y->type || x->nargs != y->nargs) return 0;
+  for (int32_t i = 0; i < x->nargs; i++) {
+    const tyannoarg *p = &x->args[i], *q = &y->args[i];
+    if (strcmp(p->name, q->name) != 0 || p->kind != q->kind) return 0;
+    switch (p->kind) {
+      case TY_ANN_STRING:
+      case TY_ANN_ENUM: {
+        const char *ps = p->sval ? p->sval : "", *qs = q->sval ? q->sval : "";
+        if (strcmp(ps, qs) != 0) return 0;
+        if (p->kind == TY_ANN_ENUM && p->cval != q->cval) return 0;
+        break;
+      }
+      case TY_ANN_CLASS:
+        if (p->cval != q->cval) return 0;
+        break;
+      case TY_ANN_DOUBLE:
+        if (p->dval != q->dval) return 0;
+        break;
+      default:
+        if (p->ival != q->ival) return 0;
+        break;
+    }
+  }
+  return 1;
+}
+
+/* The annotations an element carries. Class-level ones live in the class
+   record, member ones in the field or method record, so a caller asks the
+   element it already has a handle for. */
+int32_t ty_class_anncount(int64_t cm) {
+  tyclass *k = T(cm);
+  return k ? k->nannos : 0;
+}
+
+int64_t ty_class_annat(int64_t cm, int32_t i) {
+  tyclass *k = T(cm);
+  if (!k || i < 0 || i >= k->nannos) return 0;
+  return H(&k->annos[i]);
+}
+
+int32_t ty_field_anncount(int64_t cm, int32_t declared, int32_t i) {
+  const tyfield *f = field_at(T(cm), declared, i);
+  return f ? f->nannos : 0;
+}
+
+int64_t ty_field_annat(int64_t cm, int32_t declared, int32_t i, int32_t at) {
+  const tyfield *f = field_at(T(cm), declared, i);
+  if (!f || at < 0 || at >= f->nannos) return 0;
+  return H(&f->annos[at]);
+}
+
+int32_t ty_method_anncount(int64_t cm, int32_t declared, int32_t i) {
+  const tymethod *m = method_at(T(cm), declared, i);
+  return m ? m->nannos : 0;
+}
+
+/* A constructor's annotations. The constructor index is not a method-table
+   index -- constructors are listed in the table but counted separately -- so
+   the record is reached through the same lookup the other constructor
+   accessors use. */
+int32_t ty_ctor_anncount(int64_t cm, int32_t i) {
+  const tymethod *m = ctor_at(T(cm), i);
+  return m ? m->nannos : 0;
+}
+
+int64_t ty_ctor_annat(int64_t cm, int32_t i, int32_t at) {
+  const tymethod *m = ctor_at(T(cm), i);
+  if (!m || at < 0 || at >= m->nannos) return 0;
+  return H(&m->annos[at]);
+}
+
+int64_t ty_method_annat(int64_t cm, int32_t declared, int32_t i, int32_t at) {
+  const tymethod *m = method_at(T(cm), declared, i);
+  if (!m || at < 0 || at >= m->nannos) return 0;
+  return H(&m->annos[at]);
+}
+
 /* -------------------------------------------------------------- Class */
 
 int64_t ty_class_handle(void *c) { return H(ty_class_target(c)); }

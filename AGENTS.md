@@ -185,7 +185,13 @@ source → lexer → parser → ast → sema → codegen
   執行期不建表。與 Java 的差異（都已實測，不是未驗證）：
   - 類別名是 Teyru 的：`String.class.getName()` 是 `teyru.String`，
     `Class.forName` 兩種寫法都收（`java.lang.String` 會找到同一類別）。
-  - 沒有註解反射：`@Retention` 收得下但沒有作用，執行期沒有註解物件。
+  - 註解反射有，但元素是**按名字讀**：`Class`／`Field`／`Method`／`Constructor`
+    上的 `getAnnotations()`、`getAnnotation(Class)`、`isAnnotationPresent(Class)` 是
+    Java 的，`Annotation` 則沒有「每個註解型別一個實作類別」——所以要
+    `ann.stringValue("value")`／`intValue`／`booleanValue`／`doubleValue`／
+    `classValue`／`enumValue`，而不是 Java 的 `ann.value()`。沒寫的元素讀得到介面
+    宣告的預設值（parser 保留 `default`）；`@Retention` 收得下但沒有作用；陣列型別
+    的元素值不帶（讀它會說不支援）。
   - 所有陣列共用一個類別，因此沒有 `getComponentType`、沒有每個元素型別的陣列
     類別，`forName("[I")` 也沒有東西可回答。
   - 沒有泛型型別參數的反射（`getGenericType` 等不存在）。
