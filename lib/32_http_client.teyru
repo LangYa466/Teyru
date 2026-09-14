@@ -1,0 +1,488 @@
+package teyru
+
+// An HTTP client: java.net.http's shapes, and the wheel a program reaches for
+// when it does not want to build a request by hand.
+//
+// A request is a method, a URI, headers and a body; a response is a status, the
+// headers, and the body as text. The connection is kept and reused for the same
+// host and port, which is what makes a second request to the same server cheap
+// and what every client does.
+//
+// Two things are not here, and both are said rather than hidden:
+//
+//   * HTTPS. The runtime has no TLS, so an https:// URL is refused instead of
+//     opening a socket that would fail the handshake. A client that needs it
+//     needs a TLS implementation first.
+//   * Redirects. A 3xx is answered as it stands, with the Location header there
+//     for a caller that wants to follow it.
+
+// HttpUrl is a URL split into the parts a client needs. Java's URI does more
+// (relative resolution, encoding rules); this does what a request needs.
+class HttpUrl {
+  public String scheme = ""
+  public String host = ""
+  public int port = 0
+  public String path = "/"
+  public String query = ""
+
+  public static HttpUrl of(String url) {
+    HttpUrl u = new HttpUrl()
+    String rest = url
+    int schemeAt = url.indexOf("://")
+    if (schemeAt > 0) {
+      u.scheme = url.substring(0, schemeAt).toLowerCase()
+      rest = url.substring(schemeAt + 3)
+    }
+    int slash = rest.indexOf('/')
+    String authority = slash < 0 ? rest : rest.substring(0, slash)
+    String tail = slash < 0 ? "/" : rest.substring(slash)
+    int colon = authority.lastIndexOf(':')
+    if (colon > 0) {
+      u.host = authority.substring(0, colon)
+      u.port = Integer.parseInt(authority.substring(colon + 1))
+    } else {
+      u.host = authority
+      u.port = u.scheme.equals("https") ? 443 : 80
+    }
+    int q = tail.indexOf('?')
+    if (q >= 0) {
+      u.path = tail.substring(0, q)
+      u.query = tail.substring(q + 1)
+    } else {
+      u.path = tail
+    }
+    return u
+  }
+
+  // target is what goes on the request line: the path, and the query when there
+  // is one.
+  public String target() {
+    return query.length() == 0 ? path : path + "?" + query
+  }
+
+  public String authority() {
+    boolean dflt = (scheme.equals("https") && port == 443) || (scheme.equals("http") == false && port == 80) ||
+        (scheme.equals("http") && port == 80)
+    return dflt ? host : host + ":" + port
+  }
+}
+
+// HttpClientRequest is java.net.http.HttpClientRequest: the method, the target, the headers
+// and the body, built through a builder because a request has more parts than a
+// constructor should take.
+class HttpClientRequest {
+  public String method = "GET"
+  public String url = ""
+  public String body = ""
+  public int timeoutMs = 0
+  private List<String> headerNames = new ArrayList<String>()
+  private List<String> headerValues = new ArrayList<String>()
+
+  public static HttpClientRequest of(String method, String url) {
+    HttpClientRequest r = new HttpClientRequest()
+    r.method = method
+    r.url = url
+    return r
+  }
+
+  public HttpClientRequest header(String name, String value) {
+    headerNames.add(name)
+    headerValues.add(value)
+    return this
+  }
+
+  public HttpClientRequest body(String text) {
+    this.body = text
+    return this
+  }
+
+  public HttpClientRequest contentType(String type) {
+    return header("Content-Type", type)
+  }
+
+  // timeout is the socket timeout a send uses, in milliseconds. Java's
+  // HttpClientRequest.timeout takes a Duration; this language's clock is milliseconds
+  // in the places that matter, so it is an int.
+  public HttpClientRequest timeout(int ms) {
+    timeoutMs = ms
+    return this
+  }
+
+  public int headerCount() {
+    return headerNames.size()
+  }
+
+  public String headerName(int i) {
+    return headerNames.get(i)
+  }
+
+  public String headerValue(int i) {
+    return headerValues.get(i)
+  }
+
+  public String header(String name) {
+    for (int i = 0 : i < headerNames.size() : i++) {
+      if (headerNames.get(i).toLowerCase().equals(name.toLowerCase())) {
+        return headerValues.get(i)
+      }
+    }
+    return ""
+  }
+
+  // render is the bytes of the request: the request line, the headers the
+  // client has to send -- Host, the length, the connection -- and the ones the
+  // caller added, then the body.
+  public String render(HttpUrl u) {
+    StringBuilder b = new StringBuilder()
+    b.append(method).append(" ").append(u.target()).append(" HTTP/1.1\r\n")
+    if (header("Host").length() == 0) {
+      b.append("Host: ").append(u.authority()).append("\r\n")
+    }
+    for (int i = 0 : i < headerNames.size() : i++) {
+      b.append(headerNames.get(i)).append(": ").append(headerValues.get(i)).append("\r\n")
+    }
+    if (body.length() > 0 && header("Content-Length").length() == 0) {
+      b.append("Content-Length: ").append(body.length()).append("\r\n")
+    }
+    if (header("Connection").length() == 0) {
+      b.append("Connection: keep-alive\r\n")
+    }
+    b.append("\r\n")
+    b.append(body)
+    return b.toString()
+  }
+}
+
+// HttpClientResponse is java.net.http.HttpClientResponse: the status, the headers and the
+// body of one exchange.
+class HttpClientResponse {
+  public int status = 0
+  public String body = ""
+  public String uri = ""
+  private List<String> headerNames = new ArrayList<String>()
+  private List<String> headerValues = new ArrayList<String>()
+
+  public int statusCode() {
+    return status
+  }
+
+  public String body() {
+    return body
+  }
+
+  public String header(String name) {
+    for (int i = 0 : i < headerNames.size() : i++) {
+      if (headerNames.get(i).toLowerCase().equals(name.toLowerCase())) {
+        return headerValues.get(i)
+      }
+    }
+    return ""
+  }
+
+  public List<String> headerNames() {
+    return headerNames
+  }
+
+  public void addHeader(String name, String value) {
+    headerNames.add(name)
+    headerValues.add(value)
+  }
+
+  public String headerName(int i) {
+    return headerNames.get(i)
+  }
+
+  public String headerValue(int i) {
+    return headerValues.get(i)
+  }
+
+  public int headerCount() {
+    return headerNames.size()
+  }
+
+  public boolean isSuccessful() {
+    return status >= 200 && status < 300
+  }
+
+  public String toString() {
+    return "HTTP " + status + " " + body.length() + " bytes"
+  }
+}
+
+// ClientResponseParser reads a response off a stream: the status line, the
+// headers, and the body framed by whatever the headers say -- a length, a chunk
+// list, or nothing at all, in which case the connection closes to end it. It is
+// the reading half of the client, and it is separate from it so that it can be
+// tested without a socket.
+class ClientResponseParser {
+  public static HttpClientResponse parse(SocketInputStream in) {
+    String statusLine = in.readLine()
+    if (statusLine == null) {
+      return null
+    }
+    HttpClientResponse res = new HttpClientResponse()
+    res.status = statusOf(statusLine)
+    boolean chunked = false
+    int length = -1
+    while (true) {
+      String line = in.readLine()
+      if (line == null || line.isEmpty()) {
+        break
+      }
+      int colon = line.indexOf(':')
+      if (colon <= 0) {
+        continue
+      }
+      String name = line.substring(0, colon).trim()
+      String value = line.substring(colon + 1).trim()
+      res.addHeader(name, value)
+      String lower = name.toLowerCase()
+      if (lower.equals("content-length")) {
+        length = Integer.parseInt(value)
+      }
+      if (lower.equals("transfer-encoding") && value.toLowerCase().indexOf("chunked") >= 0) {
+        chunked = true
+      }
+    }
+    // a 1xx is an interim answer and the real one follows; 204 and 304 have no
+    // body whatever their headers say
+    if (res.status >= 100 && res.status < 200) {
+      return parse(in)
+    }
+    if (chunked) {
+      res.body = readChunks(in)
+      return res
+    }
+    if (res.status == 204 || res.status == 304) {
+      return res
+    }
+    if (length >= 0) {
+      byte[] buf = new byte[length]
+      in.readFully(buf, 0, length)
+      res.body = Net.stringFrom(buf, 0, length)
+      return res
+    }
+    // no length and no chunks: the body ends when the connection does
+    StringBuilder b = new StringBuilder()
+    while (true) {
+      int c = in.read()
+      if (c < 0) {
+        break
+      }
+      b.append((char) c)
+    }
+    res.body = b.toString()
+    return res
+  }
+
+  // of parses a response that is already in hand, whole. It is the same reading
+  // as parse does, for a caller that has the text rather than a stream -- a
+  // test, a proxy, a cached answer -- and it is here rather than in the test so
+  // that the two readings cannot drift apart.
+  public static HttpClientResponse of(String raw) {
+    int headEnd = raw.indexOf("\r\n\r\n")
+    String head = headEnd < 0 ? raw : raw.substring(0, headEnd)
+    String body = headEnd < 0 ? "" : raw.substring(headEnd + 4)
+    String[] lines = head.split("\r\n")
+    HttpClientResponse res = new HttpClientResponse()
+    res.status = statusOf(lines[0])
+    int length = -1
+    boolean chunked = false
+    for (int i = 1 : i < lines.length : i++) {
+      int colon = lines[i].indexOf(':')
+      if (colon <= 0) {
+        continue
+      }
+      String name = lines[i].substring(0, colon).trim()
+      String value = lines[i].substring(colon + 1).trim()
+      res.addHeader(name, value)
+      String lower = name.toLowerCase()
+      if (lower.equals("content-length")) {
+        length = Integer.parseInt(value)
+      }
+      if (lower.equals("transfer-encoding") && value.toLowerCase().indexOf("chunked") >= 0) {
+        chunked = true
+      }
+    }
+    if (res.status == 204 || res.status == 304) {
+      return res
+    }
+    if (chunked) {
+      res.body = unchunk(body)
+      return res
+    }
+    if (length >= 0 && length <= body.length()) {
+      res.body = body.substring(0, length)
+      return res
+    }
+    res.body = body
+    return res
+  }
+
+  // unchunk decodes a chunked body that is already in hand.
+  public static String unchunk(String raw) {
+    StringBuilder b = new StringBuilder()
+    int at = 0
+    while (at < raw.length()) {
+      int eol = raw.indexOf("\r\n", at)
+      if (eol < 0) {
+        break
+      }
+      int n = Integer.parseInt(raw.substring(at, eol).trim(), 16)
+      if (n == 0) {
+        break
+      }
+      int from = eol + 2
+      b.append(raw.substring(from, from + n))
+      at = from + n + 2
+    }
+    return b.toString()
+  }
+
+  public static int statusOf(String statusLine) {
+    String[] parts = statusLine.split(" ")
+    if (parts.length < 2) {
+      throw new IllegalStateException("not an HTTP status line: " + statusLine)
+    }
+    return Integer.parseInt(parts[1])
+  }
+
+  static String readChunks(SocketInputStream in) {
+    StringBuilder b = new StringBuilder()
+    while (true) {
+      String size = in.readLine()
+      if (size == null) {
+        break
+      }
+      int n = Integer.parseInt(size.trim(), 16)
+      if (n == 0) {
+        in.readLine()
+        break
+      }
+      byte[] buf = new byte[n]
+      in.readFully(buf, 0, n)
+      b.append(Net.stringFrom(buf, 0, n))
+      in.readLine()
+    }
+    return b.toString()
+  }
+}
+
+// HttpClient is java.net.http.HttpClient for a blocking client: it connects, it
+// sends, it keeps the connection for the next request to the same authority.
+class HttpClient {
+  private Socket socket
+  private String connectedTo = ""
+  private int timeoutMs = 30000
+
+  public static HttpClient newHttpClient() {
+    return new HttpClient()
+  }
+
+  public HttpClient connectTimeout(int ms) {
+    timeoutMs = ms
+    return this
+  }
+
+  public HttpClientResponse send(HttpClientRequest request) {
+    HttpUrl u = HttpUrl.of(request.url)
+    if (u.scheme.equals("https")) {
+      throw new IllegalStateException("https is not supported: the runtime has no TLS")
+    }
+    if (u.scheme.length() > 0 && u.scheme.equals("http") == false) {
+      throw new IllegalStateException("unsupported scheme: " + u.scheme)
+    }
+    HttpClientResponse res = exchange(u, request)
+    res.uri = request.url
+    return res
+  }
+
+  private HttpClientResponse exchange(HttpUrl u, HttpClientRequest request) {
+    int tries = 0
+    while (true) {
+      Socket s = connection(u, tries > 0)
+      try {
+        s.setSoTimeout(request.timeoutMs > 0 ? request.timeoutMs : timeoutMs)
+        s.getOutputStream().write(request.render(u))
+        s.getOutputStream().flush()
+        HttpClientResponse res = ClientResponseParser.parse(s.getInputStream())
+        if (res == null) {
+          throw new IllegalStateException("the server closed the connection without answering")
+        }
+        // the connection stays open unless the server said otherwise, which is
+        // what makes the next request to the same authority one write
+        if (res.header("Connection").toLowerCase().indexOf("close") >= 0 || u.scheme.equals("https") == false &&
+            res.header("Connection").toLowerCase().indexOf("close") >= 0) {
+          close()
+        }
+        return res
+      } catch (IOException e) {
+        // a connection the server closed between requests is the one case worth
+        // retrying: the request itself may not have been read
+        close()
+        tries++
+        if (tries > 1) {
+          throw e
+        }
+      }
+    }
+  }
+
+  private Socket connection(HttpUrl u, boolean fresh) {
+    String key = u.host + ":" + u.port
+    if (fresh == false && socket != null && connectedTo.equals(key)) {
+      return socket
+    }
+    close()
+    socket = new Socket(u.host, u.port)
+    socket.setSoTimeout(timeoutMs)
+    connectedTo = key
+    return socket
+  }
+
+  public void close() {
+    if (socket != null) {
+      socket.close()
+      socket = null
+      connectedTo = ""
+    }
+  }
+}
+
+// Http is the wheel: the four verbs a program reaches for, with the request
+// built for it. java.net.http has no such class -- a program builds a request
+// and sends it -- and this is here because most programs are one call.
+class Http {
+  public static HttpClientResponse get(String url) {
+    return send(HttpClientRequest.of("GET", url))
+  }
+
+  public static HttpClientResponse post(String url, String body) {
+    return send(HttpClientRequest.of("POST", url).contentType("text/plain").body(body))
+  }
+
+  public static HttpClientResponse postJson(String url, String json) {
+    return send(HttpClientRequest.of("POST", url).contentType("application/json").body(json))
+  }
+
+  public static HttpClientResponse putJson(String url, String json) {
+    return send(HttpClientRequest.of("PUT", url).contentType("application/json").body(json))
+  }
+
+  public static HttpClientResponse delete(String url) {
+    return send(HttpClientRequest.of("DELETE", url))
+  }
+
+  public static HttpClientResponse head(String url) {
+    return send(HttpClientRequest.of("HEAD", url))
+  }
+
+  private static HttpClientResponse send(HttpClientRequest request) {
+    HttpClient client = HttpClient.newHttpClient()
+    try {
+      return client.send(request)
+    } finally {
+      client.close()
+    }
+  }
+}

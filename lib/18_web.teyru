@@ -1201,6 +1201,17 @@ class Application {
     return ctx
   }
 
+  // serve is the whole application: the routes a controller declares and the
+  // WebSockets a handler declares are read from the container, the server is
+  // bound to a port, and it runs until it is idle. It is what a program's main
+  // does, and it is here so that main is one line.
+  public static void serve(ApplicationContext ctx, int port, int idleMs) {
+    HttpServer server = new HttpServer(port, routerFrom(ctx), ctx)
+    WebSocketScanner.register(ctx, server)
+    server.bind()
+    server.serveIdle(idleMs == 0 ? 0 : idleMs)
+  }
+
   // routerFrom builds the router by reading each controller's methods, which is
   // what the compiler used to do while checking: the mapping annotations, the
   // class's prefix, and one handler per mapping (lib/31_routes.teyru).
