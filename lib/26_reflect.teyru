@@ -396,6 +396,47 @@ class Annotation {
   }
 }
 
+// ---- Parameter -----------------------------------------------------------
+
+/* One parameter of a method or a constructor, which is what a handler binding a
+   request reads: the name it was written with (Java's getParameters, which
+   needs -parameters there and is what the emitter records here), its type, and
+   the annotations on it. */
+class Parameter {
+  private long cm
+  private boolean declared
+  private int idx
+  private int pos
+
+  Parameter(long cm, boolean declared, int idx, int pos) {
+    this.cm = cm
+    this.declared = declared
+    this.idx = idx
+    this.pos = pos
+  }
+
+  /* A constructor's index is not a method-table index -- constructors are listed
+     in the table but counted separately -- so the two ask different questions.
+     `declared` is what tells them apart: it is false only for a constructor. */
+  public String getName() {
+    return declared ? Class.paramNameOf(cm, true, idx, pos) : Class.ctorParamNameOf(cm, idx, pos)
+  }
+
+  public Class getType() {
+    return Class.makeOf(declared ? Class.methodParamOf(cm, true, idx, pos) : Class.ctorParamOf(cm, idx, pos))
+  }
+
+  public Annotation[] getAnnotations() {
+    int n = declared ? Class.paramAnnCountOf(cm, true, idx, pos) : Class.ctorParamAnnCountOf(cm, idx, pos)
+    Annotation[] out = new Annotation[n]
+    for (int i = 0 : i < n : i++) {
+      out[i] = declared ? new Annotation(Class.paramAnnAtOf(cm, true, idx, pos, i))
+          : new Annotation(Class.ctorParamAnnAtOf(cm, idx, pos, i))
+    }
+    return out
+  }
+}
+
 // ---- Class ---------------------------------------------------------------
 
 /* A class, or an interface, or a primitive type, or the one array class every
@@ -459,6 +500,8 @@ class Class {
   static native int fieldAnnCountOf(long cm, boolean declared, int i)
   static native long fieldAnnAtOf(long cm, boolean declared, int i, int at)
   static native int methodAnnCountOf(long cm, boolean declared, int i)
+  static native String paramNameOf(long cm, boolean declared, int i, int p)
+  static native String ctorParamNameOf(long cm, int i, int p)
   static native int paramAnnCountOf(long cm, boolean declared, int i, int p)
   static native long paramAnnAtOf(long cm, boolean declared, int i, int p, int at)
   static native int ctorAnnCountOf(long cm, int i)
@@ -1046,6 +1089,16 @@ class Method {
     return out
   }
 
+  /* Java's getParameters: the parameters of this method, in order. */
+  public Parameter[] getParameters() {
+    int n = getParameterCount()
+    Parameter[] out = new Parameter[n]
+    for (int i = 0 : i < n : i++) {
+      out[i] = new Parameter(cm, declared, idx, i)
+    }
+    return out
+  }
+
   public Object invoke(Object obj, Object... args) {
     return Class.methodInvokeOf(cm, declared, idx, obj, args)
   }
@@ -1147,6 +1200,15 @@ class Constructor {
         list[i] = new Annotation(Class.ctorParamAnnAtOf(cm, idx, p, i))
       }
       out[p] = list
+    }
+    return out
+  }
+
+  public Parameter[] getParameters() {
+    int n = getParameterCount()
+    Parameter[] out = new Parameter[n]
+    for (int i = 0 : i < n : i++) {
+      out[i] = new Parameter(cm, false, idx, i)
     }
     return out
   }

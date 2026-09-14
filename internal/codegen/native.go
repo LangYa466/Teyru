@@ -175,6 +175,8 @@ var nativeTable = map[string]nativeFn{
 	"Class.fieldAnnAtOf(J,Z,I,I)":             {fn: "ty_field_annat"},
 	"Class.methodAnnCountOf(J,Z,I)":           {fn: "ty_method_anncount"},
 	"Class.paramAnnCountOf(J,Z,I,I)":          {fn: "ty_method_paramanncount"},
+	"Class.paramNameOf(J,Z,I,I)":              {fn: "ty_method_paramname"},
+	"Class.ctorParamNameOf(J,I,I)":            {fn: "ty_ctor_paramname"},
 	"Class.paramAnnAtOf(J,Z,I,I,I)":           {fn: "ty_method_paramannat"},
 	"Class.methodAnnAtOf(J,Z,I,I)":            {fn: "ty_method_annat"},
 	"Class.ctorAnnCountOf(J,I)":               {fn: "ty_ctor_anncount"},

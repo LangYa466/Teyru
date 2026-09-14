@@ -321,6 +321,15 @@ int32_t ty_method_anncount(int64_t cm, int32_t declared, int32_t i) {
    index -- constructors are listed in the table but counted separately -- so
    the record is reached through the same lookup the other constructor
    accessors use. */
+/* A parameter's name, which the emitter writes down: a route binds a request
+   parameter whose name is the one the parameter was written with. */
+tystr *ty_method_paramname(int64_t cm, int32_t declared, int32_t i, int32_t p) {
+  const tymethod *m = method_at(T(cm), declared, i);
+  if (!m || !m->pnames || p < 0 || p >= m->nparams) return NULL;
+  const char *n = m->pnames[p];
+  return n ? ty_str_new(n, (int64_t)strlen(n)) : NULL;
+}
+
 /* A parameter's annotations, which is where a @Value or an @Autowired written
    on a parameter is read from. */
 int32_t ty_method_paramanncount(int64_t cm, int32_t declared, int32_t i, int32_t p) {
@@ -340,6 +349,13 @@ int64_t ty_method_paramannat(int64_t cm, int32_t declared, int32_t i, int32_t p,
 /* A constructor's parameter annotations, reached through the constructor
    lookup rather than the method table: a constructor's index is not a
    method-table index. */
+tystr *ty_ctor_paramname(int64_t cm, int32_t i, int32_t p) {
+  const tymethod *m = ctor_at(T(cm), i);
+  if (!m || !m->pnames || p < 0 || p >= m->nparams) return NULL;
+  const char *n = m->pnames[p];
+  return n ? ty_str_new(n, (int64_t)strlen(n)) : NULL;
+}
+
 int32_t ty_ctor_paramanncount(int64_t cm, int32_t i, int32_t p) {
   const tymethod *m = ctor_at(T(cm), i);
   if (!m || !m->pnannos || p < 0 || p >= m->nparams) return 0;

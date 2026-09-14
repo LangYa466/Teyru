@@ -121,6 +121,11 @@ typedef struct tymethod {
      @Value and @Autowired are read from. */
   const tyannotation *const *pannos;
   const int32_t *pnannos;
+  /* the parameter names, which is what Java keeps when a program is compiled
+     with -parameters and what a handler binding a request reads a parameter
+     from: a route's @RequestParam takes the name the parameter was written
+     with unless the annotation says otherwise. */
+  const char *const *pnames;
 } tymethod;
 
 struct tyclass {
@@ -477,11 +482,13 @@ int32_t ty_field_anncount(int64_t cm, int32_t declared, int32_t i);
 int64_t ty_field_annat(int64_t cm, int32_t declared, int32_t i, int32_t at);
 int32_t ty_method_anncount(int64_t cm, int32_t declared, int32_t i);
 int32_t ty_method_paramanncount(int64_t cm, int32_t declared, int32_t i, int32_t p);
+tystr *ty_method_paramname(int64_t cm, int32_t declared, int32_t i, int32_t p);
 int64_t ty_method_paramannat(int64_t cm, int32_t declared, int32_t i, int32_t p, int32_t at);
 int64_t ty_method_annat(int64_t cm, int32_t declared, int32_t i, int32_t at);
 int32_t ty_ctor_anncount(int64_t cm, int32_t i);
 int64_t ty_ctor_annat(int64_t cm, int32_t i, int32_t at);
 int32_t ty_ctor_paramanncount(int64_t cm, int32_t i, int32_t p);
+tystr *ty_ctor_paramname(int64_t cm, int32_t i, int32_t p);
 int64_t ty_ctor_paramannat(int64_t cm, int32_t i, int32_t p, int32_t at);
 
 /* forName: the name is matched against the table the call site passes -- the
