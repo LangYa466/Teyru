@@ -100,16 +100,14 @@ interface BeanInjector {
 
 class BeanDefinition {
   public String name
+  // type is the bean's class. A getBean(SomeType.class) matches it with
+  // Class.isAssignableFrom, which is how a lookup by interface works: the bean's
+  // own class, a superclass, or an interface it implements.
   public Class type
   public BeanFactory factory
   public BeanInjector injector
   public boolean singleton = true
   public boolean primary = false
-  // types is every type name this bean satisfies -- its own class, its
-  // superclasses and their interfaces, written out by the compiler. A
-  // getBean(SomeType.class) matches against it, which is how a lookup by
-  // interface works in a language with no runtime subtyping of classes.
-  public String[] types
   // instance is the bean once it exists. A singleton is built once; a
   // prototype is built per lookup and never stored here.
   public Object instance
@@ -119,32 +117,26 @@ class BeanDefinition {
   public boolean creating = false
 }
 
-// BeanRegistry is what the compiler's generated class fills in. Its static
-// initializer runs before main's body does (the entry sequence initializes
-// every class the program declares), so a context created anywhere in a program
-// already sees every bean.
+// BeanRegistry is what the compiler's generated class fills in: the classes
+// that carry a component annotation. There is no classpath to scan here, so the
+// compiler's list is what the container knows about; everything else about a
+// bean -- its name, its scope, its constructor, its @Autowired fields, its
+// @Bean methods -- is read off the class itself (lib/28_container_reflect.teyru),
+// which is what Spring does.
 class BeanRegistry {
-  private static List<BeanDefinition> defs = new ArrayList<BeanDefinition>()
+  private static List<Class> classes = new ArrayList<Class>()
   private static List<Route> routeDefs = new ArrayList<Route>()
 
-  public static void define(String name, Class type, BeanFactory factory, BeanInjector injector, boolean singleton, boolean primary, String[] types) {
-    BeanDefinition d = new BeanDefinition()
-    d.name = name
-    d.type = type
-    d.factory = factory
-    d.injector = injector
-    d.singleton = singleton
-    d.primary = primary
-    d.types = types
-    defs.add(d)
+  public static void register(Class type) {
+    classes.add(type)
   }
 
-  public static List<BeanDefinition> definitions() {
-    return defs
+  public static List<Class> registered() {
+    return classes
   }
 
   public static int count() {
-    return defs.size()
+    return classes.size()
   }
 
   // route records a controller mapping. The handler the compiler generates
@@ -202,14 +194,19 @@ class ApplicationContext {
       return
     }
     refreshed = true
-    List<BeanDefinition> defs = BeanRegistry.definitions()
-    for (BeanDefinition d : defs) {
-      BeanDefinition prev = byName.get(d.name)
-      if (prev != null) {
-        throw new IllegalStateException("two beans named " + d.name)
+    // Each registered class answers with the beans it declares: itself, and one
+    // per @Bean method when it is a @Configuration class.
+    for (Class c : BeanRegistry.registered()) {
+      BeanDefinition[] defs = BeanScanner.all(c)
+      for (int i = 0 : i < defs.length : i++) {
+        BeanDefinition d = defs[i]
+        BeanDefinition prev = byName.get(d.name)
+        if (prev != null) {
+          throw new IllegalStateException("two beans named " + d.name)
+        }
+        byName.put(d.name, d)
+        order.add(d.name)
       }
-      byName.put(d.name, d)
-      order.add(d.name)
     }
     for (String n : order) {
       BeanDefinition d = byName.get(n)
@@ -249,13 +246,12 @@ class ApplicationContext {
   // Spring refuses it; so does this, at lookup time, since which beans share a
   // type is a whole-program fact the compiler could also check.
   public Object getBean(Class type, String qualifier) {
-    String want = type.getName()
     BeanDefinition found = null
     for (String n : order) {
       BeanDefinition d = byName.get(n)
       // `==` on strings is reference comparison, as in Java, so the names are
       // compared with equals: getName() builds a fresh string on each call.
-      if (implementsType(d, want) == false) {
+      if (implementsType(d, type) == false) {
         continue
       }
       if (qualifier.isEmpty() == false) {
@@ -268,12 +264,12 @@ class ApplicationContext {
         return resolve(n)
       }
       if (found != null) {
-        throw new IllegalStateException("two beans of type " + want + ": " + found.name + " and " + d.name)
+        throw new IllegalStateException("two beans of type " + type.getName() + ": " + found.name + " and " + d.name)
       }
       found = d
     }
     if (found == null) {
-      throw new IllegalStateException("no bean of type " + want)
+      throw new IllegalStateException("no bean of type " + type.getName())
     }
     return resolve(found.name)
   }
@@ -282,19 +278,27 @@ class ApplicationContext {
     return resolve(name)
   }
 
-  // implementsType reports whether a bean's type or one of its supertypes is
-  // the named type. The list is what the compiler wrote down when it registered
-  // the bean.
-  private boolean implementsType(BeanDefinition d, String want) {
-    if (d.types == null) {
-      return d.type.getName().equals(want)
+  // implementsType reports whether a bean satisfies a type, which is what
+  // Class.isAssignableFrom answers: its own class, a superclass, or an
+  // interface it implements.
+  private boolean implementsType(BeanDefinition d, Class want) {
+    if (d.type == null) {
+      return false
     }
-    for (String t : d.types) {
-      if (t.equals(want)) {
-        return true
-      }
+    if (want.isAssignableFrom(d.type)) {
+      return true
     }
-    return false
+    // a bean of a primitive type answers a lookup for its box and the other way
+    // round, which is how Spring resolves a bean of type int for an
+    // application that asks for Integer
+    return ContainerConvert.boxOf(want).equals(d.type) || want.equals(ContainerConvert.boxOf(d.type))
+  }
+
+  // resolveValue is a @Value: the property, or the fallback the annotation
+  // names, converted to the type of the field or parameter it is written on.
+  public Object resolveValue(String[] spec, Class type) {
+    String raw = getProperty(spec[0], spec[1])
+    return ContainerConvert.to(raw, type)
   }
 
   public boolean containsBean(String name) {
@@ -309,3 +313,63 @@ class ApplicationContext {
     return order.size()
   }
 }
+
+// ContainerConvert turns a property's text into the type a @Value is written
+// on. Spring does this with its conversion service; the set of types is the one
+// a property can meaningfully hold.
+class ContainerConvert {
+  public static Object to(String raw, Class type) {
+    if (type.equals(String.class)) {
+      return raw
+    }
+    if (type.equals(int.class) || type.equals(Integer.class)) {
+      return Integer.parseInt(raw)
+    }
+    if (type.equals(long.class) || type.equals(Long.class)) {
+      return Long.parseLong(raw)
+    }
+    if (type.equals(short.class) || type.equals(Short.class)) {
+      return Short.parseShort(raw)
+    }
+    if (type.equals(byte.class) || type.equals(Byte.class)) {
+      return Byte.parseByte(raw)
+    }
+    if (type.equals(double.class) || type.equals(Double.class)) {
+      return Double.parseDouble(raw)
+    }
+    if (type.equals(float.class) || type.equals(Float.class)) {
+      return Float.parseFloat(raw)
+    }
+    if (type.equals(boolean.class) || type.equals(Boolean.class)) {
+      return Boolean.parseBoolean(raw)
+    }
+    if (type.equals(char.class) || type.equals(Character.class)) {
+      return raw.charAt(0)
+    }
+    throw new IllegalStateException("a @Value cannot be read as " + type.getName())
+  }
+
+  // boxOf answers the box of a primitive type and the primitive of a box, and
+  // the type itself for anything else. It is what makes a bean of type int and
+  // a lookup for Integer the same question.
+  public static Class boxOf(Class type) {
+    if (type.equals(Integer.TYPE)) { return Integer.class }
+    if (type.equals(Long.TYPE)) { return Long.class }
+    if (type.equals(Double.TYPE)) { return Double.class }
+    if (type.equals(Float.TYPE)) { return Float.class }
+    if (type.equals(Short.TYPE)) { return Short.class }
+    if (type.equals(Byte.TYPE)) { return Byte.class }
+    if (type.equals(Character.TYPE)) { return Character.class }
+    if (type.equals(Boolean.TYPE)) { return Boolean.class }
+    if (type.equals(Integer.class)) { return Integer.TYPE }
+    if (type.equals(Long.class)) { return Long.TYPE }
+    if (type.equals(Double.class)) { return Double.TYPE }
+    if (type.equals(Float.class)) { return Float.TYPE }
+    if (type.equals(Short.class)) { return Short.TYPE }
+    if (type.equals(Byte.class)) { return Byte.TYPE }
+    if (type.equals(Character.class)) { return Character.TYPE }
+    if (type.equals(Boolean.class)) { return Boolean.TYPE }
+    return type
+  }
+}
+

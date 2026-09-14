@@ -352,8 +352,11 @@ func (e *Emitter) emitMethodTable(cl *ast.Class) string {
 	// The parameter tables are written first: a table written into the middle
 	// of the initializer below would be a declaration inside braces, which is
 	// not C.
+	// The tables of one method are keyed by its position in the list rather than
+	// by its signature: the signature omits what an array's element type is, so
+	// copyOf(int[], int) and copyOf(long[], int) have the same one.
 	var entries []string
-	for _, m := range ms {
+	for mi, m := range ms {
 		e.emitInvoker(cl, m)
 		params := "NULL"
 		if len(m.Params) > 0 {
@@ -378,11 +381,30 @@ func (e *Emitter) emitMethodTable(cl *ast.Class) string {
 		if m.IsCtor {
 			ret = "&cls_" + mangle(m.Owner.Full)
 		}
-		anns, nannos := e.emitAnnoTable(mangle(cl.Full)+"_m_"+mangle(m.Name)+"_"+mangle(util.Signature(m.Name, m.Params)), methodAnnos(m))
+		suffix := fmt.Sprintf("%s_m%d", mangle(cl.Full), mi)
+		anns, nannos := e.emitAnnoTable(suffix, methodAnnos(m))
+		// a parameter's own annotations, which is where @Value and @Autowired
+		// on a constructor or method parameter are written
+		pannos, pnannos := "NULL", "NULL"
+		if len(m.ParamAnnos) > 0 {
+			var lists, counts []string
+			for i := range m.Params {
+				name, n := "NULL", 0
+				if i < len(m.ParamAnnos) {
+					name, n = e.emitAnnoTable(fmt.Sprintf("%s_p%d", suffix, i), m.ParamAnnos[i])
+				}
+				lists = append(lists, name)
+				counts = append(counts, fmt.Sprint(n))
+			}
+			pannos = "pannos_" + suffix
+			pnannos = "pnannos_" + suffix
+			fmt.Fprintf(&e.meta, "static const tyannotation *const %s[] = {%s};\n", pannos, strings.Join(lists, ", "))
+			fmt.Fprintf(&e.meta, "static const int32_t %s[] = {%s};\n", pnannos, strings.Join(counts, ", "))
+		}
 		entries = append(entries, fmt.Sprintf(
-			"  {.name = %q, .fn = (void*)%s, .owner = &cls_%s, .ret = %s, .params = %s, .nparams = %d, .mods = %d, .kind = %s, .primret = %d, .annos = %s, .nannos = %d},\n",
+			"  {.name = %q, .fn = (void*)%s, .owner = &cls_%s, .ret = %s, .params = %s, .nparams = %d, .mods = %d, .kind = %s, .primret = %d, .annos = %s, .nannos = %d, .pannos = %s, .pnannos = %s},\n",
 			m.Name, e.invokerName(m), mangle(m.Owner.Full), ret, params, len(m.Params),
-			javaMods(m.Mods), kind, primKindOf(m.Result), anns, nannos))
+			javaMods(m.Mods), kind, primKindOf(m.Result), anns, nannos, pannos, pnannos))
 	}
 	name := "mds_" + mangle(cl.Full)
 	fmt.Fprintf(&e.meta, "static const tymethod %s[] = {\n%s};\n", name, strings.Join(entries, ""))
