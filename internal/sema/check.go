@@ -5,9 +5,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/LangYa466/Teyru/internal/ast"
-	"github.com/LangYa466/Teyru/internal/source"
-	"github.com/LangYa466/Teyru/internal/util"
+	"github.com/teyru-lang/Teyru/internal/ast"
+	"github.com/teyru-lang/Teyru/internal/source"
+	"github.com/teyru-lang/Teyru/internal/util"
 )
 
 // methodCtx carries the local scope of one method body.

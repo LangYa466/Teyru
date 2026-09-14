@@ -15,8 +15,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LangYa466/Teyru/internal/driver"
-	"github.com/LangYa466/Teyru/internal/mod"
+	"github.com/teyru-lang/Teyru/internal/driver"
+	"github.com/teyru-lang/Teyru/internal/mod"
 )
 
 // root is the module path all of this is about, named once.

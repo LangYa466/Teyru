@@ -1,3 +1,3 @@
-module github.com/LangYa466/Teyru
+module github.com/teyru-lang/Teyru
 
 go 1.26

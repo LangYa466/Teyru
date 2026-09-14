@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LangYa466/Teyru/internal/driver"
-	"github.com/LangYa466/Teyru/internal/mod"
+	"github.com/teyru-lang/Teyru/internal/driver"
+	"github.com/teyru-lang/Teyru/internal/mod"
 )
 
 const usage = `teyru - the Teyru compiler

@@ -18,12 +18,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/LangYa466/Teyru"
+    "url": "https://github.com/teyru-lang/Teyru"
   },
   "bugs": {
-    "url": "https://github.com/LangYa466/Teyru/issues"
+    "url": "https://github.com/teyru-lang/Teyru/issues"
   },
-  "homepage": "https://github.com/LangYa466/Teyru",
+  "homepage": "https://github.com/teyru-lang/Teyru",
   "contributes": {
     "languages": [
       {

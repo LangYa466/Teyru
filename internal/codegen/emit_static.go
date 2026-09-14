@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/LangYa466/Teyru/internal/ast"
+	"github.com/teyru-lang/Teyru/internal/ast"
 )
 
 // staticName is the C global holding a class's static field.

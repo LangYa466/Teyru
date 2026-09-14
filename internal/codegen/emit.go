@@ -10,9 +10,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/LangYa466/Teyru/internal/ast"
-	"github.com/LangYa466/Teyru/internal/sema"
-	"github.com/LangYa466/Teyru/internal/util"
+	"github.com/teyru-lang/Teyru/internal/ast"
+	"github.com/teyru-lang/Teyru/internal/sema"
+	"github.com/teyru-lang/Teyru/internal/util"
 )
 
 // Emitter produces one C translation unit for a whole program.

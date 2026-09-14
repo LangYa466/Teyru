@@ -13,15 +13,15 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/LangYa466/Teyru/internal/ast"
-	"github.com/LangYa466/Teyru/internal/codegen"
-	"github.com/LangYa466/Teyru/internal/mod"
-	"github.com/LangYa466/Teyru/internal/parser"
-	tyrt "github.com/LangYa466/Teyru/internal/runtime"
-	"github.com/LangYa466/Teyru/internal/sema"
-	"github.com/LangYa466/Teyru/internal/source"
-	"github.com/LangYa466/Teyru/internal/util"
-	"github.com/LangYa466/Teyru/lib"
+	"github.com/teyru-lang/Teyru/internal/ast"
+	"github.com/teyru-lang/Teyru/internal/codegen"
+	"github.com/teyru-lang/Teyru/internal/mod"
+	"github.com/teyru-lang/Teyru/internal/parser"
+	tyrt "github.com/teyru-lang/Teyru/internal/runtime"
+	"github.com/teyru-lang/Teyru/internal/sema"
+	"github.com/teyru-lang/Teyru/internal/source"
+	"github.com/teyru-lang/Teyru/internal/util"
+	"github.com/teyru-lang/Teyru/lib"
 )
 
 // Options configures a compilation.

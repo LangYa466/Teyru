@@ -7,8 +7,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/LangYa466/Teyru/internal/ast"
-	"github.com/LangYa466/Teyru/internal/source"
+	"github.com/teyru-lang/Teyru/internal/ast"
+	"github.com/teyru-lang/Teyru/internal/source"
 )
 
 // This file reads the one Lombok setting Teyru needs a configuration file for:

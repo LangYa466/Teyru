@@ -3,8 +3,8 @@ package sema
 import (
 	"sort"
 
-	"github.com/LangYa466/Teyru/internal/ast"
-	"github.com/LangYa466/Teyru/internal/source"
+	"github.com/teyru-lang/Teyru/internal/ast"
+	"github.com/teyru-lang/Teyru/internal/source"
 )
 
 // Gson's object binding, resolved by the compiler.

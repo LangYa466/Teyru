@@ -3,7 +3,7 @@ package util
 import (
 	"testing"
 
-	"github.com/LangYa466/Teyru/internal/ast"
+	"github.com/teyru-lang/Teyru/internal/ast"
 )
 
 func TestMangle(t *testing.T) {
