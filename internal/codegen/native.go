@@ -168,6 +168,7 @@ var nativeTable = map[string]nativeFn{
 	"Class.newInstOf(J)":                      {fn: "ty_class_newinst"},
 	"Class.enumCountOf(J)":                    {fn: "ty_class_enumcount"},
 	"Class.enumAtOf(J,I)":                     {fn: "ty_class_enumat"},
+	"Sha1.of(A)":                              {fn: "ty_sha1_bytes"},
 	"Class.annCountOf(J)":                     {fn: "ty_class_anncount"},
 	"Class.annAtOf(J,I)":                      {fn: "ty_class_annat"},
 	"Class.fieldAnnCountOf(J,Z,I)":            {fn: "ty_field_anncount"},

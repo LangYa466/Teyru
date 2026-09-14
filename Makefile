@@ -17,8 +17,13 @@ build:
 	$(GO) build -trimpath -o $(BIN) ./cmd/teyru
 
 ## test: everything (unit + end-to-end + diagnostics)
+#
+# The deadline is raised because the suite compiles and links every program in
+# tests/programs, and Go's default ten minutes stopped being enough once the
+# suite passed a hundred and fifty of them: a package that hits the deadline is
+# reported as a failure with no test named, which reads like a real one.
 test: submodule
-	$(GO) test ./... -count=1
+	$(GO) test ./... -count=1 -timeout 30m
 
 ## submodule: the end-to-end suite lives in teyru-lang/tests, mounted at tests/
 submodule:

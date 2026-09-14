@@ -1,0 +1,312 @@
+package teyru
+
+// WebSocket, as RFC 6455 defines it: the upgrade handshake, the frame codec, and
+// the session a program sends and receives on.
+//
+// The handshake is the part a client checks: the server answers the
+// Sec-WebSocket-Key the client sent with the base64 of the SHA-1 of that key and
+// a fixed string, and a client that does not see the answer it computed itself
+// closes the connection. That string is below, and the hash is in the runtime
+// (tyrt_net.c) because the library has no other use for one.
+//
+// A frame is a byte of flags and opcode, a length that may take one, three or
+// nine bytes, a mask a client always sends, and the payload. The payloads
+// matter more than the flags here: a text frame is a message, a ping is
+// something to answer with a pong, a close ends the conversation, and a
+// fragmented message is several frames whose first one is not final.
+
+// Sha1 is the one hash the handshake needs, kept out of the public surface: a
+// program that wants a hash can write one, and this exists because RFC 6455
+// asks for this one.
+class Sha1 {
+  static native byte[] of(byte[] data)
+}
+
+// WebSocketSession is one connection after the upgrade: what a program sends on
+// and what tells it the connection ended.
+class WebSocketSession {
+  private Socket socket
+  private SocketOutputStream out
+  private boolean open = true
+  private String path
+
+  public WebSocketSession(Socket socket, SocketOutputStream out, String path) {
+    this.socket = socket
+    this.out = out
+    this.path = path
+  }
+
+  public String getPath() {
+    return path
+  }
+
+  public boolean isOpen() {
+    return open
+  }
+
+  // send writes a text frame. A message that arrives whole is sent whole, which
+  // is what a caller with a String has.
+  public void send(String text) {
+    if (open == false) {
+      throw new IllegalStateException("the WebSocket is closed")
+    }
+    out.write(WebSocketFrame.encode(WebSocketFrame.TEXT, text.getBytes()))
+    out.flush()
+  }
+
+  public void send(byte[] data) {
+    if (open == false) {
+      throw new IllegalStateException("the WebSocket is closed")
+    }
+    out.write(WebSocketFrame.encode(WebSocketFrame.BINARY, data))
+    out.flush()
+  }
+
+  // ping and pong are the control frames a peer answers with a pong. A server
+  // that wants to know the other end is there sends one and waits.
+  public void ping(byte[] data) {
+    out.write(WebSocketFrame.encode(WebSocketFrame.PING, data == null ? new byte[0] : data))
+    out.flush()
+  }
+
+  // close sends the closing frame and remembers that the session is over, so a
+  // send after it says so rather than writing to a socket the peer closed.
+  public void close() {
+    if (open == false) {
+      return
+    }
+    open = false
+    out.write(WebSocketFrame.encode(WebSocketFrame.CLOSE, new byte[0]))
+    out.flush()
+  }
+
+  // ended is what the server calls when the peer closed, so a handler's onClose
+  // sees a session that is no longer open.
+  public void ended() {
+    open = false
+  }
+}
+
+// WebSocketHandler is what a program implements to answer a WebSocket. The four
+// methods are the four things that can happen: the connection opens, a message
+// arrives (text or binary), the connection closes. A handler that does not care
+// about one of them leaves it empty, which is why the interface has all four
+// rather than a listener with callbacks a program registers.
+interface WebSocketHandler {
+  void onOpen(WebSocketSession session)
+  void onMessage(WebSocketSession session, String text)
+  void onBinary(WebSocketSession session, byte[] data)
+  void onClose(WebSocketSession session)
+}
+
+// WebSocketFrame is one frame, read from a stream or written to it.
+class WebSocketFrame {
+  public static final int CONT = 0x0
+  public static final int TEXT = 0x1
+  public static final int BINARY = 0x2
+  public static final int CLOSE = 0x8
+  public static final int PING = 0x9
+  public static final int PONG = 0xa
+  // 125 is the largest payload a frame's own length field holds; beyond it the
+  // length moves into two or eight bytes, and 126 and 127 say which.
+  public static final int SHORT_MAX = 125
+
+  public boolean fin = true
+  public int opcode = TEXT
+  public byte[] payload = new byte[0]
+
+  public boolean isControl() {
+    return opcode >= 0x8
+  }
+
+  // read reads one frame: the flags, the length, the mask a client always sends,
+  // and the payload it unmasked. The masking is what the protocol asks for from
+  // a client and never from a server, and it is the same operation in both
+  // directions: the four bytes repeat over the payload.
+  public static WebSocketFrame read(SocketInputStream in) {
+    int first = in.read()
+    if (first < 0) {
+      return null
+    }
+    int second = in.read()
+    if (second < 0) {
+      return null
+    }
+    WebSocketFrame f = new WebSocketFrame()
+    f.fin = (first & 0x80) != 0
+    f.opcode = first & 0x0f
+    boolean masked = (second & 0x80) != 0
+    long len = second & 0x7f
+    if (len == 126) {
+      len = ((long) in.read() << 8) | (long) in.read()
+    } else if (len == 127) {
+      len = 0
+      for (int i = 0 : i < 8 : i++) {
+        len = (len << 8) | (long) in.read()
+      }
+    }
+    byte[] mask = new byte[4]
+    if (masked) {
+      in.readFully(mask, 0, mask.length)
+    }
+    if (len < 0 || len > 64 * 1024 * 1024) {
+      throw new IllegalStateException("a WebSocket frame of " + len + " bytes is not one this server reads")
+    }
+    f.payload = new byte[(int) len]
+    in.readFully(f.payload, 0, f.payload.length)
+    if (masked) {
+      for (int i = 0 : i < f.payload.length : i++) {
+        f.payload[i] = (byte) (f.payload[i] ^ mask[i % 4])
+      }
+    }
+    return f
+  }
+
+  // encode renders one frame. A server's frames are not masked, and its payload
+  // is sent whole, so the length is what it is.
+  public static byte[] encode(int opcode, byte[] payload) {
+    byte[] data = payload == null ? new byte[0] : payload
+    int extra = data.length <= SHORT_MAX ? 0 : (data.length <= 65535 ? 2 : 8)
+    byte[] out = new byte[2 + extra + data.length]
+    out[0] = (byte) (0x80 | (opcode & 0x0f))
+    if (extra == 0) {
+      out[1] = (byte) data.length
+    } else if (extra == 2) {
+      out[1] = (byte) 126
+      out[2] = (byte) ((data.length >> 8) & 0xff)
+      out[3] = (byte) (data.length & 0xff)
+    } else {
+      out[1] = (byte) 127
+      long n = data.length
+      for (int i = 0 : i < 8 : i++) {
+        out[2 + i] = (byte) ((n >> ((7 - i) * 8)) & 0xff)
+      }
+    }
+    for (int i = 0 : i < data.length : i++) {
+      out[2 + extra + i] = data[i]
+    }
+    return out
+  }
+
+  // text is a frame's payload read back as the text of a message, which is what
+  // a text frame carries.
+  public static String text(WebSocketFrame f) {
+    return WebSocketSessionText.of(f.payload)
+  }
+}
+
+// WebSocketSessionText turns a frame's payload into the text of a message. A
+// text frame is UTF-8, so the bytes are read back as one.
+class WebSocketSessionText {
+  public static String of(byte[] data) {
+    return Net.stringFrom(data, 0, data.length)
+  }
+}
+
+// WebSocketUpgrade is the handshake, both halves of it: whether a request is
+// asking for the upgrade, and the response that answers it.
+class WebSocketUpgrade {
+  // The magic string RFC 6455 appends to the client's key before hashing it.
+  public static final String GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+  // wanted reports whether a request asks for a WebSocket on this path. The
+  // three headers are the ones a client must send: the upgrade, the connection
+  // token, and a version this server speaks.
+  public static boolean wanted(HttpRequest req, String path, boolean handled) {
+    if (handled == false || req.path.equals(path) == false) {
+      return false
+    }
+    if (req.header("Upgrade").toLowerCase().indexOf("websocket") < 0) {
+      return false
+    }
+    if (req.header("Connection").toLowerCase().indexOf("upgrade") < 0) {
+      return false
+    }
+    return req.header("Sec-WebSocket-Key").isEmpty() == false
+  }
+
+  // accept is the Sec-WebSocket-Accept a client checks: the base64 of the SHA-1
+  // of the key it sent with the magic string appended.
+  public static String accept(String key) {
+    return Base64.encodeToString(Sha1.of((key + GUID).getBytes()))
+  }
+
+  // response is the 101 that switches the connection over.
+  public static String response(String key) {
+    return "HTTP/1.1 101 Switching Protocols\r\n" +
+        "Upgrade: websocket\r\n" +
+        "Connection: Upgrade\r\n" +
+        "Sec-WebSocket-Accept: " + accept(key) + "\r\n" +
+        "\r\n"
+  }
+}
+
+// WebSocketConnection runs one WebSocket: the frames until the peer closes, with
+// the control frames answered here and the messages handed to the handler.
+class WebSocketConnection {
+  // run reads frames until the connection ends. A ping is answered with a pong
+  // and a close with a close, which is what the protocol asks of both ends; a
+  // frame in the middle of a fragmented message is added to the message before
+  // it, which is what a client that sends a large message does.
+  public static void run(Socket socket, SocketInputStream in, SocketOutputStream out,
+      WebSocketSession session, WebSocketHandler handler) {
+    StringBuilder message = new StringBuilder()
+    byte[] binary = new byte[0]
+    int opcode = 0
+    handler.onOpen(session)
+    while (session.isOpen()) {
+      WebSocketFrame f = WebSocketFrame.read(in)
+      if (f == null) {
+        break
+      }
+      if (f.opcode == WebSocketFrame.PING) {
+        out.write(WebSocketFrame.encode(WebSocketFrame.PONG, f.payload))
+        out.flush()
+        continue
+      }
+      if (f.opcode == WebSocketFrame.PONG) {
+        continue
+      }
+      if (f.opcode == WebSocketFrame.CLOSE) {
+        session.ended()
+        out.write(WebSocketFrame.encode(WebSocketFrame.CLOSE, new byte[0]))
+        out.flush()
+        break
+      }
+      if (f.opcode == WebSocketFrame.TEXT || f.opcode == WebSocketFrame.BINARY) {
+        opcode = f.opcode
+        message = new StringBuilder()
+        binary = new byte[0]
+      }
+      if (opcode == WebSocketFrame.BINARY) {
+        binary = join(binary, f.payload)
+      } else {
+        message.append(WebSocketFrame.text(f))
+      }
+      if (f.fin == false) {
+        continue
+      }
+      if (opcode == WebSocketFrame.BINARY) {
+        handler.onBinary(session, binary)
+        binary = new byte[0]
+      } else {
+        handler.onMessage(session, message.toString())
+        message = new StringBuilder()
+      }
+      opcode = 0
+    }
+    session.ended()
+    handler.onClose(session)
+  }
+
+  static byte[] join(byte[] have, byte[] more) {
+    byte[] out = new byte[have.length + more.length]
+    for (int i = 0 : i < have.length : i++) {
+      out[i] = have[i]
+    }
+    for (int i = 0 : i < more.length : i++) {
+      out[have.length + i] = more[i]
+    }
+    return out
+  }
+}

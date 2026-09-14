@@ -80,6 +80,87 @@ class HttpRequest {
   public String body = ""
   private List<String> headerNames = new ArrayList<String>()
   private List<String> headerValues = new ArrayList<String>()
+  private List<String> cookieNames = new ArrayList<String>()
+  private List<String> cookieValues = new ArrayList<String>()
+  private List<String> formNames = new ArrayList<String>()
+  private List<String> formValues = new ArrayList<String>()
+
+  // cookie answers the value of a cookie, or "" when the request carries none.
+  // A cookie's value is everything up to the first "; ", which is how a browser
+  // writes the pairs of a Cookie header.
+  public String cookie(String name) {
+    for (int i = 0 : i < cookieNames.size() : i++) {
+      if (cookieNames.get(i).equals(name)) {
+        return cookieValues.get(i)
+      }
+    }
+    return ""
+  }
+
+  public boolean hasCookie(String name) {
+    return cookie(name).isEmpty() == false
+  }
+
+  public List<String> cookieNames() {
+    return cookieNames
+  }
+
+  // readCookies splits the Cookie header into its pairs. It is separate from the
+  // parser so a request built by hand -- a test, a proxy -- can be given them.
+  public void readCookies() {
+    String raw = header("Cookie")
+    if (raw.isEmpty()) {
+      return
+    }
+    for (String pair : raw.split(";")) {
+      int eq = pair.indexOf('=')
+      if (eq <= 0) {
+        continue
+      }
+      cookieNames.add(pair.substring(0, eq).trim())
+      cookieValues.add(pair.substring(eq + 1).trim())
+    }
+  }
+
+  // readForm reads the body of an application/x-www-form-urlencoded request into
+  // the same table a query string fills, which is what makes @RequestParam read
+  // a form field and a query parameter the same way, as Spring's does.
+  public void readForm() {
+    if (header("Content-Type").toLowerCase().startsWith("application/x-www-form-urlencoded") == false) {
+      return
+    }
+    for (String pair : body.split("&")) {
+      if (pair.isEmpty()) {
+        continue
+      }
+      int eq = pair.indexOf('=')
+      if (eq < 0) {
+        formNames.add(WebUtil.urldecode(pair))
+        formValues.add("")
+        continue
+      }
+      formNames.add(WebUtil.urldecode(pair.substring(0, eq)))
+      formValues.add(WebUtil.urldecode(pair.substring(eq + 1)))
+    }
+  }
+
+  // keepAlive answers whether the connection stays open after this request.
+  // HTTP/1.1 keeps it open unless the client says close; HTTP/1.0 closes unless
+  // the client says keep-alive, which is the one difference between the two
+  // versions that a server has to honour.
+  public boolean keepAlive() {
+    String c = header("Connection").toLowerCase()
+    if (version.equals("HTTP/1.0")) {
+      return c.indexOf("keep-alive") >= 0
+    }
+    return c.indexOf("close") < 0
+  }
+
+  // expectsContinue answers whether the client asked to be told to go ahead
+  // before it sends the body.
+  public boolean expectsContinue() {
+    return header("Expect").toLowerCase().indexOf("100-continue") >= 0
+  }
 
   public void addHeader(String name, String value) {
     headerNames.add(name)
@@ -117,6 +198,10 @@ class HttpRequest {
   }
 
   public String paramOrNull(String name) {
+    String fromForm = formParam(name)
+    if (fromForm != null) {
+      return fromForm
+    }
     if (query.isEmpty()) {
       return null
     }
@@ -138,8 +223,71 @@ class HttpRequest {
     return null
   }
 
+  private String formParam(String name) {
+    for (int i = 0 : i < formNames.size() : i++) {
+      if (formNames.get(i).equals(name)) {
+        return formValues.get(i)
+      }
+    }
+    return null
+  }
+
   public String toString() {
     return method + " " + path + (query.isEmpty() ? "" : "?" + query) + " " + version
+  }
+}
+
+// HttpStatus is the reason phrase for a status code. The response writer used to
+// keep seven of them and call everything else "Unknown", which is not something
+// a client can read: the table below is RFC 9110's, plus the ones that are still
+// in use from the versions before it.
+class HttpStatus {
+  public static String reason(int code) {
+    if (code == 100) { return "Continue" }
+    if (code == 101) { return "Switching Protocols" }
+    if (code == 200) { return "OK" }
+    if (code == 201) { return "Created" }
+    if (code == 202) { return "Accepted" }
+    if (code == 203) { return "Non-Authoritative Information" }
+    if (code == 204) { return "No Content" }
+    if (code == 205) { return "Reset Content" }
+    if (code == 206) { return "Partial Content" }
+    if (code == 300) { return "Multiple Choices" }
+    if (code == 301) { return "Moved Permanently" }
+    if (code == 302) { return "Found" }
+    if (code == 303) { return "See Other" }
+    if (code == 304) { return "Not Modified" }
+    if (code == 307) { return "Temporary Redirect" }
+    if (code == 308) { return "Permanent Redirect" }
+    if (code == 400) { return "Bad Request" }
+    if (code == 401) { return "Unauthorized" }
+    if (code == 402) { return "Payment Required" }
+    if (code == 403) { return "Forbidden" }
+    if (code == 404) { return "Not Found" }
+    if (code == 405) { return "Method Not Allowed" }
+    if (code == 406) { return "Not Acceptable" }
+    if (code == 408) { return "Request Timeout" }
+    if (code == 409) { return "Conflict" }
+    if (code == 410) { return "Gone" }
+    if (code == 411) { return "Length Required" }
+    if (code == 412) { return "Precondition Failed" }
+    if (code == 413) { return "Content Too Large" }
+    if (code == 414) { return "URI Too Long" }
+    if (code == 415) { return "Unsupported Media Type" }
+    if (code == 416) { return "Range Not Satisfiable" }
+    if (code == 417) { return "Expectation Failed" }
+    if (code == 422) { return "Unprocessable Content" }
+    if (code == 426) { return "Upgrade Required" }
+    if (code == 428) { return "Precondition Required" }
+    if (code == 429) { return "Too Many Requests" }
+    if (code == 431) { return "Request Header Fields Too Large" }
+    if (code == 500) { return "Internal Server Error" }
+    if (code == 501) { return "Not Implemented" }
+    if (code == 502) { return "Bad Gateway" }
+    if (code == 503) { return "Service Unavailable" }
+    if (code == 504) { return "Gateway Timeout" }
+    if (code == 505) { return "HTTP Version Not Supported" }
+    return "Unknown"
   }
 }
 
@@ -149,6 +297,12 @@ class HttpResponse {
   public String body = ""
   private List<String> headerNames = new ArrayList<String>()
   private List<String> headerValues = new ArrayList<String>()
+  private List<String> cookieNames = new ArrayList<String>()
+  private List<String> cookieValues = new ArrayList<String>()
+  private List<String> cookieAttrs = new ArrayList<String>()
+  // chunkedBody asks for Transfer-Encoding: chunked rather than a length, which
+  // is what a body of unknown length needs.
+  public boolean chunkedBody = false
 
   public HttpResponse header(String name, String value) {
     headerNames.add(name)
@@ -157,32 +311,90 @@ class HttpResponse {
   }
 
   public String statusText() {
-    if (status == 200) { return "OK" }
-    if (status == 201) { return "Created" }
-    if (status == 204) { return "No Content" }
-    if (status == 400) { return "Bad Request" }
-    if (status == 404) { return "Not Found" }
-    if (status == 405) { return "Method Not Allowed" }
-    if (status == 500) { return "Internal Server Error" }
-    return "Unknown"
+    return HttpStatus.reason(status)
   }
 
   // respond renders the bytes to write: the status line, the headers the
-  // response must carry, then the body. Content-Length is always written,
-  // because a client that is not told how much to read waits for the close and
-  // a keep-alive connection never closes.
+  // response must carry, then the body.
+  //
+  // It is respond("HTTP/1.1", false, false), which is a response that closes:
+  // the caller that knows the request said what its writer needs -- the
+  // protocol version, whether the connection stays open, and whether the method
+  // takes a body -- calls the other one.
   public String respond() {
+    return respond("HTTP/1.1", false, false)
+  }
+
+  // respond is the whole response, and the four things it has to get right:
+  //
+  //   * Content-Length, or a chunked body, so a client knows where the body
+  //     ends; without either it waits for the close.
+  //   * Connection: keep-alive when the request asked for it and the protocol
+  //     allows it, and close otherwise -- a keep-alive a client did not ask for
+  //     is a client waiting for a close that never comes.
+  //   * no body at all for HEAD, which is a response whose headers are the
+  //     answer and whose body the client is not sent.
+  //   * no Content-Length for 204 and 304, which are defined not to have a
+  //     body.
+  public String respond(String version, boolean keepAlive, boolean head) {
+    boolean chunked = chunkedBody && body.length() > 0
     StringBuilder b = new StringBuilder()
-    b.append("HTTP/1.1 ").append(status).append(" ").append(statusText()).append("\r\n")
-    b.append("Content-Type: ").append(contentType).append("\r\n")
-    b.append("Content-Length: ").append(body.length()).append("\r\n")
+    b.append(version.isEmpty() ? "HTTP/1.1" : version).append(" ").append(status).append(" ").append(statusText()).append("\r\n")
+    if (body.length() > 0 || carriesBody()) {
+      b.append("Content-Type: ").append(contentType).append("\r\n")
+    }
+    if (chunked) {
+      b.append("Transfer-Encoding: chunked\r\n")
+    } else if (carriesBody()) {
+      b.append("Content-Length: ").append(body.length()).append("\r\n")
+    }
     for (int i = 0 : i < headerNames.size() : i++) {
       b.append(headerNames.get(i)).append(": ").append(headerValues.get(i)).append("\r\n")
     }
-    b.append("Connection: close\r\n")
+    for (int i = 0 : i < cookieNames.size() : i++) {
+      b.append("Set-Cookie: ").append(cookieNames.get(i)).append("=").append(cookieValues.get(i))
+      if (cookieAttrs.get(i).length() > 0) {
+        b.append("; ").append(cookieAttrs.get(i))
+      }
+      b.append("\r\n")
+    }
+    b.append("Connection: ").append(keepAlive ? "keep-alive" : "close").append("\r\n")
     b.append("\r\n")
-    b.append(body)
-    return b.toString()
+    if (head) {
+      return b.toString()
+    }
+    if (chunked) {
+      return b.toString() + chunked(body)
+    }
+    return b.toString() + body
+  }
+
+  // chunked renders a body as the chunks a client reads until the one of length
+  // zero. Gson's own framing is not wanted here: a body handed over whole is one
+  // chunk, which is what a response of unknown length needs when the length is
+  // not what the writer knows.
+  public static String chunked(String body) {
+    if (body.length() == 0) {
+      return "0\r\n\r\n"
+    }
+    return Integer.toHexString(body.length()) + "\r\n" + body + "\r\n0\r\n\r\n"
+  }
+
+  // carriesBody says whether this status has a body at all, which is what
+  // decides whether Content-Type and Content-Length are written.
+  public boolean carriesBody() {
+    return status != 204 && status != 304 && status >= 200
+  }
+
+  // setCookie writes a Set-Cookie. The attributes are the string a caller wants
+  // after the name and the value -- "Path=/; HttpOnly" -- because that is how
+  // the header reads and there is nothing here that would understand them
+  // better.
+  public HttpResponse setCookie(String name, String value, String attributes) {
+    cookieNames.add(name)
+    cookieValues.add(value)
+    cookieAttrs.add(attributes == null ? "" : attributes)
+    return this
   }
 }
 
@@ -218,6 +430,8 @@ class HttpParser {
       throw new IllegalArgumentException("HTTP/1.1 request without Host")
     }
     req.body = body
+    req.readCookies()
+    req.readForm()
     return req
   }
 
@@ -555,6 +769,25 @@ class HttpServer {
   // Ten seconds is generous for a request that is already written and short
   // enough that a stalled client does not hold the server for the afternoon.
   private int readTimeoutMs = 10000
+  // The WebSockets this server answers, by path. A path is a WebSocket when it
+  // was registered as one, which is what the upgrade checks.
+  private List<String> socketPaths = new ArrayList<String>()
+  private List<WebSocketHandler> socketHandlers = new ArrayList<WebSocketHandler>()
+
+  public HttpServer addWebSocket(String path, WebSocketHandler handler) {
+    socketPaths.add(path)
+    socketHandlers.add(handler)
+    return this
+  }
+
+  private WebSocketHandler socketAt(String path) {
+    for (int i = 0 : i < socketPaths.size() : i++) {
+      if (socketPaths.get(i).equals(path)) {
+        return socketHandlers.get(i)
+      }
+    }
+    return null
+  }
 
   public HttpServer(int port, Router router, ApplicationContext ctx) {
     this.port = port
@@ -661,23 +894,46 @@ class HttpServer {
       // A client that opens a connection and never finishes a request would
       // otherwise hold the only thread there is, forever.
       s.setSoTimeout(readTimeoutMs)
-      String raw = readRequest(s.getInputStream())
-      if (raw == null) {
-        return
-      }
-      HttpResponse res
-      try {
-        res = handle(HttpParser.parse(raw))
-      } catch (IllegalArgumentException e) {
-        // a request the parser refuses is the client's mistake, and the status
-        // that says so is 400
-        res = new HttpResponse()
-        res.status = 400
-        res.body = e.getMessage()
-      }
+      SocketInputStream in = s.getInputStream()
       SocketOutputStream out = s.getOutputStream()
-      out.write(res.respond())
-      out.flush()
+      // One connection answers as many requests as the client keeps sending:
+      // HTTP/1.1 keeps a connection open unless either side says close, and a
+      // browser sends a page and its assets down one.
+      while (true) {
+        String raw = readRequest(in, out)
+        if (raw == null) {
+          return
+        }
+        HttpRequest req = null
+        HttpResponse res
+        try {
+          req = HttpParser.parse(raw)
+          res = handle(req)
+        } catch (IllegalArgumentException e) {
+          // a request the parser refuses is the client's mistake, and the status
+          // that says so is 400
+          res = new HttpResponse()
+          res.status = 400
+          res.body = e.getMessage()
+        }
+        // An upgrade turns the connection into a WebSocket, and a WebSocket
+        // never goes back to being HTTP: the frames are read until the peer
+        // closes, and then the connection ends.
+        WebSocketHandler ws = req == null ? null : socketAt(req.path)
+        if (req != null && WebSocketUpgrade.wanted(req, req.path, ws != null)) {
+          out.write(WebSocketUpgrade.response(req.header("Sec-WebSocket-Key")))
+          out.flush()
+          WebSocketConnection.run(s, in, out, new WebSocketSession(s, out, req.path), ws)
+          return
+        }
+        boolean keep = req != null && req.keepAlive()
+        boolean head = req != null && req.method.equals("HEAD")
+        out.write(res.respond(req == null ? "HTTP/1.1" : req.version, keep, head))
+        out.flush()
+        if (keep == false) {
+          return
+        }
+      }
     } catch (IOException e) {
       // a connection that failed is not a reason to stop serving
     } finally {
@@ -691,7 +947,7 @@ class HttpServer {
   // The body is read by length rather than by line, because a body is bytes and
   // may contain anything -- a line reader would stop at the first CRLF inside
   // it and hand a truncated document to the handler.
-  private String readRequest(SocketInputStream in) {
+  private String readRequest(SocketInputStream in, SocketOutputStream out) {
     StringBuilder head = new StringBuilder()
     while (true) {
       String line = in.readLine()
@@ -706,6 +962,15 @@ class HttpServer {
       head.append(line).append("\r\n")
     }
     String headText = head.toString()
+    // A client that asked to be told to go ahead waits for the answer before it
+    // sends the body, so the answer is written before anything is read.
+    if (expectsContinue(headText)) {
+      out.write("HTTP/1.1 100 Continue\r\n\r\n")
+      out.flush()
+    }
+    if (chunkedBody(headText)) {
+      return headText + "\r\n" + readChunked(in)
+    }
     int len = contentLength(headText)
     if (len <= 0) {
       return headText
@@ -750,25 +1015,136 @@ class HttpServer {
     return -1
   }
 
+  // expectsContinue reads Expect: 100-continue out of a request head.
+  private boolean expectsContinue(String head) {
+    return headerIs(head, "expect", "100-continue")
+  }
+
+  // chunkedBody reads Transfer-Encoding out of a request head.
+  private boolean chunkedBody(String head) {
+    return headerIs(head, "transfer-encoding", "chunked")
+  }
+
+  private boolean headerIs(String head, String name, String want) {
+    for (String line : WebUtil.splitRawLines(head)) {
+      int colon = line.indexOf(":")
+      if (colon <= 0) {
+        continue
+      }
+      if (line.substring(0, colon).trim().toLowerCase().equals(name)) {
+        return line.substring(colon + 1).trim().toLowerCase().indexOf(want) >= 0
+      }
+    }
+    return false
+  }
+
+  // readChunked reads a body whose length arrives in pieces: a line holding the
+  // size in hexadecimal, the bytes, and a line of length zero to end it. The
+  // extensions after a size and the trailers after the last chunk are read and
+  // dropped, which is what a server that does not use them does.
+  private String readChunked(SocketInputStream in) {
+    StringBuilder b = new StringBuilder()
+    while (true) {
+      String line = in.readLine()
+      if (line == null) {
+        break
+      }
+      int semi = line.indexOf(';')
+      String size = (semi >= 0 ? line.substring(0, semi) : line).trim()
+      int n
+      try {
+        n = Integer.parseInt(size, 16)
+      } catch (NumberFormatException e) {
+        break
+      }
+      if (n == 0) {
+        // the trailers end at the blank line, which is what was just read
+        in.readLine()
+        break
+      }
+      byte[] buf = new byte[n]
+      int got = 0
+      while (got < n) {
+        int k = in.read(buf, got, n - got)
+        if (k <= 0) {
+          break
+        }
+        got += k
+      }
+      b.append(Net.stringFrom(buf, 0, got))
+      in.readLine()
+    }
+    return b.toString()
+  }
+
+  // knownMethod reports whether this server implements a method at all. The set
+  // is HTTP's own: anything else is a 501 rather than a 404, because a client
+  // that sends FOO learns the server does not know FOO.
+  private boolean knownMethod(String method) {
+    return method.equals("GET") || method.equals("POST") || method.equals("PUT") ||
+        method.equals("DELETE") || method.equals("PATCH") || method.equals("HEAD") ||
+        method.equals("OPTIONS")
+  }
+
+  // allowOf lists the methods a path takes, in the order a client is used to
+  // seeing them, or "" when the path is not routed at all.
+  private String allowOf(String path) {
+    String[] order = { "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE" }
+    StringBuilder b = new StringBuilder()
+    for (String m : order) {
+      Map<String, String> ignored = new HashMap<String, String>()
+      if (router.match(m, path, ignored) != null) {
+        if (b.length() > 0) {
+          b.append(", ")
+        }
+        // HEAD is what GET answers, so a path with a GET takes a HEAD even
+        // though no route names one
+        b.append(m)
+      }
+    }
+    return b.toString()
+  }
+
   // handle answers one request. It is separate from the socket loop so that it
   // can be exercised without one, and so a failure inside a handler becomes a
   // 500 rather than an exception that escapes the connection.
   public HttpResponse handle(HttpRequest req) {
     HttpResponse res = new HttpResponse()
+    // A method this server does not implement is a 501, which is what says so;
+    // a method it does implement but has no route for is a 404 below.
+    if (knownMethod(req.method) == false) {
+      res.status = 501
+      res.body = "not implemented: " + req.method
+      return res
+    }
+    // OPTIONS asks what a path takes, and the answer is the Allow header. It is
+    // part of the protocol rather than of a program, so no route answers it.
+    if (req.method.equals("OPTIONS")) {
+      String allow = allowOf(req.path)
+      if (allow.isEmpty()) {
+        res.status = 404
+        res.body = "not found: " + req.path
+        return res
+      }
+      res.status = 204
+      res.header("Allow", allow)
+      return res
+    }
+    // HEAD is a GET whose body is not sent, so it is routed as one and the
+    // writer drops the body.
+    String method = req.method.equals("HEAD") ? "GET" : req.method
     Map<String, String> vars = new HashMap<String, String>()
-    Route r = router.match(req.method, req.path, vars)
+    Route r = router.match(method, req.path, vars)
     if (r == null) {
       // a path that exists under another method is a 405, not a 404: the
-      // client asked the wrong thing, not for something that is not there
-      Map<String, String> ignored = new HashMap<String, String>()
-      for (Route other : router.all()) {
-        if (other.method.equals(req.method) == false) {
-          if (router.match(other.method, req.path, ignored) != null) {
-            res.status = 405
-            res.body = "method not allowed: " + req.method
-            return res
-          }
-        }
+      // client asked the wrong thing, not for something that is not there, and
+      // the methods that are there are what Allow says
+      String allow = allowOf(req.path)
+      if (allow.isEmpty() == false) {
+        res.status = 405
+        res.header("Allow", allow)
+        res.body = "method not allowed: " + req.method
+        return res
       }
       res.status = 404
       res.body = "not found: " + req.path

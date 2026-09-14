@@ -1825,3 +1825,45 @@ class ArrayOps {
     return h
   }
 }
+
+// Base64 is java.util.Base64's encoder. The decoder is not here: nothing in
+// this library reads base64, and a program that needs it can write it -- but
+// RFC 6455's handshake needs the encoder, which is why this is.
+class Base64 {
+  private static final String ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+  public static String encodeToString(byte[] data) {
+    StringBuilder b = new StringBuilder()
+    int i = 0
+    while (i + 2 < data.length) {
+      int n = ((data[i] & 0xff) << 16) | ((data[i + 1] & 0xff) << 8) | (data[i + 2] & 0xff)
+      b.append(ALPHABET.charAt((n >> 18) & 63))
+      b.append(ALPHABET.charAt((n >> 12) & 63))
+      b.append(ALPHABET.charAt((n >> 6) & 63))
+      b.append(ALPHABET.charAt(n & 63))
+      i += 3
+    }
+    if (i + 1 == data.length) {
+      int n = (data[i] & 0xff) << 16
+      b.append(ALPHABET.charAt((n >> 18) & 63))
+      b.append(ALPHABET.charAt((n >> 12) & 63))
+      b.append("==")
+      return b.toString()
+    }
+    if (i + 2 == data.length) {
+      int n = ((data[i] & 0xff) << 16) | ((data[i + 1] & 0xff) << 8)
+      b.append(ALPHABET.charAt((n >> 18) & 63))
+      b.append(ALPHABET.charAt((n >> 12) & 63))
+      b.append(ALPHABET.charAt((n >> 6) & 63))
+      b.append("=")
+      return b.toString()
+    }
+    return b.toString()
+  }
+
+  // encode is the bytes of a string's UTF-8, which is what a caller with text
+  // wants and what the handshake needs.
+  public static String encodeToString(String text) {
+    return encodeToString(text.getBytes())
+  }
+}
