@@ -1123,6 +1123,12 @@ class HttpServer {
   // 500 rather than an exception that escapes the connection.
   public HttpResponse handle(HttpRequest req) {
     HttpResponse res = new HttpResponse()
+    // CORS first: a preflight is a question about the route rather than a call
+    // to it, so it is answered here and never reaches a controller.
+    if (isPreflight(req)) {
+      applyCors(req, res)
+      return res
+    }
     // A method this server does not implement is a 501, which is what says so;
     // a method it does implement but has no route for is a 404 below.
     if (knownMethod(req.method) == false) {
@@ -1159,31 +1165,120 @@ class HttpServer {
         res.body = "method not allowed: " + req.method
         return res
       }
+      // a path no route claimed is a file, when the program has a static
+      // directory and the file is there
+      HttpResponse file = StaticFiles.serve(staticRoot(), req.path)
+      if (file != null) {
+        served++
+        return file
+      }
       res.status = 404
       res.body = "not found: " + req.path
       return res
     }
+    // The interceptors run around the route, and one that answers false stops
+    // the request before the controller sees it.
+    List<HandlerInterceptor> chain = interceptors()
+    for (int i = 0 : i < chain.size() : i++) {
+      if (chain.get(i).preHandle(req) == false) {
+        res.status = 403
+        res.body = "forbidden: " + req.path
+        return res
+      }
+    }
+    HttpResponse out
     try {
-      Object out = r.handler.handle(ctx, req, vars)
-      if (out instanceof HttpResponse) {
-        return (HttpResponse) out
-      }
-      if (out != null) {
-        res.body = out.toString()
-      }
-      served++
-      return res
+      out = invoke(r, req, vars, res)
     } catch (TypeMismatchException e) {
       // the request named a value the parameter cannot hold: the client's
-      // mistake, so it is a 400 rather than the 500 below
-      res.status = 400
-      res.body = "bad request: " + e.getMessage()
-      return res
-    } catch (Throwable e) {
-      res.status = 500
-      res.body = "internal error: " + e.getMessage()
-      return res
+      // mistake, so it is a 400 rather than the advice below
+      out = new HttpResponse()
+      out.status = 400
+      out.body = "bad request: " + e.getMessage()
+    } catch (Exception e) {
+      // A route is called reflectively, so what the controller threw arrives
+      // wrapped in an InvocationTargetException. The advice has to see the
+      // exception the controller meant -- the one it would have seen if the
+      // call had been direct -- so the wrapper comes off here.
+      Exception thrown = e
+      if (e instanceof InvocationTargetException && e.getCause() instanceof Exception) {
+        thrown = (Exception) e.getCause()
+      }
+      // what a @ControllerAdvice answers for this kind of failure, and a 500
+      // when no advice does. An exception, rather than a runtime one: a route
+      // that throws a checked exception, or an advice that throws while
+      // answering, is still an answer the client has to get.
+      HttpResponse advised = WebAdvice.answer(ctx, thrown, req)
+      if (advised != null) {
+        out = advised
+      } else {
+        out = new HttpResponse()
+        out.status = 500
+        out.body = "internal error: " + thrown.getMessage()
+      }
     }
+    for (int i = chain.size() - 1 : i >= 0 : i--) {
+      chain.get(i).afterCompletion(req, out)
+    }
+    // The CORS headers go on the answer that is actually sent: a route builds
+    // its own response, so headers set on the one above would be dropped.
+    applyCors(req, out)
+    return out
+  }
+
+  // invoke runs one route and answers what the connection writes.
+  private HttpResponse invoke(Route r, HttpRequest req, Map<String, String> vars, HttpResponse res) {
+    Object out = r.handler.handle(ctx, req, vars)
+    if (out instanceof HttpResponse) {
+      return (HttpResponse) out
+    }
+    if (out != null) {
+      res.body = out.toString()
+    }
+    served++
+    return res
+  }
+
+  // isPreflight is a browser asking whether a cross-origin call would be
+  // allowed, which is an OPTIONS that names the method it means to use.
+  private boolean isPreflight(HttpRequest req) {
+    return req.method.equals("OPTIONS") && req.header("Access-Control-Request-Method").length() > 0
+  }
+
+  // applyCors adds the headers an allowed origin needs. `spring.web.cors` names
+  // the origins -- "*" or a comma-separated list -- and with none set a browser
+  // on another origin is not told anything, which is the safe default.
+  private void applyCors(HttpRequest req, HttpResponse res) {
+    String allowed = ctx == null ? "" : ctx.getProperty("spring.web.cors", "")
+    String origin = req.header("Origin")
+    if (allowed.length() == 0 || origin.length() == 0) {
+      return
+    }
+    if (allowed.equals("*") == false && allowed.indexOf(origin) < 0) {
+      return
+    }
+    res.header("Access-Control-Allow-Origin", allowed.equals("*") ? "*" : origin)
+    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+    res.header("Access-Control-Allow-Headers", req.header("Access-Control-Request-Headers", "*"))
+    res.header("Vary", "Origin")
+  }
+
+  // staticRoot is where a program's files are served from, which its
+  // configuration may name.
+  private String staticRoot() {
+    return ctx == null ? "static" : ctx.getProperty("spring.web.static", "static")
+  }
+
+  // interceptors are the beans that implement HandlerInterceptor, built once
+  // and kept: a request should not ask the container a question it can answer
+  // the same way every time.
+  private List<HandlerInterceptor> chain = null
+
+  private List<HandlerInterceptor> interceptors() {
+    if (chain == null) {
+      chain = ctx == null ? new ArrayList<HandlerInterceptor>() : WebAdvice.interceptors(ctx)
+    }
+    return chain
   }
 }
 

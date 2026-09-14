@@ -304,6 +304,25 @@ class ApplicationContext {
     return resolve(found.name)
   }
 
+  // getBeanOrNull is Spring's getIfAvailable: the bean, or null when there is
+  // none. getBean below throws instead, which is what a lookup that has to
+  // succeed wants; this is what a lookup that is asking wants.
+  public Object getBeanOrNull(Class type) {
+    try {
+      return getBean(type)
+    } catch (IllegalStateException e) {
+      return null
+    }
+  }
+
+  public Object getBeanOrNull(String name) {
+    try {
+      return getBean(name)
+    } catch (IllegalStateException e) {
+      return null
+    }
+  }
+
   public Object getBean(String name) {
     return resolve(name)
   }
