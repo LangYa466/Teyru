@@ -374,6 +374,13 @@ void *ty_field_get(int64_t cm, int32_t declared, int32_t i, void *self) {
    records -- turns the refusal off, as it does in Java. */
 void ty_field_set(int64_t cm, int32_t declared, int32_t i, void *self, void *v, int32_t accessible) {
   const tyfield *f = field_at((tyclass *)(intptr_t)cm, declared, i);
+  /* A static final field is refused however the caller asked, which is what
+     javac does: the JDK stopped letting a write through even after
+     setAccessible. setAccessible is what makes an *instance* final writable,
+     and that is the case Java still allows. */
+  if ((f->mods & 0x0008) && (f->mods & 0x0010)) {
+    ty_throw(builtin_ex(TY_ILLACCESS, "can not set a static final field"));
+  }
   if ((f->mods & 0x0010) && !accessible) { /* Modifier.FINAL */
     char *msg = describe(f->owner ? f->owner->name : "?", f->name);
     ty_throw(builtin_ex(TY_ILLACCESS, msg ? msg : "field is final"));

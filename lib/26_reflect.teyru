@@ -445,7 +445,10 @@ class Class {
         return new Field(h, declared, i)
       }
     }
-    throw new NoSuchFieldException(getName() + "." + name)
+    /* Java's message is the field name alone here, and the class name in
+       NoSuchMethodException below: the two exceptions are built that way in
+       java.lang.Class, down to the asymmetry. */
+    throw new NoSuchFieldException(name)
   }
 
   public Method getDeclaredMethod(String name, Class... params) {
