@@ -1,5 +1,4 @@
-import teyru.ArrayList
-import teyru.List
+import teyru.*
 
 class Point implements Comparable<Point> {
   int x

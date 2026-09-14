@@ -6,7 +6,7 @@
 package main
 
 import pkg1.sub.*
-import pkg2.Other
+import pkg2.*
 import teyru.*
 
 class Main {

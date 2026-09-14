@@ -1,7 +1,7 @@
 // Two packages that each declare a Widget, plus the one this file declares:
 // a simple name belongs to its package, so all three coexist and an import
 // chooses between them.
-import a.Widget
+import a.*
 
 class Main {
   String tag = "main"

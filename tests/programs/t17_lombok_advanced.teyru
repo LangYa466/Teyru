@@ -1,13 +1,6 @@
-import lombok.Value
-import lombok.Builder
-import lombok.NonNull
-import lombok.Accessors
-import lombok.With
-import lombok.FieldDefaults
-import lombok.AccessLevel
-import lombok.experimental.UtilityClass
-import lombok.extern.slf4j.Slf4j
-import lombok.Getter
+import lombok.*
+import lombok.experimental.*
+import lombok.extern.slf4j.*
 
 @Value
 class Money {

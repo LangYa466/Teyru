@@ -1,13 +1,6 @@
 package todo
 
-import teyru.RestController
-import teyru.RequestMapping
-import teyru.GetMapping
-import teyru.PostMapping
-import teyru.PathVariable
-import teyru.RequestParam
-import teyru.RequestBody
-import teyru.Autowired
+import teyru.*
 
 // The annotations are Spring's. The difference is when they are read: this
 // class's mappings become routes at compile time, so a path that collides or a

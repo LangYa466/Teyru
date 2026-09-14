@@ -9,16 +9,7 @@
 // Requests are driven through HttpServer.handle, which is the same entry the
 // socket loop calls, so this exercises everything except the socket.
 
-import teyru.RestController
-import teyru.RequestMapping
-import teyru.GetMapping
-import teyru.PostMapping
-import teyru.PathVariable
-import teyru.RequestParam
-import teyru.RequestHeader
-import teyru.RequestBody
-import teyru.Service
-import teyru.Autowired
+import teyru.*
 
 class Pet {
   String name

@@ -270,9 +270,7 @@ Teyru は Java SE 25 の確定した構文（プレビューを除く）を基�
 annotation processor は不要です。
 
 ```teyru
-import lombok.Data
-import lombok.AllArgsConstructor
-import lombok.Builder
+import lombok.*
 
 @Data
 @AllArgsConstructor
@@ -318,9 +316,10 @@ class Main {
 
 標準ライブラリは **Teyru 自身**で書かれ（`lib/*.teyru`）、どのプログラムでも一緒に
 コンパイルされ型検査される。パッケージ名は Java の綴りのままなので、
-標準ライブラリはひとつの Teyru パッケージ（`teyru`）なので、インポートは `import teyru.List`、
-または一行の `import teyru.*` と書く。Java 流の `import java.util.List` もそのまま通るので、
-Java のソースは変更なしでコンパイルできる:
+標準ライブラリはひとつの Teyru パッケージ（`teyru`）なので、インポートは一行の
+`import teyru.*` と書く（一つのクラスしか使わないなら `import teyru.List` でもよい）。
+Java 流の `import java.util.*` も `import java.util.List` もそのまま通るので、Java の
+ソースは変更なしでコンパイルできる:
 
 | パッケージ | 内容 |
 |---|---|

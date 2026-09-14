@@ -273,9 +273,7 @@ into ordinary Teyru members, which then take the same type-checking and code
 generation path as hand-written code — no annotation processor is involved.
 
 ```teyru
-import lombok.Data
-import lombok.AllArgsConstructor
-import lombok.Builder
+import lombok.*
 
 @Data
 @AllArgsConstructor
@@ -321,9 +319,10 @@ The complete syntax and semantics live in **[docs/language.md](docs/language.md)
 
 The standard library is written **in Teyru itself** (`lib/*.teyru`) and is compiled
 and checked together with every program. Package names follow Java's, so
-The standard library is one Teyru package (`teyru`), so an import says `import teyru.List`
-or one line of `import teyru.*`; Java's spelling (`import java.util.List`) is accepted too, so
-Java source compiles unchanged:
+The standard library is one Teyru package (`teyru`), so an import is one line of
+`import teyru.*` (or `import teyru.List` when a single class is all you name); Java's
+spelling (`import java.util.*`, `import java.util.List`) is accepted too, so Java source
+compiles unchanged:
 
 | Package | Contents |
 |---|---|

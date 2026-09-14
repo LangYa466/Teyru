@@ -10,14 +10,7 @@
 // it does share with them is that the object being read and written is bound by
 // the same pass, so a field the binding cannot map is a compile error.
 
-import teyru.RestController
-import teyru.RequestMapping
-import teyru.GetMapping
-import teyru.PostMapping
-import teyru.RequestBody
-import teyru.PathVariable
-import teyru.Service
-import teyru.Autowired
+import teyru.*
 
 class Todo {
   int id

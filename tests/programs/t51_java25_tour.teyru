@@ -1,6 +1,6 @@
 // A tour of the Java 25 language surface, one feature per block.
-import teyru.List
-import static java.lang.Math.abs
+import teyru.*
+import static java.lang.Math.*
 
 sealed interface Shape permits Circle, Square, Dot {
   double area()

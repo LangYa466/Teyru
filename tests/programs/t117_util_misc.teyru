@@ -14,21 +14,7 @@
 // Every other Arrays call below (asList, deepEquals, deepToString, hashCode)
 // is the prelude's own.
 
-import teyru.Files
-import teyru.Path
-import teyru.ArrayList
-import teyru.Arrays
-import teyru.BitSet
-import teyru.Collections
-import teyru.Comparator
-import teyru.Enumeration
-import teyru.List
-import teyru.NoSuchElementException
-import teyru.Properties
-import teyru.Random
-import teyru.Set
-import teyru.StringTokenizer
-import teyru.UUID
+import teyru.*
 
 class Exposed extends Random {
     public Exposed(long s) {

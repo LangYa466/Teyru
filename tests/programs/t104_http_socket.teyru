@@ -6,13 +6,7 @@
 // threads -- and it exercises everything the framework does except the parts
 // that are already covered by t102 (routing, parameter binding, JSON).
 
-import teyru.RestController
-import teyru.RequestMapping
-import teyru.GetMapping
-import teyru.PathVariable
-import teyru.RequestParam
-import teyru.Service
-import teyru.Autowired
+import teyru.*
 
 class Pet {
   String name

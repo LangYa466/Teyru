@@ -11,11 +11,7 @@
 // on the generated constructor. Teyru keeps annotations on the generated
 // declarations, so a later pass can read them the way it reads a written one.
 
-import lombok.Getter
-import lombok.Setter
-import lombok.AllArgsConstructor
-import lombok.Log
-import lombok.CustomLog
+import lombok.*
 
 // The logger @CustomLog builds: a class with a static factory taking the class
 // name, and the logger methods the body calls.

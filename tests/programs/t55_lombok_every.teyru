@@ -1,38 +1,8 @@
 // Every Lombok annotation Teyru supports, used once in one program.
-import lombok.Getter
-import lombok.Setter
-import lombok.ToString
-import lombok.EqualsAndHashCode
-import lombok.AccessLevel
-import lombok.NoArgsConstructor
-import lombok.RequiredArgsConstructor
-import lombok.AllArgsConstructor
-import lombok.Data
-import lombok.Value
-import lombok.Builder
-import lombok.SuperBuilder
-import lombok.Singular
-import lombok.NonNull
-import lombok.With
-import lombok.Accessors
-import lombok.FieldDefaults
-import lombok.experimental.UtilityClass
-import lombok.experimental.StandardException
-import lombok.experimental.Accessors
-import lombok.Cleanup
-import lombok.SneakyThrows
-import lombok.Synchronized
-import lombok.experimental.Locked
-import lombok.extern.java.Log
-import lombok.experimental.ExtensionMethod
-import lombok.experimental.FieldNameConstants
-import lombok.experimental.Delegate
-import lombok.experimental.Helper
-import lombok.Tolerate
-import lombok.experimental.NonFinal
-import lombok.experimental.PackagePrivate
-import lombok.experimental.Var
-import lombok.extern.jackson.Jacksonized
+import lombok.*
+import lombok.experimental.*
+import lombok.extern.java.*
+import lombok.extern.jackson.*
 
 // --- @Getter / @Setter / @ToString / @EqualsAndHashCode / @Accessors
 @Getter

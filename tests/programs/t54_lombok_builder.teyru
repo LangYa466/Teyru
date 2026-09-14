@@ -1,8 +1,4 @@
-import lombok.Builder
-import lombok.SuperBuilder
-import lombok.Singular
-import lombok.Getter
-import lombok.ToString
+import lombok.*
 
 @SuperBuilder
 @Getter
