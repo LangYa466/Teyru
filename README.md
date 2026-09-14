@@ -261,9 +261,7 @@ Teyru 以 Java SE 25 的最終定案語法為基準（預覽功能不算），�
 型別檢查與程式碼產生路徑，不需要 annotation processor。
 
 ```teyru
-import lombok.Data
-import lombok.AllArgsConstructor
-import lombok.Builder
+import lombok.*
 
 @Data
 @AllArgsConstructor
@@ -308,8 +306,9 @@ class Main {
 ## 標準程式庫
 
 標準程式庫以 **Teyru 本身**撰寫（`lib/*.teyru`），每次編譯都與使用者程式
-一起被編譯與檢查。標準程式庫是一個 Teyru 套件（`teyru`），所以匯入寫 `import teyru.List`
-或一行 `import teyru.*`；Java 風格的 `import java.util.List` 也照樣收，Java 原始碼不改就能編：
+一起被編譯與檢查。標準程式庫是一個 Teyru 套件（`teyru`），所以匯入寫成一行
+`import teyru.*`（只用到一個類別時也可以寫 `import teyru.List`）；Java 風格的
+`import java.util.*` 與 `import java.util.List` 也照樣收，Java 原始碼不改就能編：
 
 | 套件 | 內容 |
 |---|---|

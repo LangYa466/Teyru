@@ -11,7 +11,7 @@
 // classes fill in from their static initializers, which is the same answer Gson
 // gives.
 
-import teyru.SerializedName
+import teyru.*
 
 class Address {
   String city

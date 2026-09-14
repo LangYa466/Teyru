@@ -1,4 +1,4 @@
-import static Tool.sum
+import static Tool.*
 
 interface Fold {
   default int fold(int... xs) {

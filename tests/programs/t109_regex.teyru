@@ -15,8 +15,7 @@
 // PatternSyntaxException.getMessage -- reason and index, the pattern, and a
 // caret under the offending character when the index is inside the pattern.
 
-import teyru.Matcher
-import teyru.Pattern
+import teyru.*
 
 class Main {
   public static void main(String[] args) {

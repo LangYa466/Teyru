@@ -1,9 +1,4 @@
-import lombok.Data
-import lombok.AllArgsConstructor
-import lombok.ToString
-import lombok.Getter
-import lombok.Setter
-import lombok.NonNull
+import lombok.*
 
 @Data
 @AllArgsConstructor

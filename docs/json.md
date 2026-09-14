@@ -33,7 +33,7 @@ Teyru 的 JSON 分成兩層：`lib/10_json.teyru` 是 Gson 的**樹狀 API**（�
 Gson 用反射把物件綁到 JSON。Teyru 沒有反射，所以**編譯器代勞**：
 
 ```teyru
-import teyru.SerializedName
+import teyru.*
 
 class Address {
   String city

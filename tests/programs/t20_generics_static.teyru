@@ -1,4 +1,4 @@
-import static java.lang.Math.max
+import static java.lang.Math.*
 
 interface Holder {
   int LIMIT = 10

@@ -7,16 +7,7 @@
 // program exists, and a missing bean or a dependency loop is a compile error
 // (see TestDiagnostics) rather than a startup failure.
 
-import teyru.Service
-import teyru.Repository
-import teyru.Component
-import teyru.Configuration
-import teyru.Bean
-import teyru.Autowired
-import teyru.Qualifier
-import teyru.Primary
-import teyru.Value
-import teyru.PostConstruct
+import teyru.*
 
 @Repository
 class UserRepo {

@@ -6,9 +6,7 @@ Teyru 的編譯器內建 Lombok 相容層：標註（annotation）會被解析�
 AST 注入。
 
 ```teyru
-import lombok.Data
-import lombok.AllArgsConstructor
-import lombok.Builder
+import lombok.*
 
 @Data
 @AllArgsConstructor

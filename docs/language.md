@@ -441,9 +441,10 @@ try {
 標準程式庫以 **Teyru 本身**撰寫（`lib/*.teyru`），每次編譯都與使用者程式一起被
 編譯與檢查——它沒有什麼特別的地位，`lib/` 底下的檔案就是用 Teyru 寫的普通程式。
 標準程式庫是**一個** Teyru 套件：`teyru`。裡面的類別取 Java 的名字，所以 Teyru
-程式碼寫 `import teyru.List`（或一行 `import teyru.*`），而 Java 風格的
-`import java.util.List` 也照樣收——那是「Java 原始碼不改就能編」的那條路，見
-下面的〈名稱怎麼找〉。
+程式碼用一行 on-demand 匯入把它整個帶進來：`import teyru.*`（只用到一個類別時
+`import teyru.List` 也一樣）。Java 風格的 `import java.util.*` 與
+`import java.util.List` 照樣收——那是「Java 原始碼不改就能編」的那條路，見下面的
+〈名稱怎麼找〉。
 
 ### java.lang（`lib/01`–`lib/07`）
 
@@ -512,10 +513,14 @@ Teyru 是照**簡單名稱**找的，前面寫什麼套件都一樣，所以 `im
 **單一型別匯入與 on-demand 匯入（`import p.*`）都可以。** 匯入寫的是套件**宣告的
 名字**：在模組建置裡，一個套件的 identity 是它目錄的 import path
 （`package todo` 在 `example.com/app` 裡是 `example.com/app/todo`），而 import 寫的
-是 `todo`——兩種寫法都查得到。`import p.*` 提供該套件的所有公開名稱；兩個 on-demand
-匯入都提供同一個名字時是 `TY-TYP-0099`。檔案**自己宣告**的型別優先於 on-demand
-匯入（JLS 6.5.5.1），所以 `import teyru.*` 旁邊寫一個 `class Node` 不會被標準庫的
-`Node` 蓋掉。
+是 `todo`——兩種寫法都查得到。`import p.*` 提供該套件的所有公開名稱，標準庫回答的
+那些套件名（`java.util.*`、`com.google.gson.*`、`lombok.*`…）也和單一型別匯入一樣
+指向標準庫本身；兩個 on-demand 匯入都提供同一個名字時是 `TY-TYP-0099`。檔案
+**自己宣告**的型別優先於 on-demand 匯入（JLS 6.5.5.1），所以 `import teyru.*` 旁邊
+寫一個 `class Node` 不會被標準庫的 `Node` 蓋掉。
+
+本專案自己的 Teyru 程式碼一律用 on-demand 形式：一個套件一行。靜態匯入同理，
+`import static java.lang.Math.max` 寫成 `import static java.lang.Math.*`。
 
 前綴的名字是全域的——這正是 `List`、`String` 不加 import 就能用的原因——但
 **具名套件看不到預設套件**（JLS 7.4.2）。所以使用者在預設套件宣告 `class Node`

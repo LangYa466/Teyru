@@ -14,11 +14,7 @@
 
 package teyru
 
-import teyru.RestController
-import teyru.RequestMapping
-import teyru.GetMapping
-import teyru.PostMapping
-import teyru.RequestParam
+import teyru.*
 
 @RestController
 class Ctl {

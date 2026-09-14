@@ -1,12 +1,5 @@
-import lombok.Value
-import lombok.Builder
-import lombok.Tolerate
-import lombok.experimental.FieldNameConstants
-import lombok.experimental.Delegate
-import lombok.experimental.Helper
-import lombok.experimental.NonFinal
-import lombok.experimental.PackagePrivate
-import lombok.NonNull
+import lombok.*
+import lombok.experimental.*
 
 interface Sayer {
   String say()

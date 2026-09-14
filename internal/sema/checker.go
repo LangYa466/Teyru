@@ -205,6 +205,11 @@ func (c *Checker) errf(pos source.Pos, code, format string, args ...any) {
 	c.diags.Errorf(pos, code, format, args...)
 }
 
+// libPackage is the Teyru package the standard library's classes are declared
+// in. Its names carry Java's, so they are imported under the package the Java
+// class would be in -- see libImportPackage -- but this is where they live.
+const libPackage = "teyru"
+
 // libImportPackage is the set of package names the standard library is imported
 // under. The library is one Teyru package whose classes carry Java's names, so
 // `import java.util.List` is how a program names one of them; these are the
@@ -666,9 +671,16 @@ func (c *Checker) fileClass(env *typeEnv, name string) *ast.Class {
 		if !imp.Star || imp.Static {
 			continue
 		}
-		// both spellings of the package: the identity an import path gives it
-		// and the name its files declare
-		for _, m := range []map[string]*ast.Class{c.byPkg[imp.Path], c.byDeclared[imp.Path]} {
+		// Both spellings of the package -- the identity an import path gives it
+		// and the name its files declare -- and, for the package names the
+		// library answers for, the library itself: `import java.util.*` has to
+		// provide what `import java.util.List` provides, or the on-demand form
+		// would be an import that does nothing.
+		maps := []map[string]*ast.Class{c.byPkg[imp.Path], c.byDeclared[imp.Path]}
+		if libImportPackage[imp.Path] {
+			maps = append(maps, c.byPkg[libPackage])
+		}
+		for _, m := range maps {
 			if m == nil {
 				continue
 			}
@@ -709,8 +721,8 @@ func (c *Checker) classByPath(path string) *ast.Class {
 		}
 		// the prelude is package teyru, and Java's packages are spelled as
 		// java.* by the programs that import them
-		if !strings.HasPrefix(pkg, "teyru") {
-			if cl := c.byPkg["teyru"][simple]; cl != nil {
+		if !strings.HasPrefix(pkg, libPackage) {
+			if cl := c.byPkg[libPackage][simple]; cl != nil {
 				return cl
 			}
 		}

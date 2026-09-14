@@ -26,11 +26,7 @@ Teyru 沒有反射——但它在**編譯期知道整個程式**：每個類別�
 ## 容器
 
 ```teyru
-import teyru.Service
-import teyru.Repository
-import teyru.Autowired
-import teyru.Value
-import teyru.PostConstruct
+import teyru.*
 
 @Repository
 class UserRepo {
@@ -91,12 +87,7 @@ Spring 4.3 起的規則：只有一個建構子就用它，否則找標了 `@Aut
 ## Web 層
 
 ```teyru
-import teyru.RestController
-import teyru.RequestMapping
-import teyru.GetMapping
-import teyru.PathVariable
-import teyru.RequestParam
-import teyru.RequestBody
+import teyru.*
 
 @RestController
 @RequestMapping("/pets")

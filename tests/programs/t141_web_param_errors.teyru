@@ -6,12 +6,7 @@
 // against the constants, and @RequestHeader's defaultValue is what the handler
 // sees when the request carries no such header.
 
-import teyru.RestController
-import teyru.RequestMapping
-import teyru.GetMapping
-import teyru.PathVariable
-import teyru.RequestParam
-import teyru.RequestHeader
+import teyru.*
 
 enum Color { RED, GREEN }
 
