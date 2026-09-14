@@ -805,12 +805,13 @@ class Class {
     try {
       return forNameOf(name)
     } catch (ClassNotFoundException e) {
+      // a java.* name finds the library class the import of it resolves to, and
+      // so does a bare simple name: forName("String") and forName("java.lang.String")
+      // are the same class, because the last segment is what names it here.
       int dot = name.lastIndexOf('.')
-      if (dot < 0) {
-        throw e
-      }
+      String simple = dot < 0 ? name : name.substring(dot + 1)
       try {
-        return forNameOf("teyru." + name.substring(dot + 1))
+        return forNameOf("teyru." + simple)
       } catch (ClassNotFoundException alias) {
         throw e
       }

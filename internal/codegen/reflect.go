@@ -702,6 +702,20 @@ func annoElements(cl *ast.Class) []*ast.Method {
 	return out
 }
 
+// classLitClass resolves the class a written class literal names.
+func (e *Emitter) classLitClass(lit *ast.ClassLit) *ast.Class {
+	if lit.Type == nil {
+		return nil
+	}
+	if ct, ok := lit.Type.Resolved.(*ast.ClassType); ok && ct.Class != nil {
+		return ct.Class
+	}
+	if cl := e.prog.LookupClass(lit.Type.Name); cl != nil {
+		return cl
+	}
+	return e.prog.ProgramClass(lit.Type.Name)
+}
+
 // enumArg renders an enum constant as an annotation element value: its name, and
 // the class to compare it against. An element that is not an enum constant, or
 // an array, is unsupported rather than dropped, so reading it says so.
@@ -737,7 +751,14 @@ func (e *Emitter) annoArgC(arg *ast.AnnoArg) string {
 			kind, ival = annInt, fmt.Sprint(int64(v.Int))
 		}
 	case *ast.ClassLit:
-		kind, cval = annClass, "(tyclass*)"+e.classLiteralTarget(v)
+		// An annotation argument is read as text while checking, so the class
+		// literal in it is usually unresolved and the type is found by the name
+		// that was written -- the same reason the enum case below resolves by
+		// name. An unresolved literal would otherwise carry the annotation's own
+		// default (Object.class) and a handler would match every exception.
+		if cl := e.classLitClass(v); cl != nil {
+			kind, cval = annClass, "(tyclass*)&cls_"+mangle(cl.Full)
+		}
 	case *ast.Select:
 		// An annotation argument is read as text while checking -- the passes
 		// that consume annotations want the names, not the types -- so the

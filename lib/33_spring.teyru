@@ -14,6 +14,40 @@ package teyru
 // a bean is only built under, a @PreDestroy that runs when the context closes,
 // and a way to ask the server a question without a socket, so a test can.
 
+// ---- the annotations a web application is written with -------------------
+
+/* @ControllerAdvice marks a class whose methods answer exceptions raised by any
+   controller, which is how one place handles what a hundred routes can throw.
+   Java's Spring finds it by scanning the classpath; here the container's class
+   list is what there is, and it is the same list the controllers come from. */
+@interface ControllerAdvice {
+}
+
+/* @ExceptionHandler says which exceptions a method answers. The element is the
+   exception class, and a handler for Exception answers everything a handler for
+   IllegalStateException does not. */
+@interface ExceptionHandler {
+  Class value() default Object.class
+}
+
+/* @CrossOrigin allows a browser on another origin to call these routes: the
+   answer carries Access-Control-Allow-Origin, and a preflight OPTIONS is
+   answered without reaching a controller. */
+@interface CrossOrigin {
+  String value() default "*"
+  String methods() default "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+  String headers() default "*"
+}
+
+/* HandlerInterceptor is Spring's: preHandle runs before a route, afterCompletion
+   after it, and a preHandle that answers false stops the request there. A bean
+   that implements it is applied to every route, in the order the container
+   built it. */
+interface HandlerInterceptor {
+  boolean preHandle(HttpRequest req)
+  void afterCompletion(HttpRequest req, HttpResponse res)
+}
+
 // SpringApplication is Spring Boot's entry point. Teyru's entry is main, and a
 // main that serves is one line:
 //
@@ -206,6 +240,12 @@ class MockServer {
     WebSocketScanner.register(ctx, server)
   }
 
+  // handle answers a request built by the caller, which is what a test needs
+  // when it cares about the headers -- a preflight, a cookie, an origin.
+  public HttpResponse handle(HttpRequest req) {
+    return server.handle(req)
+  }
+
   // request sends one raw request and answers what the server would write.
   public HttpResponse request(String method, String target) {
     return request(method, target, "", "")
@@ -248,5 +288,100 @@ class MockServer {
 class WebSocketApi {
   public static int register(ApplicationContext ctx, HttpServer server) {
     return WebSocketScanner.register(ctx, server)
+  }
+}
+
+// ---- what answers an exception, and what wraps every request --------------
+
+/* WebAdvice finds the @ControllerAdvice class that answers an exception, which
+   is what a program's error handling is: one method per kind of failure, in one
+   class, rather than a try in every route. The method is chosen by the class
+   the exception is an instance of -- the most specific handler wins, because
+   the classes are tried in the order the methods were declared and a handler
+   for Exception is the last one anyone wants. */
+class WebAdvice {
+  // answer runs the advice an exception deserves, or returns null when there is
+  // none and the caller should answer 500.
+  public static HttpResponse answer(ApplicationContext ctx, Exception e, HttpRequest req) {
+    for (Class c : BeanRegistry.registered()) {
+      if (BeanScanner.has(c.getAnnotations(), "ControllerAdvice") == null) {
+        continue
+      }
+      Object bean = ctx.getBean(c)
+      Method[] ms = c.getDeclaredMethods()
+      for (int i = 0 : i < ms.length : i++) {
+        Annotation h = ms[i].getAnnotation(ExceptionHandler.class)
+        if (h == null) {
+          continue
+        }
+        Class want = h.classValue("value")
+        if (want == null || want.equals(Object.class)) {
+          // a handler that names no class handles anything thrown
+          want = Exception.class
+        }
+        if (want.isAssignableFrom(e.getClass()) == false) {
+          continue
+        }
+        Object out = ms[i].getParameterCount() == 0 ? ms[i].invoke(bean)
+            : ms[i].invoke(bean, e)
+        return RouteResponse.of(out)
+      }
+    }
+    return null
+  }
+
+  // interceptors are the beans that implement HandlerInterceptor, in the order
+  // the container built them.
+  public static List<HandlerInterceptor> interceptors(ApplicationContext ctx) {
+    List<HandlerInterceptor> out = new ArrayList<HandlerInterceptor>()
+    for (Class c : BeanRegistry.registered()) {
+      if (c.isInterface()) {
+        continue
+      }
+      Object bean = ctx.getBeanOrNull(c)
+      if (bean instanceof HandlerInterceptor) {
+        out.add((HandlerInterceptor) bean)
+      }
+    }
+    return out
+  }
+}
+
+/* StaticFiles serves what a program puts in its static directory: the answer to
+   a path no route claimed is the file, when there is one, with the content type
+   its extension implies. A path with .. in it is refused rather than followed --
+   the one rule that matters, because a file server without it serves
+   /etc/passwd to whoever asks. */
+class StaticFiles {
+  public static HttpResponse serve(String root, String path) {
+    StringBuilder res = new StringBuilder("not found: " + path)
+    if (path.indexOf("..") >= 0) {
+      return null
+    }
+    String file = root + (path.equals("/") ? "/index.html" : path)
+    if (Files.exists(file) == false || Files.isRegularFile(file) == false) {
+      return null
+    }
+    HttpResponse out = new HttpResponse()
+    out.status = 200
+    out.contentType = contentTypeOf(file)
+    out.body = Files.readString(file)
+    return out
+  }
+
+  public static String contentTypeOf(String path) {
+    String lower = path.toLowerCase()
+    if (lower.endsWith(".html") || lower.endsWith(".htm")) { return "text/html; charset=utf-8" }
+    if (lower.endsWith(".css")) { return "text/css; charset=utf-8" }
+    if (lower.endsWith(".js")) { return "text/javascript; charset=utf-8" }
+    if (lower.endsWith(".json")) { return "application/json; charset=utf-8" }
+    if (lower.endsWith(".txt")) { return "text/plain; charset=utf-8" }
+    if (lower.endsWith(".svg")) { return "image/svg+xml" }
+    if (lower.endsWith(".png")) { return "image/png" }
+    if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) { return "image/jpeg" }
+    if (lower.endsWith(".gif")) { return "image/gif" }
+    if (lower.endsWith(".ico")) { return "image/x-icon" }
+    if (lower.endsWith(".wasm")) { return "application/wasm" }
+    return "application/octet-stream"
   }
 }
