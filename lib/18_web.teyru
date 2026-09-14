@@ -78,6 +78,10 @@ class HttpRequest {
   public String query = ""
   public String version = "HTTP/1.1"
   public String body = ""
+  // pendingSession is the id of a session a handler started while answering
+  // this request. The answer is built after the handler returns, so the cookie
+  // cannot be set there; the server stamps it on the way out instead.
+  public String pendingSession = ""
   private List<String> headerNames = new ArrayList<String>()
   private List<String> headerValues = new ArrayList<String>()
   private List<String> cookieNames = new ArrayList<String>()
@@ -1219,6 +1223,12 @@ class HttpServer {
     }
     for (int i = chain.size() - 1 : i >= 0 : i--) {
       chain.get(i).afterCompletion(req, out)
+    }
+    // A session a handler started during this call is a cookie on the answer.
+    // It is stamped here because the answer only exists now: the handler asked
+    // the request, and the response it would have written on does not.
+    if (req.pendingSession.isEmpty() == false) {
+      out.header("Set-Cookie", Sessions.cookieHeader(req.pendingSession))
     }
     // The CORS headers go on the answer that is actually sent: a route builds
     // its own response, so headers set on the one above would be dropped.

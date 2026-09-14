@@ -1,0 +1,177 @@
+package teyru
+
+/* Sessions give a run of requests one identity.
+ *
+ * The first time a handler asks for a session the server hands the client a
+ * cookie and remembers the id; every request after that carries the cookie back
+ * and finds the same attributes. This is what javax.servlet.http.HttpSession
+ * does, and what Spring's `session` scope is built on.
+ *
+ * A handler asks the request for it, and the server puts the cookie on the
+ * answer on the way out -- the handler's own response is built later than its
+ * call, so setting the cookie there would be a race against itself:
+ *
+ *     public String login(HttpRequest req) {
+ *       HttpSession s = Sessions.of(req)
+ *       s.setAttribute("user", req.param("name"))
+ *       return "hello " + s.getString("user")
+ *     }
+ *
+ * The store lives in the process, so a session is one server's session: with
+ * two processes behind a load balancer the requests must come back to the one
+ * that made the session (Spring calls the shared-store version "sticky
+ * sessions" and it needs a store this runtime does not have yet).
+ *
+ * The id is 128 bits from java.util.Random, which is seeded from the clock and
+ * is not a cryptographic source; it is unpredictable enough for a session on a
+ * server like this one, and a public deployment should replace it with a real
+ * random source (the runtime has no /dev/urandom binding yet). */
+
+class HttpSession {
+  public String id = ""
+  public long creationTime = 0
+  public long lastAccessTime = 0
+  // fresh is public because Sessions.of sets it on the session it just made.
+  public boolean fresh = false
+  private Map<String, Object> attributes = new LinkedHashMap<String, Object>()
+  private List<String> names = new ArrayList<String>()
+
+  public String getId() {
+    return id
+  }
+
+  // isNew answers true for the request that created the session, which is the
+  // one the cookie went out on. It is the servlet's name for the same question.
+  public boolean isNew() {
+    return fresh
+  }
+
+  public boolean hasAttribute(String name) {
+    return attributes.containsKey(name)
+  }
+
+  public Object getAttribute(String name) {
+    return attributes.get(name)
+  }
+
+  public String getString(String name) {
+    Object v = attributes.get(name)
+    if (v == null) {
+      return ""
+    }
+    return v.toString()
+  }
+
+  public void setAttribute(String name, Object value) {
+    if (attributes.containsKey(name) == false) {
+      names.add(name)
+    }
+    attributes.put(name, value)
+  }
+
+  public void removeAttribute(String name) {
+    if (attributes.containsKey(name)) {
+      attributes.remove(name)
+      names.remove(name)
+    }
+  }
+
+  // attributeNames is in the order the attributes were first set, which is the
+  // order a page listing them should use.
+  public List<String> attributeNames() {
+    return new ArrayList<String>(names)
+  }
+
+  public long getCreationTime() {
+    return creationTime
+  }
+
+  public long getLastAccessedTime() {
+    return lastAccessTime
+  }
+
+  public void touch() {
+    lastAccessTime = System.currentTimeMillis()
+  }
+
+  // invalidate forgets the attributes and takes the id out of the store, so the
+  // next request that carries the old cookie is given a new session. The
+  // client's cookie is not cleared here because a session has no answer to
+  // write on; Sessions.of will not recognise the id, which is what logging out
+  // needs.
+  public void invalidate() {
+    attributes.clear()
+    names.clear()
+    Sessions.forget(id)
+  }
+}
+
+class Sessions {
+  public static final String COOKIE_NAME = "TEYRUSSESSIONID"
+
+  private static Map<String, HttpSession> store = new LinkedHashMap<String, HttpSession>()
+  private static Random random = new Random()
+
+  // of answers the session this request belongs to, making one when the request
+  // carries no usable id. The new session's cookie is stamped on the answer by
+  // the server (HttpServer.send), which is where the response finally exists.
+  public static HttpSession of(HttpRequest req) {
+    HttpSession existing = Sessions.find(req)
+    if (existing != null) {
+      // isNew is true for the request that created the session and no other,
+      // so it is cleared here rather than when the next one finds it: a handler
+      // that asks twice in one request still made it.
+      existing.fresh = false
+      existing.touch()
+      return existing
+    }
+    HttpSession made = new HttpSession()
+    made.id = Sessions.newId()
+    made.creationTime = System.currentTimeMillis()
+    made.lastAccessTime = made.creationTime
+    made.fresh = true
+    store.put(made.id, made)
+    req.pendingSession = made.id
+    return made
+  }
+
+  // find answers the session this request carries, or null. It is what a
+  // handler that must not create one uses, the way a login page reads an
+  // existing session without starting another.
+  public static HttpSession find(HttpRequest req) {
+    String id = req.cookie(Sessions.COOKIE_NAME)
+    if (id.isEmpty()) {
+      return null
+    }
+    HttpSession s = store.get(id)
+    if (s == null) {
+      return null
+    }
+    s.touch()
+    return s
+  }
+
+  public static void forget(String id) {
+    store.remove(id)
+  }
+
+  public static int count() {
+    return store.size()
+  }
+
+  // clear drops every session. A test calls it between cases; nothing in a
+  // running server does.
+  public static void clear() {
+    store.clear()
+  }
+
+  private static String newId() {
+    return Long.toHexString(random.nextLong()) + Long.toHexString(random.nextLong())
+  }
+
+  // cookieHeader is the Set-Cookie line for a session id, which the server
+  // writes when a handler started one during this request.
+  public static String cookieHeader(String id) {
+    return Sessions.COOKIE_NAME + "=" + id + "; Path=/; HttpOnly"
+  }
+}
