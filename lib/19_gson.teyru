@@ -1,6 +1,7 @@
 package teyru
 
-// The annotations Gson's binding reads, and the runtime side of the binding.
+// The annotations Gson's binding reads, the interfaces a program installs an
+// adapter through, and the binding's own registry.
 //
 // Gson binds an object to JSON by reflection, at the moment toJson/fromJson is
 // called. This used to be the compiler's work -- it generated a reader and a
@@ -9,16 +10,18 @@ package teyru
 // the way Gson does. What that buys is a class the compiler never saw bound
 // still binding, and one less thing the compiler has to know about.
 //
-// The annotations below are the ones the binding reads: @SerializedName for a
-// member's name. Gson's `alternate` is not declared -- an annotation element
-// with an array default is not something this language's annotation syntax has,
-// and an element without a default would have to be written at every use.
+// The annotations below are the ones Gson's binding is configured by:
+// @SerializedName for a member's name, @Expose, @Since and @Until, and
+// @JsonAdapter for a hand-written adapter. Gson's `alternate` is not declared --
+// an annotation element with an array default is not something this language's
+// annotation syntax has, and an element without a default would have to be
+// written at every use -- and @JsonAdapter names its class with a String rather
+// than a class literal, because a Class-valued annotation element does not
+// survive to run time here (reading one answers Object, measured, not the class
+// that was written): `@JsonAdapter("PersonAdapter")` is looked up with
+// Class.forName, which takes the name either way it is written.
 
 // @SerializedName renames a field in the JSON, as Gson's does.
-//
-// Gson's `alternate` is not declared: an annotation element with an array
-// default is not something this language's annotation syntax has, and an
-// element without a default would have to be written at every use.
 @interface SerializedName {
   String value()
 }
@@ -40,22 +43,48 @@ package teyru
 }
 
 // @JsonAdapter names a class that does the binding for the annotated type or
-// field. The compiler calls its read/write through the same generated code, so
-// a hand-written adapter and a generated one are used the same way.
+// field. The class must have a no-argument constructor and implement
+// JsonSerializer, JsonDeserializer, or both.
 @interface JsonAdapter {
   String value()
 }
 
 // ---------------------------------------------------------------- adapters
 
-// JsonReader2 reads one value of a type from a JsonElement. The compiler
-// generates one per bound class; the name is a spelling of "reader" that cannot
-// collide with a JsonReader the program declares itself.
+/* Gson's JsonSerializer and JsonDeserializer, and the two contexts they are
+   handed so that an adapter can delegate to the binding it replaced.
+
+   Gson's signatures name a java.lang.reflect.Type and a JsonSerializationContext
+   with an overload per spelling of the type; there is one Type here -- Class --
+   and the context carries the single method a delegated call needs, so the
+   member an adapter implements is exactly `serialize(src, typeOfSrc, context)`.
+   A generic interface is implemented with the program's own type argument and
+   the erased call reaches it: the compiler writes the bridge, which is what
+   makes the binding able to call an adapter it only knows as Object. */
+interface JsonSerializationContext {
+  JsonElement serialize(Object src)
+}
+
+interface JsonDeserializationContext {
+  Object deserialize(JsonElement json, Class type)
+}
+
+interface JsonSerializer<T> {
+  JsonElement serialize(T src, Class typeOfSrc, JsonSerializationContext context)
+}
+
+interface JsonDeserializer<T> {
+  T deserialize(JsonElement json, Class typeOfT, JsonDeserializationContext context)
+}
+
+/* The two interfaces the binding itself is built from: one reader and one
+   writer per class. They are what the compiler used to generate and register,
+   and they are still the shape the binding caches and calls, so a hand-written
+   adapter and a reflected one are used the same way. */
 interface JsonReader2 {
   Object read(JsonElement e)
 }
 
-// JsonWriter2 writes one value of a type as a JsonElement.
 interface JsonWriter2 {
   JsonElement write(Object v)
 }
@@ -65,41 +94,79 @@ interface JsonWriter2 {
 // lib/27_json_binding.teyru). A call whose type says nothing about the value --
 // `toJson(someObject)` where the static type is Object -- answers from the
 // object's own class, which is what Gson's reflection does.
+//
+// The readers and writers are built from a Gson's configuration and cached
+// against it: two Gsons that exclude different fields, or that carry different
+// adapters, bind the same class differently, so the configuration is part of
+// what a binding is. The static entry points -- the ones the web layer calls --
+// use the default configuration, which is `new Gson()`, and the binding answers
+// `bound()` across all of them.
 class JsonBinding {
   private static Map<String, JsonReader2> readers = new HashMap<String, JsonReader2>()
   private static Map<String, JsonWriter2> writers = new HashMap<String, JsonWriter2>()
+  private static Gson fallback
+  
+  // config is the configuration the static entry points bind with: Gson's
+  // defaults, which is what a program that never builds a Gson gets.
+  public static Gson config() {
+    if (fallback == null) {
+      fallback = new Gson()
+    }
+    return fallback
+  }
 
-  /* One reader per class, built the first time the class is asked about by
-     looking at its fields. The compiler used to generate these and register
-     them; now the class answers for itself, which is what Gson does and what
-     makes a class the compiler never saw bound bind anyway. */
+  // One reader per class and configuration, built the first time the class is
+  // asked about by looking at its fields. The compiler used to generate these
+  // and register them; now the class answers for itself, which is what Gson
+  // does and what makes a class the compiler never saw bound bind anyway.
   public static JsonReader2 reader(Class type) {
+    return reader(type, null)
+  }
+
+  public static JsonReader2 reader(Class type, Gson config) {
     if (type == null) {
       return null
     }
-    JsonReader2 r = readers.get(type.getName())
+    String key = key(type, config)
+    JsonReader2 r = readers.get(key)
     if (r == null) {
-      r = new ReflectReader(type)
-      readers.put(type.getName(), r)
+      Object a = typeAdapter(type, config)
+      if (a == null) {
+        r = new ReflectReader(type, config)
+      } else {
+        r = new AdapterReader(type, config, a)
+      }
+      readers.put(key, r)
     }
     return r
   }
 
   public static JsonWriter2 writer(Class type) {
+    return writer(type, null)
+  }
+
+  public static JsonWriter2 writer(Class type, Gson config) {
     if (type == null) {
       return null
     }
-    JsonWriter2 w = writers.get(type.getName())
+    String key = key(type, config)
+    JsonWriter2 w = writers.get(key)
     if (w == null) {
-      w = new ReflectWriter(type)
-      writers.put(type.getName(), w)
+      Object a = typeAdapter(type, config)
+      if (a == null) {
+        w = new ReflectWriter(type, config)
+      } else {
+        w = new AdapterWriter(type, config, a)
+      }
+      writers.put(key, w)
     }
     return w
   }
 
-  // bound answers how many classes the binding has built a writer for. It was
-  // how many the compiler registered; now it counts what has been asked for,
-  // which answers the same question a program has -- is this class bound?
+  // bound answers how many classes the binding has built a reader or a writer
+  // for, across every configuration. It was how many the compiler registered;
+  // now it counts what has been asked for, which answers the same question a
+  // program has -- is this class bound?
   public static int bound() {
     return writers.size()
   }
@@ -108,15 +175,184 @@ class JsonBinding {
   // is the caller's: `Person p = JsonBinding.readFrom(json, Person.class)` needs
   // no cast, and the cast is erased like every other.
   public static <T> T readFrom(String json, Class type) {
-    JsonReader2 r = reader(type)
+    return readFrom(json, type, null)
+  }
+
+  public static <T> T readFrom(String json, Class type, Gson config) {
+    JsonReader2 r = reader(type, config)
     if (r == null) {
       throw new JsonParseException("no JSON binding for a null class")
     }
-    return (T) r.read(JsonParser.parseString(json))
+    JsonReader in = new JsonReader(json)
+    in.setLenient(config != null && config.isLenient())
+    return (T) r.read(in.parseDocument())
+  }
+
+  // read is fromJson from a tree that is already parsed, which is what an
+  // adapter's context delegates to and what Gson's fromJson(JsonElement, Class)
+  // does.
+  public static <T> T read(JsonElement json, Class type, Gson config) {
+    JsonReader2 r = reader(type, config)
+    if (r == null) {
+      throw new JsonParseException("no JSON binding for a null class")
+    }
+    return (T) r.read(json)
   }
 
   // writeTo is toJson for a value whose static type says nothing about it.
   public static JsonElement writeTo(Object v) {
     return JsonConvert.from(v)
+  }
+
+  public static JsonElement writeTo(Object v, Gson config) {
+    return JsonConvert.from(v, config)
+  }
+
+  // ---- adapters --------------------------------------------------------
+
+  /* typeAdapter is the adapter that applies to a type: one registered with
+     registerTypeAdapter or registerTypeHierarchyAdapter (the last registered
+     wins, as in Gson), or the class named by @JsonAdapter on the type itself.
+     A field's own @JsonAdapter is looked up separately, by fieldAdapter, and
+     wins over both -- Gson's order. */
+  public static Object typeAdapter(Class type, Gson config) {
+    if (config == null || type == null) {
+      return null
+    }
+    Object a = config.registeredAdapter(type)
+    if (a != null) {
+      return a
+    }
+    Annotation ann = type.getAnnotation(JsonAdapter.class)
+    if (ann == null) {
+      return null
+    }
+    return named(ann.stringValue("value"), config)
+  }
+
+  // fieldAdapter is the adapter @JsonAdapter names on a field, or null when the
+  // field has none and the declared type's own adapter should be used.
+  public static Object fieldAdapter(Field f, Gson config) {
+    Annotation ann = f.getAnnotation(JsonAdapter.class)
+    if (ann == null) {
+      return null
+    }
+    return named(ann.stringValue("value"), config == null ? config() : config)
+  }
+
+  // named loads an adapter by the name an annotation gave, once per name per
+  // configuration. It is looked up with Class.forName, so the name is written
+  // either as this package spells it (teyru.PersonAdapter) or as Java would
+  // (com.example.PersonAdapter), whichever package the program is in.
+  public static Object named(String name, Gson config) {
+    if (name.length() == 0) {
+      throw new JsonParseException("@JsonAdapter names no class")
+    }
+    Object cached = config.findAdapter(name)
+    if (cached != null) {
+      return cached
+    }
+    Object made = null
+    try {
+      Class type = Class.forName(name)
+      made = type.newInstance()
+    } catch (ReflectiveOperationException ex) {
+      throw new JsonParseException("@JsonAdapter cannot build " + name + ": " + ex.getMessage())
+    }
+    if (!(made instanceof JsonSerializer) && !(made instanceof JsonDeserializer)) {
+      throw new JsonParseException("@JsonAdapter names " + name +
+        ", which implements neither JsonSerializer nor JsonDeserializer")
+    }
+    config.rememberAdapter(name, made)
+    return made
+  }
+
+  /* deserializeWith runs a JsonDeserializer. A JSON null never reaches one: Gson
+     wraps every installed adapter so that null is answered without the adapter
+     seeing it, and so does this. */
+  public static Object deserializeWith(Object adapter, JsonElement e, Class type, Gson config, String where) {
+    if (e == null || e.isJsonNull()) {
+      return null
+    }
+    if (!(adapter instanceof JsonDeserializer)) {
+      throw new JsonParseException("the adapter for " + type.getName() +
+        " cannot read: it does not implement JsonDeserializer (at " + where + ")")
+    }
+    return ((JsonDeserializer) adapter).deserialize(e, type, new BindingContext(config))
+  }
+
+  public static JsonElement serializeWith(Object adapter, Object v, Class type, Gson config) {
+    if (v == null) {
+      return JsonNull.INSTANCE
+    }
+    if (!(adapter instanceof JsonSerializer)) {
+      throw new JsonParseException("the adapter for " + type.getName() +
+        " cannot write: it does not implement JsonSerializer")
+    }
+    return ((JsonSerializer) adapter).serialize(v, type, new BindingContext(config))
+  }
+
+  // key is what a binding is cached under: the configuration's own identity and
+  // the class's name. Two Gsons built the same way are still two
+  // configurations -- one may be handed to a call that registers an adapter on
+  // it later -- so the identity, not the contents, is what is compared.
+  private static String key(Class type, Gson config) {
+    if (config == null) {
+      return "default|" + type.getName()
+    }
+    return config.identity() + "|" + type.getName()
+  }
+}
+
+// AdapterReader and AdapterWriter are the binding of a class whose adapter was
+// installed rather than reflected.
+class AdapterReader implements JsonReader2 {
+  private Class type
+  private Gson config
+  private Object adapter
+
+  public AdapterReader(Class type, Gson config, Object adapter) {
+    this.type = type
+    this.config = config
+    this.adapter = adapter
+  }
+
+  public Object read(JsonElement e) {
+    return JsonBinding.deserializeWith(adapter, e, type, config, "$")
+  }
+}
+
+class AdapterWriter implements JsonWriter2 {
+  private Class type
+  private Gson config
+  private Object adapter
+
+  public AdapterWriter(Class type, Gson config, Object adapter) {
+    this.type = type
+    this.config = config
+    this.adapter = adapter
+  }
+
+  public JsonElement write(Object v) {
+    return JsonBinding.serializeWith(adapter, v, type, config)
+  }
+}
+
+/* The context an adapter is handed so that it can delegate: serialize goes back
+   through the binding with the same configuration the adapter was installed on,
+   which is what Gson's JsonSerializationContext does. */
+class BindingContext implements JsonSerializationContext, JsonDeserializationContext {
+  private Gson config
+
+  public BindingContext(Gson config) {
+    this.config = config
+  }
+
+  public JsonElement serialize(Object src) {
+    return JsonConvert.from(src, config)
+  }
+
+  public Object deserialize(JsonElement json, Class type) {
+    return JsonConvert.to(type, json, config, "$")
   }
 }

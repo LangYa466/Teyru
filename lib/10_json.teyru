@@ -1132,7 +1132,13 @@ class JsonNumbers {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == ''
   }
 
-  private static boolean isNumberText(String s) {
+  /* The number grammar of Double.parseDouble, and of Gson's lenient reader:
+     an optional sign, digits on either side of a point (so ".5" and "1." are
+     numbers), an optional exponent, the f/d suffix, and the two words the double
+     grammar has, NaN and Infinity. It is public because the lenient reader in
+     this file is what decides whether a bare token is a number or Gson's
+     unquoted string, and the same grammar is what makes that decision there. */
+  public static boolean isNumberText(String s) {
     int n = s.length()
     if (n == 0) {
       return false
@@ -1587,14 +1593,37 @@ class JsonReader {
   private String src
   private int pos
   private int depth
+  private boolean lenient
 
   public JsonReader(String src) {
     this.src = src
   }
 
+  /* setLenient opens the door to the documents Gson's lenient reader takes and
+     RFC 8259 does not: an unquoted name or string ({a:1}, 'a', abc), a trailing
+     comma before a closing bracket, a number written loosely (01, +1, .5, 1.,
+     NaN, Infinity), a comment, and -- at the document level -- an empty
+     document, which Gson answers with JsonNull.INSTANCE.
+
+     The switch is the reader's own, so nothing a program does makes
+     JsonParser.parseString lenient; the binding turns it on for the readers it
+     builds when the Gson it was handed asked for it with setLenient(true). */
+  public void setLenient(boolean lenient) {
+    this.lenient = lenient
+  }
+
+  public boolean isLenient() {
+    return lenient
+  }
+
   public JsonElement parseDocument() {
     skipWhitespace()
     if (pos >= src.length()) {
+      if (lenient) {
+        // Gson's JsonParser answers JsonNull.INSTANCE for a document with
+        // nothing in it, which is the one place its reader does not fail
+        return JsonNull.INSTANCE
+      }
       throw error("empty document")
     }
     JsonElement element = parseValue()
@@ -1617,6 +1646,9 @@ class JsonReader {
     if (c == '"') {
       return new JsonPrimitive(parseStringLiteral())
     }
+    if (lenient) {
+      return parseLenientValue()
+    }
     if (c == 't') {
       expect("true")
       return new JsonPrimitive(Boolean.valueOf(true))
@@ -1637,6 +1669,76 @@ class JsonReader {
     return JsonNull.INSTANCE
   }
 
+  /* A value Gson's lenient reader takes: a single-quoted string, one of the
+     three words, a loosely written number, or an unquoted string -- which Gson
+     reads as a string too (its PEEKED_UNQUOTED is JsonToken.STRING), so
+     `{a:abc}` carries "abc". */
+  private JsonElement parseLenientValue() {
+    char c = src.charAt(pos)
+    if (c == '\'') {
+      return new JsonPrimitive(parseStringLiteral())
+    }
+    String text = scanBare()
+    if (text.length() == 0) {
+      throw error("expected a value but was '" + c + "'")
+    }
+    if (text.equals("true")) {
+      return new JsonPrimitive(Boolean.valueOf(true))
+    }
+    if (text.equals("false")) {
+      return new JsonPrimitive(Boolean.valueOf(false))
+    }
+    if (text.equals("null")) {
+      return JsonNull.INSTANCE
+    }
+    if (JsonNumbers.isNumberText(text)) {
+      // the text is kept, as it is for a strict number, so NaN and 1. print
+      // back the way they were written
+      return new JsonPrimitive(new JsonLazyNumber(text))
+    }
+    return new JsonPrimitive(text)
+  }
+
+  // scanBare is one unquoted token: everything up to the character that ends it
+  // -- a bracket, a comma, a colon or whitespace. It answers "" when the
+  // character under the cursor ends the token before it starts, which is how a
+  // caller tells "no name here" from a name.
+  private String scanBare() {
+    int start = pos
+    while (pos < src.length()) {
+      char c = src.charAt(pos)
+      if (c == ',' || c == ':' || c == '}' || c == ']' || c == ' ' || c == '\t' ||
+        c == '\n' || c == '\r') {
+        break
+      }
+      pos++
+    }
+    return src.substring(start, pos)
+  }
+
+  /* A member's name: a quoted string, and in lenient mode the single-quoted or
+     unquoted form Gson takes too. */
+  private String parseName() {
+    if (pos >= src.length()) {
+      throw error("expected a name")
+    }
+    char c = src.charAt(pos)
+    if (c == '"') {
+      return parseStringLiteral()
+    }
+    if (!lenient) {
+      throw error("expected a name")
+    }
+    if (c == '\'') {
+      return parseStringLiteral()
+    }
+    String bare = scanBare()
+    if (bare.length() == 0) {
+      throw error("expected a name")
+    }
+    return bare
+  }
+
   private JsonElement parseObject() {
     enter()
     pos++
@@ -1649,10 +1751,7 @@ class JsonReader {
     }
     while (true) {
       skipWhitespace()
-      if (pos >= src.length() || src.charAt(pos) != '"') {
-        throw error("expected a name")
-      }
-      String name = parseStringLiteral()
+      String name = parseName()
       skipWhitespace()
       if (pos >= src.length() || src.charAt(pos) != ':') {
         throw error("expected ':' after the name")
@@ -1672,6 +1771,15 @@ class JsonReader {
       char c = src.charAt(pos)
       if (c == ',') {
         pos++
+        if (lenient) {
+          // a trailing comma is one of the things Gson's lenient reader takes
+          skipWhitespace()
+          if (pos < src.length() && src.charAt(pos) == '}') {
+            pos++
+            depth--
+            return object
+          }
+        }
         continue
       }
       if (c == '}') {
@@ -1709,6 +1817,14 @@ class JsonReader {
       char c = src.charAt(pos)
       if (c == ',') {
         pos++
+        if (lenient) {
+          skipWhitespace()
+          if (pos < src.length() && src.charAt(pos) == ']') {
+            pos++
+            depth--
+            return array
+          }
+        }
         continue
       }
       if (c == ']') {
@@ -1768,8 +1884,11 @@ class JsonReader {
 
   /* Everything between the quotes is UTF-8, so the bytes of a multi-byte
      character are copied with substring and never re-appended one by one; only
-     escapes are decoded. */
+     escapes are decoded. A single quote opens a string too when the reader is
+     lenient, which is Gson's other spelling of a string; the two are not
+     interchangeable inside one literal -- `'a"` is unterminated. */
   private String parseStringLiteral() {
+    char quote = src.charAt(pos)
     pos++
     int start = pos
     StringBuilder sb = null
@@ -1778,7 +1897,7 @@ class JsonReader {
         throw error("unterminated string")
       }
       int c = (int) src.charAt(pos)
-      if (c == '"') {
+      if (c == quote) {
         break
       }
       if (c == '\\') {
@@ -1814,6 +1933,13 @@ class JsonReader {
     if (e == '"') {
       pos++
       sb.append('"')
+      return
+    }
+    if (e == '\'') {
+      // `\'` is an escape Gson's lenient reader takes, and the only way to put
+      // a single quote inside a single-quoted string
+      pos++
+      sb.append('\'')
       return
     }
     if (e == '\\') {
@@ -1951,6 +2077,28 @@ class JsonReader {
         pos++
         continue
       }
+      if (lenient && c == '/' && pos + 1 < src.length()) {
+        // a comment is whitespace to Gson's lenient reader, both spellings of it
+        char second = src.charAt(pos + 1)
+        if (second == '/') {
+          pos += 2
+          while (pos < src.length() && src.charAt(pos) != '\n') {
+            pos++
+          }
+          continue
+        }
+        if (second == '*') {
+          pos += 2
+          while (pos + 1 < src.length() && !(src.charAt(pos) == '*' && src.charAt(pos + 1) == '/')) {
+            pos++
+          }
+          if (pos + 1 >= src.length()) {
+            throw error("unterminated comment")
+          }
+          pos += 2
+          continue
+        }
+      }
       return
     }
   }
@@ -1980,39 +2128,340 @@ class JsonParser {
   }
 }
 
-/* com.google.gson.Gson and its builder, for the tree API only. The defaults are
-   Gson's, and the two that show up in output are worth stating: a plain
-   `new Gson()` escapes HTML characters (htmlSafe) and drops null members
-   (serializeNulls is false), where toString() on an element does neither. */
+/* com.google.gson.FieldNamingPolicy: the five policies Gson has, and the
+   translation each one makes of a field's name. The algorithm is Gson's,
+   including the two that are easy to get subtly wrong: separateCamelCase
+   inserts the separator before an upper-case letter that is not the first
+   character, and upperCaseFirstLetter skips a leading run of characters that
+   are not letters ("_name" becomes "_Name", not "Name"). */
+enum FieldNamingPolicy {
+  IDENTITY,
+  UPPER_CAMEL_CASE,
+  UPPER_CAMEL_CASE_WITH_SPACES,
+  LOWER_CASE_WITH_UNDERSCORES,
+  LOWER_CASE_WITH_DASHES:
+
+  public String translateName(String name) {
+    if (this == UPPER_CAMEL_CASE) {
+      return upperCaseFirstLetter(name)
+    }
+    if (this == UPPER_CAMEL_CASE_WITH_SPACES) {
+      return upperCaseFirstLetter(separateCamelCase(name, " "))
+    }
+    if (this == LOWER_CASE_WITH_UNDERSCORES) {
+      return separateCamelCase(name, "_").toLowerCase()
+    }
+    if (this == LOWER_CASE_WITH_DASHES) {
+      return separateCamelCase(name, "-").toLowerCase()
+    }
+    return name
+  }
+
+  public static String separateCamelCase(String name, String separator) {
+    StringBuilder translation = new StringBuilder()
+    for (int i = 0 : i < name.length() : i++) {
+      char c = name.charAt(i)
+      if (Character.isUpperCase(c) && translation.length() > 0) {
+        translation.append(separator)
+      }
+      translation.append(c)
+    }
+    return translation.toString()
+  }
+
+  public static String upperCaseFirstLetter(String name) {
+    StringBuilder out = new StringBuilder()
+    int index = 0
+    char first = name.charAt(index)
+    while (index < name.length() - 1) {
+      if (Character.isLetter(first)) {
+        break
+      }
+      out.append(first)
+      index++
+      first = name.charAt(index)
+    }
+    if (!Character.isUpperCase(first)) {
+      out.append(Character.toUpperCase(first))
+      out.append(name.substring(index + 1, name.length()))
+      return out.toString()
+    }
+    return name
+  }
+}
+
+/* The adapters installed on a Gson, in registration order. A type half is
+   matched by name and a hierarchy half by assignability, and the search runs
+   backwards so that the last registration wins -- which is Gson's order, where
+   the factories are inserted at the front of the list. */
+class JsonAdapterList {
+  private List<Class> types
+  private List<Object> values
+  private List<Boolean> hierarchies
+
+  public JsonAdapterList() {
+    types = new ArrayList<Class>()
+    values = new ArrayList<Object>()
+    hierarchies = new ArrayList<Boolean>()
+  }
+
+  public void add(Class type, Object adapter, boolean hierarchy) {
+    types.add(type)
+    values.add(adapter)
+    hierarchies.add(hierarchy)
+  }
+
+  public Object find(Class type) {
+    for (int i = types.size() - 1 : i >= 0 : i--) {
+      if (hierarchies.get(i)) {
+        if (types.get(i).isAssignableFrom(type)) {
+          return values.get(i)
+        }
+        continue
+      }
+      if (types.get(i).equals(type)) {
+        return values.get(i)
+      }
+    }
+    return null
+  }
+
+  public boolean isEmpty() {
+    return types.size() == 0
+  }
+
+  // copy is what makes a built Gson independent of its builder: the entries are
+  // shared (an adapter is a stateless function in Gson's design) but the lists
+  // are not, so registering on a builder afterwards cannot reach a Gson that
+  // was already created.
+  public JsonAdapterList copy() {
+    JsonAdapterList out = new JsonAdapterList()
+    for (int i = 0 : i < types.size() : i++) {
+      out.add(types.get(i), values.get(i), hierarchies.get(i))
+    }
+    return out
+  }
+}
+
+/* com.google.gson.Gson and its builder.
+
+   Everything Gson is configured by is here, because the binding reads it:
+   JsonBinding builds a reader and a writer per class from the configuration it
+   is given (lib/27_json_binding.teyru), so what the builder accepts reaches the
+   binding and two Gsons with different settings bind the same class
+   differently. The defaults are Gson's, and the ones that show up in output are
+   worth stating: a plain `new Gson()` escapes HTML characters (htmlSafe), drops
+   null members (serializeNulls is false), excludes static and transient fields,
+   names members after the field (IDENTITY) and ignores @Since and @Until
+   (no version is set), where toString() on an element escapes nothing and keeps
+   null members.
+
+   One default is this library's own: lenient is false, so the documents a Gson
+   reads are RFC 8259 and the deviations Gson's lenient reader allows are opt-in
+   with setLenient(true). That is the strictness lib/10_json.teyru documents for
+   the whole JSON layer. */
 class Gson {
+  private static final double IGNORE_VERSIONS = -1.0
+  private static int sequence = 0
+
   private boolean prettyPrinting
   private boolean htmlSafe
   private boolean serializeNulls
+  private boolean lenient
+  private int excludeModifiers
+  private boolean exposeOnly
+  private FieldNamingPolicy naming
+  private double version
+  private JsonAdapterList adapters
+  private Map<String, Object> resolved
+  private int id
 
   public Gson() {
     prettyPrinting = false
     htmlSafe = true
     serializeNulls = false
+    lenient = false
+    // Gson's default exclusions, which excludeFieldsWithModifiers replaces
+    excludeModifiers = Modifier.TRANSIENT | Modifier.STATIC
+    exposeOnly = false
+    naming = FieldNamingPolicy.IDENTITY
+    version = IGNORE_VERSIONS
+    adapters = new JsonAdapterList()
+    resolved = new HashMap<String, Object>()
+    sequence++
+    id = sequence
   }
 
-  Gson(boolean prettyPrinting, boolean htmlSafe, boolean serializeNulls) {
-    this.prettyPrinting = prettyPrinting
-    this.htmlSafe = htmlSafe
-    this.serializeNulls = serializeNulls
+  Gson(Gson other) {
+    prettyPrinting = other.prettyPrinting
+    htmlSafe = other.htmlSafe
+    serializeNulls = other.serializeNulls
+    lenient = other.lenient
+    excludeModifiers = other.excludeModifiers
+    exposeOnly = other.exposeOnly
+    naming = other.naming
+    version = other.version
+    adapters = other.adapters.copy()
+    resolved = new HashMap<String, Object>()
+    sequence++
+    id = sequence
   }
+
+  // ---- what the binding reads -------------------------------------------
+
+  // identity is what a binding is cached under (see JsonBinding.key): the
+  // configuration's own number, so that two Gsons that differ are two
+  // bindings and a Gson that is copied is a third.
+  public int identity() {
+    return id
+  }
+
+  public boolean serializeNulls() {
+    return serializeNulls
+  }
+
+  public boolean isLenient() {
+    return lenient
+  }
+
+  public boolean prettyPrinting() {
+    return prettyPrinting
+  }
+
+  public boolean htmlSafe() {
+    return htmlSafe
+  }
+
+  // excludes is excludeFieldsWithModifiers: a field whose modifiers overlap the
+  // set is not bound in either direction, as in Gson.
+  public boolean excludes(int modifiers) {
+    return (modifiers & excludeModifiers) != 0
+  }
+
+  public boolean exposeOnly() {
+    return exposeOnly
+  }
+
+  // Gson's Excluder ignores the version annotations until setVersion names one,
+  // and spells "none" as -1.
+  public boolean versionSet() {
+    return version != IGNORE_VERSIONS
+  }
+
+  public double version() {
+    return version
+  }
+
+  public String translate(String name) {
+    return naming.translateName(name)
+  }
+
+  public Object registeredAdapter(Class type) {
+    if (adapters.isEmpty()) {
+      return null
+    }
+    return adapters.find(type)
+  }
+
+  Object findAdapter(String name) {
+    return resolved.get(name)
+  }
+
+  void rememberAdapter(String name, Object adapter) {
+    resolved.put(name, adapter)
+  }
+
+  // ---- configured by GsonBuilder ----------------------------------------
+
+  /* These eight are the builder's side of the configuration, written on the one
+     Gson a builder holds until it hands out a copy. A program configures
+     through GsonBuilder, as in Gson, where the fields are final and a Gson is
+     never changed after it is built; here the copy is what keeps that promise
+     (see GsonBuilder.create). */
+  void setPrettyPrinting(boolean v) {
+    prettyPrinting = v
+  }
+
+  void setHtmlSafe(boolean v) {
+    htmlSafe = v
+  }
+
+  void setSerializeNulls(boolean v) {
+    serializeNulls = v
+  }
+
+  void setLenient(boolean v) {
+    lenient = v
+  }
+
+  void setExcludeModifiers(int v) {
+    excludeModifiers = v
+  }
+
+  void setExposeOnly(boolean v) {
+    exposeOnly = v
+  }
+
+  void setNaming(FieldNamingPolicy v) {
+    naming = v
+  }
+
+  void setVersion(double v) {
+    version = v
+  }
+
+  void register(Class type, Object adapter, boolean hierarchy) {
+    adapters.add(type, adapter, hierarchy)
+  }
+
+  // ---- writing ----------------------------------------------------------
 
   public String toJson(JsonElement jsonElement) {
     StringBuilder sb = new StringBuilder()
-    JsonWriter writer = new JsonWriter(sb)
+    toJson(jsonElement, sb)
+    return sb.toString()
+  }
+
+  /* Gson's toJson(Object, Appendable): the document is written into the sink as
+     it is produced. The sink here is a StringBuilder, which is the appendable
+     this standard library has -- there is no java.lang.Appendable and no
+     java.io.Writer (see lib/03_io.teyru) -- and a document that should not be
+     built in memory at all is written with a JsonWriter instead (JsonWriter
+     takes the sink directly). */
+  public void toJson(Object value, StringBuilder out) {
+    JsonWriter writer = newJsonWriter(out)
+    JsonWriter.write(value == null ? JsonNull.INSTANCE : JsonBinding.writeTo(value, this), writer)
+  }
+
+  public void toJson(JsonElement element, StringBuilder out) {
+    JsonWriter writer = newJsonWriter(out)
+    JsonWriter.write(element, writer)
+  }
+
+  // Gson's newJsonWriter: a writer configured the way this Gson writes.
+  public JsonWriter newJsonWriter(StringBuilder out) {
+    JsonWriter writer = new JsonWriter(out)
     if (prettyPrinting) {
       // Gson's setPrettyPrinting is setIndent("  ")
       writer.setIndent("  ")
     }
     writer.setHtmlSafe(htmlSafe)
     writer.setSerializeNulls(serializeNulls)
-    JsonWriter.write(jsonElement, writer)
-    return sb.toString()
+    return writer
   }
+
+  /* Gson's toJson(Object): the value's own class answers, so a call whose static
+     type says nothing about the value still writes what it is. */
+  public String toJson(Object value) {
+    return toJson(JsonBinding.writeTo(value, this))
+  }
+
+  // Gson's toJsonTree: the tree the binding would write, before it is text.
+  public JsonElement toJsonTree(Object value) {
+    return value == null ? JsonNull.INSTANCE : JsonBinding.writeTo(value, this)
+  }
+
+  // ---- reading ---------------------------------------------------------
 
   /* Gson's fromJson(json, JsonElement.class). The Class-taking overloads are
      absent because a class literal has type Object here (see the header), so
@@ -2022,7 +2471,15 @@ class Gson {
     if (json == null || json.length() == 0) {
       return null
     }
-    return JsonParser.parseString(json)
+    JsonReader reader = newJsonReader(json)
+    return reader.parseDocument()
+  }
+
+  // Gson's newJsonReader: a reader configured the way this Gson reads.
+  public JsonReader newJsonReader(String json) {
+    JsonReader reader = new JsonReader(json)
+    reader.setLenient(lenient)
+    return reader
   }
 
   /* Gson's fromJson(json, Class): the class's fields are read off the class
@@ -2037,41 +2494,141 @@ class Gson {
     // the witness is written out: this language infers less than javac does, and
     // a value returned as the method's own type parameter is not enough to
     // resolve readFrom's
-    return JsonBinding.<T>readFrom(json, type)
+    return JsonBinding.<T>readFrom(json, type, this)
   }
 
-  /* Gson's toJson(Object): the value's own class answers, so a call whose static
-     type says nothing about the value still writes what it is. */
-  public String toJson(Object value) {
-    return toJson(JsonBinding.writeTo(value))
+  /* Gson's fromJson(JsonElement, Class), for a document that has already been
+     read -- from a tree an adapter was handed, or one built by hand. */
+  public <T> T fromJson(JsonElement json, Class type) {
+    if (json == null || json.isJsonNull()) {
+      return null
+    }
+    return JsonBinding.<T>read(json, type, this)
+  }
+
+  // ---- builder ---------------------------------------------------------
+
+  /* Gson's newBuilder and toBuilder: a builder holding a copy of this
+     configuration, so that what is built from it is this Gson plus the
+     difference. */
+  public GsonBuilder newBuilder() {
+    return new GsonBuilder(new Gson(this))
+  }
+
+  public GsonBuilder toBuilder() {
+    return newBuilder()
   }
 }
 
+/* com.google.gson.GsonBuilder. Each setter records one thing about the
+   configuration and answers the builder, so the calls chain the way Gson's do.
+
+   The configuration it writes on is the builder's own Gson, and create() hands
+   out a copy of it: a Gson that has been created is never changed again, which
+   is what lets JsonBinding cache a reader and a writer against it. */
 class GsonBuilder {
-  private boolean prettyPrinting
-  private boolean htmlSafe
-  private boolean serializeNulls
+  private Gson config
 
   public GsonBuilder() {
-    htmlSafe = true
+    config = new Gson()
+  }
+
+  GsonBuilder(Gson start) {
+    config = start
   }
 
   public GsonBuilder setPrettyPrinting() {
-    prettyPrinting = true
+    config.setPrettyPrinting(true)
     return this
   }
 
   public GsonBuilder disableHtmlEscaping() {
-    htmlSafe = false
+    config.setHtmlSafe(false)
     return this
   }
 
   public GsonBuilder serializeNulls() {
-    serializeNulls = true
+    config.setSerializeNulls(true)
     return this
   }
 
+  /* Gson's setLenient: the documents this Gson reads may be as loose as Gson's
+     own reader allows -- unquoted names, single-quoted strings, a leading +, a
+     leading '.', a trailing ',', NaN and Infinity. It is false by default here,
+     where the rest of the reader is strict (see the class comment above). */
+  public GsonBuilder setLenient(boolean lenient) {
+    config.setLenient(lenient)
+    return this
+  }
+
+  /* Gson's excludeFieldsWithModifiers: a field whose modifiers overlap the set
+     is not bound. It REPLACES the default set, as it does in Gson -- a field
+     that is static or transient is then only excluded when the call names it,
+     so `excludeFieldsWithModifiers()` with no arguments binds everything that
+     is not synthetic. */
+  public GsonBuilder excludeFieldsWithModifiers(int... modifiers) {
+    int mask = 0
+    for (int i = 0 : i < modifiers.length : i++) {
+      mask = mask | modifiers[i]
+    }
+    config.setExcludeModifiers(mask)
+    return this
+  }
+
+  // Gson's excludeFieldsWithoutExposeAnnotation.
+  public GsonBuilder excludeFieldsWithoutExposeAnnotation() {
+    config.setExposeOnly(true)
+    return this
+  }
+
+  public GsonBuilder setFieldNamingPolicy(FieldNamingPolicy namingPolicy) {
+    config.setNaming(namingPolicy)
+    return this
+  }
+
+  /* Gson's setVersion: the version @Since and @Until are read against. A field
+     is skipped when the version is below its @Since, or at or above its
+     @Until. */
+  public GsonBuilder setVersion(double version) {
+    config.setVersion(version)
+    return this
+  }
+
+  /* Gson's registerTypeAdapter: the adapter answers for that type and no other.
+     The object must implement JsonSerializer, JsonDeserializer, or both; the
+     last registration for a type wins, as in Gson. */
+  public GsonBuilder registerTypeAdapter(Class type, Object adapter) {
+    checkAdapter(type, adapter)
+    config.register(type, adapter, false)
+    return this
+  }
+
+  /* Gson's registerTypeHierarchyAdapter: the adapter answers for that type and
+     every subtype of it. */
+  public GsonBuilder registerTypeHierarchyAdapter(Class baseType, Object adapter) {
+    checkAdapter(baseType, adapter)
+    config.register(baseType, adapter, true)
+    return this
+  }
+
+  // checkAdapter is Gson's up-front refusal of an adapter that does nothing,
+  // raised where the registration is written rather than at the first value.
+  private void checkAdapter(Class type, Object adapter) {
+    if (adapter == null) {
+      throw new NullPointerException("adapter must not be null")
+    }
+    if (!(adapter instanceof JsonSerializer) && !(adapter instanceof JsonDeserializer)) {
+      throw new IllegalArgumentException(adapter.getClass().getName() +
+        " is not a JsonSerializer or a JsonDeserializer")
+    }
+    if (type == null) {
+      throw new NullPointerException("type must not be null")
+    }
+  }
+
+  /* Gson's create: a copy of the configuration, so that changing the builder
+     afterwards cannot change a Gson that was already handed out. */
   public Gson create() {
-    return new Gson(prettyPrinting, htmlSafe, serializeNulls)
+    return new Gson(config)
   }
 }
