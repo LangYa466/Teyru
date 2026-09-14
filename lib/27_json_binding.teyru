@@ -15,25 +15,38 @@ package teyru
 // the fields the document carries, leaving the rest as the class initialized
 // them. A record is read through its canonical constructor instead, which is
 // the only way to make one. A field's JSON name is its own unless
-// @SerializedName says otherwise, and a field whose value is an object is read
-// by the same machinery, one class deeper.
+// @SerializedName says otherwise (or the Gson's field naming policy renames
+// it), and a field whose value is an object is read by the same machinery, one
+// class deeper.
+//
+// Every entry point takes the Gson whose configuration decides what is bound
+// (lib/10_json.teyru): the modifiers that exclude a field, @Expose, the version
+// range, the naming policy and the adapters are all read off it, so two Gsons
+// with different configurations bind the same class differently and each keeps
+// its own readers and writers. A null configuration means Gson's defaults
+// (Gson's default exclude set: static and transient), which is what the
+// static JsonBinding entry points use -- the ones lib/31_routes.teyru calls.
 
 // JsonFields answers the fields of a class in declaration order, which is the
 // order the generated writer wrote them in and the order the document's members
 // are expected in.
 class JsonFields {
   public static Field[] of(Class type) {
+    return of(type, null, false)
+  }
+
+  public static Field[] of(Class type, Gson config, boolean forWrite) {
     Field[] all = type.getDeclaredFields()
     int keep = 0
     for (int i = 0 : i < all.length : i++) {
-      if (bindable(all[i])) {
+      if (bindable(all[i], config, forWrite)) {
         keep++
       }
     }
     Field[] out = new Field[keep]
     int at = 0
     for (int i = 0 : i < all.length : i++) {
-      if (bindable(all[i])) {
+      if (bindable(all[i], config, forWrite)) {
         out[at] = all[i]
         at++
       }
@@ -42,13 +55,61 @@ class JsonFields {
   }
 
   // bindable is what Gson binds: an instance field, not a static one, and not
-  // the synthetic field an inner class carries its enclosing instance in.
+  // the synthetic field an inner class carries its enclosing instance in. When
+  // a configuration is given its exclusions are applied on top: Gson's
+  // excludeFieldsWithModifiers (static and transient by default), and, when the
+  // configuration asks for it, @Expose and the @Since/@Until version range.
   public static boolean bindable(Field f) {
-    return Modifier.isStatic(f.getModifiers()) == false && f.getName().indexOf("$") < 0
+    return bindable(f, null, false)
   }
 
-  // jsonName is the member name a field is written and read as.
+  public static boolean bindable(Field f, Gson config, boolean forWrite) {
+    if (Modifier.isStatic(f.getModifiers()) || f.getName().indexOf("$") >= 0) {
+      return false
+    }
+    if (config == null) {
+      return true
+    }
+    if (config.excludes(f.getModifiers())) {
+      return false
+    }
+    if (config.exposeOnly()) {
+      // Gson's excludeFieldsWithoutExposeAnnotation: a field without @Expose is
+      // skipped, and an @Expose that turns one direction off skips it there
+      Annotation expose = f.getAnnotation(Expose.class)
+      if (expose == null) {
+        return false
+      }
+      if (forWrite && !expose.booleanValue("serialize")) {
+        return false
+      }
+      if (!forWrite && !expose.booleanValue("deserialize")) {
+        return false
+      }
+    }
+    if (config.versionSet()) {
+      // Gson's Excluder.isValidVersion: @Since(v) keeps the field from v on,
+      // @Until(v) keeps it up to but not including v
+      Annotation since = f.getAnnotation(Since.class)
+      if (since != null && config.version() < since.doubleValue("value")) {
+        return false
+      }
+      Annotation until = f.getAnnotation(Until.class)
+      if (until != null && config.version() >= until.doubleValue("value")) {
+        return false
+      }
+    }
+    return true
+  }
+
+  // jsonName is the member name a field is written and read as: the one
+  // @SerializedName gives, then the configuration's naming policy, then the
+  // field's own name -- Gson's order.
   public static String jsonName(Field f) {
+    return jsonName(f, null)
+  }
+
+  public static String jsonName(Field f, Gson config) {
     Annotation a = f.getAnnotation(SerializedName.class)
     if (a != null) {
       String named = a.stringValue("value")
@@ -56,7 +117,21 @@ class JsonFields {
         return named
       }
     }
-    return f.getName()
+    if (config == null) {
+      return f.getName()
+    }
+    return config.translate(f.getName())
+  }
+
+  // find answers the member a JSON name belongs to, or -1. A reader walking a
+  // document asks this once per member.
+  public static int find(Field[] fields, String name, Gson config) {
+    for (int i = 0 : i < fields.length : i++) {
+      if (jsonName(fields[i], config).equals(name)) {
+        return i
+      }
+    }
+    return -1
   }
 }
 
@@ -64,11 +139,49 @@ class JsonFields {
 // back into a tree. The two directions have to agree: whatever is written has to
 // be readable, so a char is a one-character string both ways and an Object field
 // carries the tree that arrived.
+//
+/* A declared type that is a container -- List<X>, Set<X>, Map<String,X>, X[] --
+   is bound by the same two directions, and the element type is not available:
+   reflection erases it (lib/26_reflect.teyru has no generic types, and every
+   array type in a program is one class), so the shape of the document is what
+   decides what an element is.
+
+   Elements that carry their own type are bound, and exactly those: a JSON
+   string is a String, a number an Integer, a Long or a Double, a boolean a
+   Boolean, null a null. A JSON object or a JSON array is refused, and that
+   refusal is the important part of this file.
+
+   The reason is that a cast in this language is not checked. A program that
+   declares `List<Item> lines` reads an element as `Item it = lines.get(0)` and
+   then `it.name`, and nothing between the container and that field access tests
+   the value: the compiler treats the erased element as the declared one, and a
+   JsonObject placed there is read at Item's field offsets. Measured, that is a
+   SIGSEGV -- not a ClassCastException, and not a wrong answer the program can
+   notice. Since the binding cannot know whether the element at `lines.get(0)`
+   was declared `Item`, `JsonElement` or `Object`, it refuses every object and
+   every array inside a container instead of placing a value that one of those
+   declarations would fault on. The way to bind one is @JsonAdapter on the
+   field, which names a class that reads and writes the whole member and can
+   name the element type the binding cannot see (see newtests/t2_adapters). */
 class JsonConvert {
+  // ---- reading ----------------------------------------------------------
+
   // to is the reading direction: the declared type says what the text is.
   public static Object to(Class type, JsonElement e) {
+    return to(type, e, null, "$")
+  }
+
+  public static Object to(Class type, JsonElement e, Gson config) {
+    return to(type, e, config, "$")
+  }
+
+  public static Object to(Class type, JsonElement e, Gson config, String where) {
     if (e == null || e.isJsonNull()) {
       return null
+    }
+    Object adapter = JsonBinding.typeAdapter(type, config)
+    if (adapter != null) {
+      return JsonBinding.deserializeWith(adapter, e, type, config, where)
     }
     if (type.equals(String.class)) {
       return e.getAsString()
@@ -112,7 +225,175 @@ class JsonConvert {
     if (type.equals(JsonElement.class) || type.equals(Object.class)) {
       return e
     }
-    return JsonBinding.reader(type).read(e)
+    if (type.isArray()) {
+      return readArray(e, config, where)
+    }
+    if (Map.class.isAssignableFrom(type)) {
+      return readMap(type, e, config, where)
+    }
+    if (Collection.class.isAssignableFrom(type)) {
+      return readCollection(type, e, config, where)
+    }
+    return JsonBinding.reader(type, config).read(e)
+  }
+
+  // ---- containers ------------------------------------------------------
+
+  // readMap is Map<String,X> -- and every other Map shape, since the key type
+  // is erased with the rest: a member name is a String, so a Map<Integer,X>
+  // comes back with String keys, which is what writing it again expects.
+  public static Object readMap(Class type, JsonElement e, Gson config, String where) {
+    JsonObject o = e.getAsJsonObject()
+    Map out = newMap(type)
+    for (JsonMember m : o.entrySet()) {
+      out.put(m.getKey(), dynamic(m.getValue(), config, where + "." + m.getKey()))
+    }
+    return out
+  }
+
+  // readCollection is List<X>, Set<X>, Collection<X> and their Sorted and
+  // Navigable forms.
+  public static Object readCollection(Class type, JsonElement e, Gson config, String where) {
+    JsonArray a = e.getAsJsonArray()
+    Collection out = newCollection(type)
+    for (int i = 0 : i < a.size() : i++) {
+      out.add(dynamic(a.get(i), config, where + "[" + i + "]"))
+    }
+    return out
+  }
+
+  /* readArray is X[].
+
+     The element class is not recoverable at all. `Class.getComponentType` does
+     not exist here and every array type in a program is one class (see
+     lib/26_reflect.teyru): the field table records `teyru.Array` for an `int[]`
+     exactly as it does for a `String[]`, so the two are the same class to
+     reflection and nothing distinguishes them.
+
+     That leaves nothing to build an array with. A component of the wrong kind
+     is not a failed conversion but a wrong layout -- an `int[]` field holding an
+     array of references reads four bytes of every eight-byte slot, measured --
+     so the binding builds an array only where the document removes the
+     question: a document with no elements. An empty array has no element to
+     misread, its length is right whatever the element type was, and every
+     access to it is out of bounds, so a zero-length array of references is a
+     correct value for a field of any array type. An array with elements --
+     strings, numbers, objects, anything -- is refused with the field named,
+     because no element class can be chosen for it. */
+  public static Object readArray(JsonElement e, Gson config, String where) {
+    JsonArray a = e.getAsJsonArray()
+    if (a.size() > 0) {
+      throw new JsonParseException("cannot bind the array at " + where +
+        ": an array's element class is not available at run time -- every array type in a " +
+        "program is one class, so nothing tells an int[] from a String[] and an array built " +
+        "with the wrong element kind reads the wrong words instead of failing. " +
+        "Declare the member as a List, or bind it with @JsonAdapter")
+    }
+    int n = a.size()
+    Object out = Array.newInstance(Object.class, n)
+    for (int i = 0 : i < n : i++) {
+      Array.set(out, i, dynamic(a.get(i), config, where + "[" + i + "]"))
+    }
+    return out
+  }
+
+  /* dynamic is the reading direction for a value whose declared type is not
+     known, which is every element of every container. The document's own shape
+     is the only thing that says what the element is, and it can only answer for
+     an element that carries its type: a primitive. An object or an array is
+     refused rather than placed -- see the class comment for what such a value
+     does to a container the program declared with a class element type. */
+  public static Object dynamic(JsonElement e, Gson config, String where) {
+    if (e == null || e.isJsonNull()) {
+      return null
+    }
+    if (e.isJsonPrimitive()) {
+      JsonPrimitive p = e.getAsJsonPrimitive()
+      if (p.isString()) {
+        return p.getAsString()
+      }
+      if (p.isBoolean()) {
+        return p.getAsBoolean()
+      }
+      if (p.isNumber()) {
+        return number(p, where)
+      }
+    }
+    throw new JsonParseException("cannot bind the " + shapeOf(e) + " at " + where +
+      ": a container's element type is erased at run time, and this language does not " +
+      "check the cast that reads an element, so a tree placed where the program declared " +
+      "a class would be read as that class instead of being reported. " +
+      "Bind the member with @JsonAdapter, which names the whole member's element type")
+  }
+
+  private static String shapeOf(JsonElement e) {
+    if (e.isJsonObject()) {
+      return "JSON object"
+    }
+    if (e.isJsonArray()) {
+      return "JSON array"
+    }
+    return "value"
+  }
+
+  /* number is the element a number becomes when nothing declared its type:
+     an Integer when the text is an integer that fits one, a Long when it is an
+     integer that does not, and a Double otherwise. It is the choice that makes
+     List<Integer> and Map<String,Integer> -- what most documents carry -- read
+     back as what they hold; a List<Long> whose document says 1 reads as an
+     Integer, and the conversion at the use site is what reports it, because the
+     element type it was declared with is not available here. The tree layer
+     keeps the literal text instead, so a document read into a JsonElement still
+     prints back as it was written. */
+  private static Object number(JsonPrimitive p, String where) {
+    String text = p.getAsNumber().toString()
+    if (JsonNumbers.isIntegerText(text)) {
+      try {
+        long v = JsonNumbers.parseLong(text)
+        if (v >= -2147483648L && v <= 2147483647L) {
+          return (int) v
+        }
+        return v
+      } catch (IllegalArgumentException ex) {
+        // past Long.MAX_VALUE: the double answers, as it does in Java
+        return p.getAsDouble()
+      }
+    }
+    return p.getAsDouble()
+  }
+
+  // newMap is Gson's choice of Map implementation: what the field declared when
+  // that is a class, and the interface's own default when it is not --
+  // LinkedHashMap for Map (Gson's default, insertion ordered) and TreeMap for
+  // SortedMap and NavigableMap.
+  public static Map newMap(Class type) {
+    if (!type.isInterface()) {
+      return (Map) type.newInstance()
+    }
+    if (SortedMap.class.isAssignableFrom(type) || NavigableMap.class.isAssignableFrom(type)) {
+      return new TreeMap()
+    }
+    return new LinkedHashMap()
+  }
+
+  /* newCollection is Gson's ConstructorConstructor choice again: TreeSet for
+     the sorted sets, LinkedHashSet for Set (Gson's default for a set is
+     insertion ordered), ArrayDeque for Queue and Deque, and ArrayList for
+     List, Collection and the rest. */
+  public static Collection newCollection(Class type) {
+    if (!type.isInterface()) {
+      return (Collection) type.newInstance()
+    }
+    if (SortedSet.class.isAssignableFrom(type) || NavigableSet.class.isAssignableFrom(type)) {
+      return new TreeSet()
+    }
+    if (Set.class.isAssignableFrom(type)) {
+      return new LinkedHashSet()
+    }
+    if (Queue.class.isAssignableFrom(type)) {
+      return new ArrayDeque()
+    }
+    return new ArrayList()
   }
 
   // enumValue matches a constant by name, which is what Gson does and what makes
@@ -129,8 +410,15 @@ class JsonConvert {
     throw new JsonParseException("no " + type.getName() + " constant named " + name)
   }
 
-  // from is the writing direction: the value's own type says what the tree is.
+  // ---- writing ---------------------------------------------------------
+
+  // from is the writing direction: the value's own type says what the tree is,
+  // so nothing has to be inferred here.
   public static JsonElement from(Object v) {
+    return from(v, null)
+  }
+
+  public static JsonElement from(Object v, Gson config) {
     if (v == null) {
       return JsonNull.INSTANCE
     }
@@ -139,6 +427,10 @@ class JsonConvert {
       // holds whatever arrived, and a JsonObject read out of one has to survive
       // being written back rather than being looked up as a class
       return (JsonElement) v
+    }
+    Object adapter = JsonBinding.typeAdapter(v.getClass(), config)
+    if (adapter != null) {
+      return JsonBinding.serializeWith(adapter, v, v.getClass(), config)
     }
     if (v instanceof String) {
       return new JsonPrimitive((String) v)
@@ -169,20 +461,93 @@ class JsonConvert {
     if (v instanceof Float) {
       return new JsonPrimitive((Float) v)
     }
+    if (v instanceof Number) {
+      // a Number the wrapper checks above did not name -- a LazilyParsedNumber
+      // read out of a document, say -- is still a number, and prints as the
+      // text it holds
+      return new JsonPrimitive((Number) v)
+    }
     if (v instanceof Enum) {
       return new JsonPrimitive(((Enum) v).name())
     }
-    return JsonBinding.writer(v.getClass()).write(v)
+    if (v instanceof Map) {
+      return fromMap((Map) v, config)
+    }
+    if (v instanceof Collection) {
+      return fromCollection((Collection) v, config)
+    }
+    if (v.getClass().isArray()) {
+      return fromArray(v, config)
+    }
+    return JsonBinding.writer(v.getClass(), config).write(v)
+  }
+
+  // fromMap writes a Map as an object. Gson names the members with the key's
+  // String form, and so does this: a key that is a JsonPrimitive is written as
+  // its own text (so a number key is 1 rather than "1"), and any other key as
+  // its toString.
+  public static JsonElement fromMap(Map m, Gson config) {
+    JsonObject out = new JsonObject()
+    for (Object k : m.keySet()) {
+      out.add(keyName(k), from(m.get(k), config))
+    }
+    return out
+  }
+
+  private static String keyName(Object k) {
+    if (k == null) {
+      throw new NullPointerException("null map key")
+    }
+    if (k instanceof JsonPrimitive) {
+      return ((JsonPrimitive) k).getAsString()
+    }
+    return String.valueOf(k)
+  }
+
+  // fromCollection writes a Collection -- a List, a Set, a Queue -- as an array.
+  public static JsonElement fromCollection(Collection c, Gson config) {
+    JsonArray out = new JsonArray()
+    for (Object e : c) {
+      out.add(from(e, config))
+    }
+    return out
+  }
+
+  // fromArray writes an array as an array. Every element is read through
+  // java.lang.reflect.Array, which boxes it by the array's own element kind, so
+  // this direction has no trouble with the element class the reading direction
+  // cannot recover.
+  public static JsonElement fromArray(Object a, Gson config) {
+    JsonArray out = new JsonArray()
+    int n = Array.getLength(a)
+    for (int i = 0 : i < n : i++) {
+      out.add(from(Array.get(a, i), config))
+    }
+    return out
   }
 }
 
 // ReflectReader is the reader of one class: the fields it was asked about, read
-// off the class the first time it was asked for.
+// off the class the first time it was asked for, with the field's adapter --
+// @JsonAdapter on the field -- resolved once, next to the fields.
 class ReflectReader implements JsonReader2 {
   private Class type
+  private Gson config
+  private Field[] fields
+  private Object[] adapters
 
   public ReflectReader(Class type) {
+    this(type, null)
+  }
+
+  public ReflectReader(Class type, Gson config) {
     this.type = type
+    this.config = config
+    this.fields = JsonFields.of(type, config, false)
+    this.adapters = new Object[fields.length]
+    for (int i = 0 : i < fields.length : i++) {
+      this.adapters[i] = JsonBinding.fieldAdapter(fields[i], config)
+    }
   }
 
   public Object read(JsonElement e) {
@@ -194,16 +559,24 @@ class ReflectReader implements JsonReader2 {
     }
     JsonObject o = e.getAsJsonObject()
     Object out = type.newInstance()
-    Field[] fs = JsonFields.of(type)
-    for (int i = 0 : i < fs.length : i++) {
-      JsonElement v = o.get(JsonFields.jsonName(fs[i]))
+    for (int i = 0 : i < fields.length : i++) {
+      JsonElement v = o.get(JsonFields.jsonName(fields[i], config))
       if (v == null) {
         // a member the document does not carry keeps what the class gave it
         continue
       }
-      fs[i].set(out, JsonConvert.to(fs[i].getType(), v))
+      fields[i].set(out, valueOf(i, v, "$." + fields[i].getName()))
     }
     return out
+  }
+
+  // valueOf reads one member: through the field's own adapter when @JsonAdapter
+  // named one, and through the declared type otherwise.
+  public Object valueOf(int i, JsonElement v, String where) {
+    if (adapters[i] != null) {
+      return JsonBinding.deserializeWith(adapters[i], v, fields[i].getType(), config, where)
+    }
+    return JsonConvert.to(fields[i].getType(), v, config, where)
   }
 
   // readRecord builds a record through its canonical constructor. A record has
@@ -213,16 +586,15 @@ class ReflectReader implements JsonReader2 {
   // type gives, since there is no field initializer to keep instead.
   private Object readRecord(JsonElement e) {
     JsonObject o = e.getAsJsonObject()
-    Field[] fs = JsonFields.of(type)
     Constructor ctor = type.getDeclaredConstructors()[0]
-    Object[] args = new Object[fs.length]
-    for (int i = 0 : i < fs.length : i++) {
-      JsonElement v = o.get(JsonFields.jsonName(fs[i]))
+    Object[] args = new Object[fields.length]
+    for (int i = 0 : i < fields.length : i++) {
+      JsonElement v = o.get(JsonFields.jsonName(fields[i], config))
       if (v == null) {
-        args[i] = zeroOf(fs[i].getType())
+        args[i] = zeroOf(fields[i].getType())
         continue
       }
-      args[i] = JsonConvert.to(fs[i].getType(), v)
+      args[i] = valueOf(i, v, "$." + fields[i].getName())
     }
     return ctor.newInstance(args)
   }
@@ -261,9 +633,24 @@ class ReflectReader implements JsonReader2 {
 // ReflectWriter is the writer of one class.
 class ReflectWriter implements JsonWriter2 {
   private Class type
+  private Gson config
+  private Field[] fields
+  private Object[] adapters
+  private boolean serializeNulls
 
   public ReflectWriter(Class type) {
+    this(type, null)
+  }
+
+  public ReflectWriter(Class type, Gson config) {
     this.type = type
+    this.config = config
+    this.fields = JsonFields.of(type, config, true)
+    this.adapters = new Object[fields.length]
+    for (int i = 0 : i < fields.length : i++) {
+      this.adapters[i] = JsonBinding.fieldAdapter(fields[i], config)
+    }
+    this.serializeNulls = config != null && config.serializeNulls()
   }
 
   public JsonElement write(Object v) {
@@ -271,14 +658,19 @@ class ReflectWriter implements JsonWriter2 {
       return JsonNull.INSTANCE
     }
     JsonObject out = new JsonObject()
-    Field[] fs = JsonFields.of(type)
-    for (int i = 0 : i < fs.length : i++) {
-      Object value = fs[i].get(v)
-      if (value == null) {
-        // Gson's default: a null member is not written at all
+    for (int i = 0 : i < fields.length : i++) {
+      Object value = fields[i].get(v)
+      if (value == null && !serializeNulls) {
+        // Gson's default: a null member is not written at all. serializeNulls
+        // writes it as null, which is what GsonBuilder.serializeNulls is for.
         continue
       }
-      out.add(JsonFields.jsonName(fs[i]), JsonConvert.from(value))
+      if (adapters[i] != null) {
+        out.add(JsonFields.jsonName(fields[i], config),
+          JsonBinding.serializeWith(adapters[i], value, fields[i].getType(), config))
+        continue
+      }
+      out.add(JsonFields.jsonName(fields[i], config), JsonConvert.from(value, config))
     }
     return out
   }

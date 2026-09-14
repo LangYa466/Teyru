@@ -209,6 +209,14 @@ source → lexer → parser → ast → sema → codegen
     LTO 不再丟掉那塊 8 MB 的 `ty_roots` 保留區與相關符號。差異已量到，根因未定——
     同一支程式額外帶一塊 8 MB 的未觸碰 `.bss` 時 RSS 只多 64 kB，所以不是那塊保留區
     本身；把 `forName` 的表拿掉也只降回約 4.1 MB。
+- JSON 綁定（`lib/27_json_binding.teyru`）讀的是類別本身：基本型別、字串、`char`、
+  列舉、`Object`、巢狀類別、record，以及**容器**（`List`／`Set`／`Map`／`Deque` 等
+  介面與其實作、陣列）都已往返。尚未完成的是：容器裡的**物件元素**（元素型別由
+  抹除後的宣告型別推導，遇到物件時目前是明確拒絕而不是產生壞資料）、
+  `GsonBuilder` 的其餘旋鈕（`serializeNulls`／`setPrettyPrinting`／
+  `setLenient`／`setFieldNamingPolicy`／`excludeFields*`）、`@Expose`／
+  `@Since`／`@Until` 的過濾、`JsonSerializer`／`JsonDeserializer` 轉接器，以及
+  Gson 的串流 `JsonReader`／`JsonWriter`。
 - 沒有執行緒（`java.util` 集合、`java.io`、`java.net` 都有）。
 - 與 Java 生態不相容（沒有 JAR、沒有 JDK 類別庫、沒有 JNI）。
 - GC 為保守式標記清除，非分代；大量短命物件的情境仍落後 HotSpot 的逃逸分析。
