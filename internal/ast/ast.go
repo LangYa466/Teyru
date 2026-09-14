@@ -241,7 +241,12 @@ type MethodDecl struct {
 	Body       *Block
 	IsCtor     bool
 	Compact    bool // compact record constructor
-	Sym        *Method
+	// Default is an annotation element's default value, the expression after
+	// `default` in `@interface X { int n() default 0 }`. It is kept because a
+	// reader of the annotation at run time has to answer with it: an element a
+	// use did not write answers its default, which is what Java requires.
+	Default Expr
+	Sym     *Method
 }
 
 // InitBlock is an instance or static initializer.
@@ -646,6 +651,12 @@ type Field struct {
 	Storage  bool // has backing storage
 	ConstVal any  // compile-time constant for static finals
 	EnumOrd  int
+	// Annos are the annotations written on the declaration this field came
+	// from. They live on the FieldDecl, which may declare several fields, so
+	// the checker copies them here: everything that reads them -- the Lombok
+	// pass, the container, the emitter's reflection metadata -- wants them per
+	// field.
+	Annos []*Annotation
 	// annotation-driven members (Lombok compatibility)
 	NonNull bool
 	// Singular marks a @Singular builder field: the builder accumulates into a

@@ -659,7 +659,7 @@ func (p *parser) parseMemberAfterMods(cd *ast.ClassDecl, pos source.Pos, mods as
 			md.Throws = p.parseTypeList()
 		}
 		if cd.Kind == ast.KindAnnotation && p.accept("default") {
-			p.parseExpr()
+			md.Default = p.parseExpr()
 		}
 		if p.is("{") {
 			md.Body = p.parseBlock()

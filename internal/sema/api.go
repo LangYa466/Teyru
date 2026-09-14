@@ -71,6 +71,16 @@ func (p *Program) LookupClass(full string) *ast.Class {
 	return p.c.global[full]
 }
 
+// ProgramClass looks up a class by simple name, from the prelude or the
+// program; code generation uses it for the implicit java.io.IO import and for
+// the annotations an element names.
+func (p *Program) ProgramClass(name string) *ast.Class {
+	if p.c == nil {
+		return nil
+	}
+	return p.c.programClass(name)
+}
+
 // ProgramClass looks up a class from the prelude or the user program by
 // simple name; code generation uses it for the implicit java.io.IO import.
 func (c *Checker) programClass(name string) *ast.Class { return c.global[name] }

@@ -213,6 +213,189 @@ class Modifier {
   }
 }
 
+// ---- Annotation ----------------------------------------------------------
+
+/* An annotation, as far as this language carries one: its type, and its
+   elements read by name.
+
+   Java hands back an implementation of the annotation interface, so a program
+   writes ann.value() and the compiler knows what type that is. That needs a
+   class per annotation type, which the compiler does not synthesize yet, so an
+   element is asked for by name here -- ann.stringValue("value") -- and the
+   difference is listed in AGENTS.md §10. Everything else is Java's: the type,
+   the list of elements, isAnnotationPresent, and an element that is not there
+   or is of the wrong type answering IllegalArgumentException. */
+class Annotation {
+  /* The kinds of element value, which are the TY_ANN_* macros in tyrt.h. An
+     element whose value this cannot carry is UNSUPPORTED, and reading it says
+     so rather than answering nothing. */
+  private static final int KIND_STRING = 1
+  private static final int KIND_INT = 2
+  private static final int KIND_LONG = 3
+  private static final int KIND_DOUBLE = 4
+  private static final int KIND_BOOL = 5
+  private static final int KIND_CLASS = 6
+  private static final int KIND_ENUM = 7
+
+  static native long typeOf(long ah)
+  static native int argCountOf(long ah)
+  static native String argNameOf(long ah, int i)
+  static native int argKindOf(long ah, int i)
+  static native long argIntOf(long ah, int i)
+  static native double argDoubleOf(long ah, int i)
+  static native String argStrOf(long ah, int i)
+  static native long argClassOf(long ah, int i)
+  static native int argIndexOf(long ah, String name)
+
+  private long ah
+
+  Annotation(long ah) {
+    this.ah = ah
+  }
+
+  /* The annotation's own type, which is the @interface it was declared with. */
+  public Class annotationType() {
+    return Class.makeOf(typeOf(ah))
+  }
+
+  public String[] elementNames() {
+    int n = argCountOf(ah)
+    String[] out = new String[n]
+    for (int i = 0 : i < n : i++) {
+      out[i] = argNameOf(ah, i)
+    }
+    return out
+  }
+
+  public boolean has(String name) {
+    return argIndexOf(ah, name) >= 0
+  }
+
+  public String stringValue(String name) {
+    return argStrOf(ah, want(name, KIND_STRING, "String"))
+  }
+
+  /* An enum element answers with the constant's name, the way an enum answers
+     name(), and enumType is the class to compare it against. */
+  public String enumValue(String name) {
+    return argStrOf(ah, want(name, KIND_ENUM, "enum"))
+  }
+
+  public Class enumType(String name) {
+    return Class.makeOf(argClassOf(ah, want(name, KIND_ENUM, "enum")))
+  }
+
+  public Class classValue(String name) {
+    return Class.makeOf(argClassOf(ah, want(name, KIND_CLASS, "Class")))
+  }
+
+  public int intValue(String name) {
+    int i = argIndexOf(ah, name)
+    int kind = i < 0 ? 0 : argKindOf(ah, i)
+    if (kind == KIND_INT || kind == KIND_LONG || kind == KIND_BOOL) {
+      return (int) argIntOf(ah, i)
+    }
+    if (i < 0) {
+      throw new IllegalArgumentException(absent(name))
+    }
+    throw new IllegalArgumentException(no(name, "int"))
+  }
+
+  public long longValue(String name) {
+    int i = argIndexOf(ah, name)
+    int kind = i < 0 ? 0 : argKindOf(ah, i)
+    if (kind == KIND_INT || kind == KIND_LONG || kind == KIND_BOOL) {
+      return argIntOf(ah, i)
+    }
+    if (i < 0) {
+      throw new IllegalArgumentException(absent(name))
+    }
+    throw new IllegalArgumentException(no(name, "long"))
+  }
+
+  public boolean booleanValue(String name) {
+    return argIntOf(ah, want(name, KIND_BOOL, "boolean")) != 0
+  }
+
+  public double doubleValue(String name) {
+    int i = argIndexOf(ah, name)
+    int kind = i < 0 ? 0 : argKindOf(ah, i)
+    if (kind == KIND_DOUBLE) {
+      return argDoubleOf(ah, i)
+    }
+    if (kind == KIND_INT || kind == KIND_LONG) {
+      return (double) argIntOf(ah, i)
+    }
+    if (i < 0) {
+      throw new IllegalArgumentException(absent(name))
+    }
+    throw new IllegalArgumentException(no(name, "double"))
+  }
+
+  /* The index of an element that is present and is of the wanted kind. An
+     annotation declares its elements with defaults, so a missing one is the
+     default rather than an error -- but the compiler does not carry defaults
+     into the metadata, and a program that reads one it did not write is told
+     so. */
+  private int want(String name, int kind, String type) {
+    int i = argIndexOf(ah, name)
+    if (i < 0) {
+      throw new IllegalArgumentException(absent(name))
+    }
+    if (argKindOf(ah, i) != kind) {
+      throw new IllegalArgumentException(no(name, type))
+    }
+    return i
+  }
+
+  /* An element that is not on the annotation at all and one that is of the
+     wrong kind are different mistakes, and the messages say which. */
+  private String absent(String name) {
+    return "no element \"" + name + "\" in @" + annotationType().getName()
+  }
+
+  private String no(String name, String type) {
+    return "element \"" + name + "\" of @" + annotationType().getName() + " is not a " + type
+  }
+
+  public String toString() {
+    return "@" + annotationType().getName()
+  }
+
+  public int hashCode() {
+    return annotationType().getName().hashCode()
+  }
+
+  /* Two annotations are equal when they are of the same type and carry the
+     same elements with the same values, which is what Java's own annotation
+     equality says. The comparison runs in the runtime, over the two records:
+     twenty lines of it here would be the same comparison written once per
+     value kind. */
+  public boolean equals(Object o) {
+    if ((Object)this == o) {
+      return true
+    }
+    if (!(o instanceof Annotation)) {
+      return false
+    }
+    Annotation other = (Annotation) o
+    return sameOf(ah, other.ah)
+  }
+
+  static native boolean sameOf(long a, long b)
+
+  /* The annotation of a given type in a list, or null: what getAnnotation on a
+     class, a field or a method is. */
+  public static Annotation find(Annotation[] all, Class type) {
+    for (int i = 0 : i < all.length : i++) {
+      if (all[i].annotationType().equals(type)) {
+        return all[i]
+      }
+    }
+    return null
+  }
+}
+
 // ---- Class ---------------------------------------------------------------
 
 /* A class, or an interface, or a primitive type, or the one array class every
@@ -271,6 +454,14 @@ class Class {
   static native Object newInstOf(long cm)
   static native int enumCountOf(long cm)
   static native Object enumAtOf(long cm, int i)
+  static native int annCountOf(long cm)
+  static native long annAtOf(long cm, int i)
+  static native int fieldAnnCountOf(long cm, boolean declared, int i)
+  static native long fieldAnnAtOf(long cm, boolean declared, int i, int at)
+  static native int methodAnnCountOf(long cm, boolean declared, int i)
+  static native int ctorAnnCountOf(long cm, int i)
+  static native long ctorAnnAtOf(long cm, int i, int at)
+  static native long methodAnnAtOf(long cm, boolean declared, int i, int at)
   /* The last two build a Class object, so the call site hands the runtime this
      program's teyru.Class: a header-less C file cannot name it. */
   static native Class makeOf(long h)
@@ -521,6 +712,26 @@ class Class {
   }
 
 
+  /* Java's AnnotatedElement, as far as annotations are carried: the ones
+     written on this class, looked up by type. */
+  public Annotation[] getAnnotations() {
+    long h = handle()
+    int n = annCountOf(h)
+    Annotation[] out = new Annotation[n]
+    for (int i = 0 : i < n : i++) {
+      out[i] = new Annotation(annAtOf(h, i))
+    }
+    return out
+  }
+
+  public Annotation getAnnotation(Class type) {
+    return Annotation.find(getAnnotations(), type)
+  }
+
+  public boolean isAnnotationPresent(Class type) {
+    return getAnnotation(type) != null
+  }
+
   public Object[] getEnumConstants() {
     long h = handle()
     int n = enumCountOf(h)
@@ -644,6 +855,23 @@ class Field {
      here. */
   public boolean isEnumConstant() {
     return (getModifiers() & ENUM) != 0
+  }
+
+  public Annotation[] getAnnotations() {
+    int n = Class.fieldAnnCountOf(cm, declared, idx)
+    Annotation[] out = new Annotation[n]
+    for (int i = 0 : i < n : i++) {
+      out[i] = new Annotation(Class.fieldAnnAtOf(cm, declared, idx, i))
+    }
+    return out
+  }
+
+  public Annotation getAnnotation(Class type) {
+    return Annotation.find(getAnnotations(), type)
+  }
+
+  public boolean isAnnotationPresent(Class type) {
+    return getAnnotation(type) != null
   }
 
   public Object get(Object obj) {
@@ -781,6 +1009,23 @@ class Method {
   /* Java's Method.invoke: a virtual call, so an override runs, with the
      arguments boxed and the result boxed for a primitive. Whatever the method
      threw comes back as the cause of an InvocationTargetException. */
+  public Annotation[] getAnnotations() {
+    int n = Class.methodAnnCountOf(cm, declared, idx)
+    Annotation[] out = new Annotation[n]
+    for (int i = 0 : i < n : i++) {
+      out[i] = new Annotation(Class.methodAnnAtOf(cm, declared, idx, i))
+    }
+    return out
+  }
+
+  public Annotation getAnnotation(Class type) {
+    return Annotation.find(getAnnotations(), type)
+  }
+
+  public boolean isAnnotationPresent(Class type) {
+    return getAnnotation(type) != null
+  }
+
   public Object invoke(Object obj, Object... args) {
     return Class.methodInvokeOf(cm, declared, idx, obj, args)
   }
@@ -851,6 +1096,23 @@ class Constructor {
       out[i] = Class.makeOf(Class.ctorParamOf(cm, idx, i))
     }
     return out
+  }
+
+  public Annotation[] getAnnotations() {
+    int n = Class.ctorAnnCountOf(cm, idx)
+    Annotation[] out = new Annotation[n]
+    for (int i = 0 : i < n : i++) {
+      out[i] = new Annotation(Class.ctorAnnAtOf(cm, idx, i))
+    }
+    return out
+  }
+
+  public Annotation getAnnotation(Class type) {
+    return Annotation.find(getAnnotations(), type)
+  }
+
+  public boolean isAnnotationPresent(Class type) {
+    return getAnnotation(type) != null
   }
 
   public Object newInstance(Object... args) {

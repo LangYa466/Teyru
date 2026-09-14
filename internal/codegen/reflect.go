@@ -158,8 +158,10 @@ func (e *Emitter) emitFieldTable(cl *ast.Class) string {
 		return "NULL"
 	}
 	offs := e.fieldOffsets(cl)
-	name := "fds_" + mangle(cl.Full)
-	fmt.Fprintf(&e.meta, "static const tyfield %s[] = {\n", name)
+	// The entries are collected before the table is written: an annotation
+	// table written into the middle of an initializer below would be a
+	// declaration inside braces, which is not C.
+	var entries []string
 	for _, f := range cl.Fields {
 		offset, addr := "-1", "NULL"
 		if f.Mods.Has(ast.ModStatic) {
@@ -167,11 +169,13 @@ func (e *Emitter) emitFieldTable(cl *ast.Class) string {
 		} else {
 			offset = fmt.Sprint(offs[f])
 		}
-		fmt.Fprintf(&e.meta,
-			"  {.name = %q, .type = %s, .owner = &cls_%s, .off = %s, .mods = %d, .addr = %s, .prim = %d},\n",
-			f.Name, e.typeClassExpr(f.Type), mangle(cl.Full), offset, javaMods(f.Mods), addr, primKindOf(f.Type))
+		anns, nannos := e.emitAnnoTable(mangle(cl.Full)+"_f_"+mangle(f.Name), f.Annos)
+		entries = append(entries, fmt.Sprintf(
+			"  {.name = %q, .type = %s, .owner = &cls_%s, .off = %s, .mods = %d, .addr = %s, .prim = %d, .annos = %s, .nannos = %d},\n",
+			f.Name, e.typeClassExpr(f.Type), mangle(cl.Full), offset, javaMods(f.Mods), addr, primKindOf(f.Type), anns, nannos))
 	}
-	e.meta.WriteString("};\n")
+	name := "fds_" + mangle(cl.Full)
+	fmt.Fprintf(&e.meta, "static const tyfield %s[] = {\n%s};\n", name, strings.Join(entries, ""))
 	e.attach(cl, "fields", name, "tyfield", len(cl.Fields), "nfields")
 	return name
 }
@@ -374,10 +378,11 @@ func (e *Emitter) emitMethodTable(cl *ast.Class) string {
 		if m.IsCtor {
 			ret = "&cls_" + mangle(m.Owner.Full)
 		}
+		anns, nannos := e.emitAnnoTable(mangle(cl.Full)+"_m_"+mangle(m.Name)+"_"+mangle(util.Signature(m.Name, m.Params)), methodAnnos(m))
 		entries = append(entries, fmt.Sprintf(
-			"  {.name = %q, .fn = (void*)%s, .owner = &cls_%s, .ret = %s, .params = %s, .nparams = %d, .mods = %d, .kind = %s, .primret = %d},\n",
+			"  {.name = %q, .fn = (void*)%s, .owner = &cls_%s, .ret = %s, .params = %s, .nparams = %d, .mods = %d, .kind = %s, .primret = %d, .annos = %s, .nannos = %d},\n",
 			m.Name, e.invokerName(m), mangle(m.Owner.Full), ret, params, len(m.Params),
-			javaMods(m.Mods), kind, primKindOf(m.Result)))
+			javaMods(m.Mods), kind, primKindOf(m.Result), anns, nannos))
 	}
 	name := "mds_" + mangle(cl.Full)
 	fmt.Fprintf(&e.meta, "static const tymethod %s[] = {\n%s};\n", name, strings.Join(entries, ""))
@@ -486,6 +491,242 @@ func (e *Emitter) reflectionCall(m *ast.Method) bool {
 		return true
 	case "Class":
 		return reflectClassMembers[m.Name]
+	case "Gson", "Application", "ApplicationContext", "BeanRegistry":
+		// The library reads its own annotations and its classes' members through
+		// reflection now, so a program that calls into it is a program that
+		// needs the metadata -- the calls inside the library do not count, since
+		// they are prelude-internal.
+		return true
 	}
 	return false
+}
+
+// programUsesAnnotations reports whether the program annotates its own
+// declarations with a library annotation. Such a program's annotations are
+// read at run time by the library, so the metadata has to be there even when no
+// call site in the program names the reflection API.
+//
+// Lombok's annotations are excluded: the compiler consumes those while
+// checking, and nothing reads them afterwards.
+func (e *Emitter) programUsesAnnotations() bool {
+	fromLib := func(annos []*ast.Annotation) bool {
+		for _, a := range annos {
+			cl := e.annoClass(a)
+			if cl == nil || cl.Kind != ast.KindAnnotation {
+				continue
+			}
+			if strings.HasPrefix(cl.Full, "teyru.") && !lombokAnnotations[cl.Name] {
+				return true
+			}
+		}
+		return false
+	}
+	for _, cl := range e.prog.Classes {
+		if cl == nil || strings.HasPrefix(cl.Full, "teyru.") {
+			continue
+		}
+		if fromLib(annoListOf(cl)) {
+			return true
+		}
+		for _, f := range cl.Fields {
+			if fromLib(f.Annos) {
+				return true
+			}
+		}
+		for _, ms := range cl.Methods {
+			for _, m := range ms {
+				if fromLib(methodAnnos(m)) {
+					return true
+				}
+			}
+		}
+		for _, m := range cl.Ctors {
+			if fromLib(methodAnnos(m)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// lombokAnnotations are the annotations the compiler consumes while checking, so
+// nothing reads them at run time and a program that uses only these needs no
+// annotation metadata.
+var lombokAnnotations = map[string]bool{
+	"Data": true, "Value": true, "Getter": true, "Setter": true, "Builder": true,
+	"AllArgsConstructor": true, "NoArgsConstructor": true, "RequiredArgsConstructor": true,
+	"ToString": true, "EqualsAndHashCode": true, "NonNull": true, "SneakyThrows": true,
+	"Cleanup": true, "Synchronized": true, "Log": true, "Log4j2": true, "Slf4j": true,
+	"CommonsLog": true, "Flogger": true, "JBossLog": true, "XSlf4j": true, "CustomLog": true,
+	"UtilityClass": true, "FieldDefaults": true, "FieldNameConstants": true, "Accessors": true,
+	"Wither": true, "Experimental": true, "StandardException": true, "Helper": true,
+	"PackagePrivate": true, "NonFinal": true, "Tolerate": true, "Singular": true,
+	"Jacksonized": true, "SuperBuilder": true, "ExtensionMethod": true, "FieldNamingStrategy": true,
+	"EqualsAndHashCodeExclude": true, "With": true, "WithBy": true, "ValueExclude": true,
+}
+
+// ---------------------------------------------------------------- annotations
+
+// The kinds an annotation element's value is carried as. They are the TY_ANN_*
+// macros tyrt.h defines.
+const (
+	annUnsupported = 0
+	annString      = 1
+	annInt         = 2
+	annLong        = 3
+	annDouble      = 4
+	annBool        = 5
+	annClass       = 6
+	annEnum        = 7
+)
+
+// annoClass resolves the annotation type a written annotation names. A program
+// writes @Component, whose class the checker has already found; the name may be
+// simple or qualified, and an annotation from another package is written with
+// its package.
+func (e *Emitter) annoClass(a *ast.Annotation) *ast.Class {
+	if cl := e.prog.LookupClass(a.Name); cl != nil {
+		return cl
+	}
+	return e.prog.ProgramClass(a.Name)
+}
+
+// annoListOf answers the annotations of a class or method declaration, which is
+// where they are written.
+func annoListOf(cl *ast.Class) []*ast.Annotation {
+	if cl == nil || cl.Decl == nil {
+		return nil
+	}
+	return cl.Decl.Annos
+}
+
+func methodAnnos(m *ast.Method) []*ast.Annotation {
+	if m == nil || m.Decl == nil {
+		return nil
+	}
+	return m.Decl.Annos
+}
+
+// emitAnnoTable writes the annotations written on one element and answers with
+// the table's C name, or NULL when the element carries none.
+//
+// An annotation is its type and its elements, and an element value is a string,
+// a primitive, a class, an enum constant or an array of those. Everything but
+// the array is carried; an element this cannot carry is recorded as unsupported
+// rather than dropped, so reading it fails where it is read instead of
+// answering nothing.
+func (e *Emitter) emitAnnoTable(suffix string, annos []*ast.Annotation) (string, int) {
+	var entries []string
+	for i, a := range annos {
+		cl := e.annoClass(a)
+		if cl == nil {
+			continue
+		}
+		args := make([]string, 0, len(a.Args))
+		written := map[string]bool{}
+		for _, arg := range a.Args {
+			args = append(args, e.annoArgC(arg))
+			written[annoArgName(arg)] = true
+		}
+		// An element a use did not write answers its declared default, which is
+		// what Java requires: the annotation interface declares them and a
+		// reader asks without knowing whether it was written.
+		for _, el := range annoElements(cl) {
+			if written[el.Name] || el.Decl == nil || el.Decl.Default == nil {
+				continue
+			}
+			args = append(args, e.annoArgC(&ast.AnnoArg{Name: el.Name, Value: el.Decl.Default}))
+		}
+		argsName := "NULL"
+		if len(args) > 0 {
+			argsName = fmt.Sprintf("annarg_%s_%d", suffix, i)
+			fmt.Fprintf(&e.meta, "static const tyannoarg %s[] = {\n%s};\n", argsName, strings.Join(args, ""))
+		}
+		entries = append(entries, fmt.Sprintf("  {.type = &cls_%s, .args = %s, .nargs = %d},\n",
+			mangle(cl.Full), argsName, len(args)))
+	}
+	if len(entries) == 0 {
+		return "NULL", 0
+	}
+	name := "anns_" + suffix
+	fmt.Fprintf(&e.meta, "static const tyannotation %s[] = {\n%s};\n", name, strings.Join(entries, ""))
+	return name, len(entries)
+}
+
+// annoArgName is the element name an argument stands for: an argument written
+// without a name is the element `value`, which is Java's rule for a lone one.
+func annoArgName(arg *ast.AnnoArg) string {
+	if arg.Name == "" {
+		return "value"
+	}
+	return arg.Name
+}
+
+// annoElements answers an annotation type's elements, which are the methods its
+// interface declares.
+func annoElements(cl *ast.Class) []*ast.Method {
+	var out []*ast.Method
+	for _, name := range mangleOrder(cl) {
+		out = append(out, cl.Methods[name]...)
+	}
+	return out
+}
+
+// enumArg renders an enum constant as an annotation element value: its name, and
+// the class to compare it against. An element that is not an enum constant, or
+// an array, is unsupported rather than dropped, so reading it says so.
+func (e *Emitter) enumArg(f *ast.Field) (int, string, string) {
+	if f == nil || f.Owner == nil || f.Owner.Kind != ast.KindEnum {
+		return annUnsupported, "NULL", "NULL"
+	}
+	return annEnum, e.cstr(f.Name), "&cls_" + mangle(f.Owner.Full)
+}
+
+// annoArgC renders one annotation element as a tyannoarg initializer.
+func (e *Emitter) annoArgC(arg *ast.AnnoArg) string {
+	name := annoArgName(arg)
+	kind := annUnsupported
+	ival, dval, sval, cval := "0", "0", "NULL", "NULL"
+	switch v := arg.Value.(type) {
+	case *ast.Literal:
+		switch v.Kind {
+		case ast.LitString:
+			kind, sval = annString, e.cstr(v.Str)
+		case ast.LitInt:
+			kind, ival = annInt, fmt.Sprint(int64(v.Int))
+		case ast.LitLong:
+			kind, ival = annLong, fmt.Sprintf("%dLL", int64(v.Int))
+		case ast.LitFloat, ast.LitDouble:
+			kind, dval = annDouble, util.FloatLiteral(v.Flt, v.Kind == ast.LitFloat)
+		case ast.LitBool:
+			kind = annBool
+			if v.Bool {
+				ival = "1"
+			}
+		case ast.LitChar:
+			kind, ival = annInt, fmt.Sprint(int64(v.Int))
+		}
+	case *ast.ClassLit:
+		kind, cval = annClass, "(tyclass*)"+e.classLiteralTarget(v)
+	case *ast.Select:
+		// An annotation argument is read as text while checking -- the passes
+		// that consume annotations want the names, not the types -- so the
+		// resolved field is usually not there and the enum is found by the name
+		// that was written instead.
+		if f, ok := v.Ref.(*ast.Field); ok {
+			kind, sval, cval = e.enumArg(f)
+		} else if id, isIdent := v.X.(*ast.Ident); isIdent {
+			if ec := e.prog.ProgramClass(id.Name); ec != nil && ec.Kind == ast.KindEnum {
+				kind, sval, cval = annEnum, e.cstr(v.Name), "&cls_"+mangle(ec.Full)
+			}
+		}
+	case *ast.Ident:
+		// An enum constant of an enum in the same file may be written without
+		// its type name, and the checker resolves it to the same field.
+		if f, ok := v.Ref.(*ast.Field); ok {
+			kind, sval, cval = e.enumArg(f)
+		}
+	}
+	return fmt.Sprintf("  {.name = %q, .kind = %d, .ival = %s, .dval = %s, .sval = %s, .cval = %s},\n",
+		name, kind, ival, dval, sval, cval)
 }
