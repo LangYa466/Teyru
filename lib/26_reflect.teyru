@@ -1,0 +1,978 @@
+package teyru
+
+// java.lang.reflect, in the shape Java gives it.
+//
+// A class literal is a class object: `String.class` is a Class, `c.getClass()`
+// is the same object, and this file is the API on top of it. What it reads is
+// the metadata the compiler writes next to every class it emits -- a field
+// table, a method table, the modifiers, the enum constants -- so a lookup costs
+// one array walk and nothing is built at run time.
+//
+// Two things are deliberately not here, and both are shapes of this runtime
+// rather than work left undone:
+//
+//   * Annotations. A Teyru annotation is read by the compiler, not by the
+//     program, so there is no annotation object to hand back; @Retention is
+//     accepted and means nothing, exactly as Java's default retention means
+//     nothing at run time.
+//   * Classes per array type. Every array value is an instance of one
+//     teyru.Array, so there is no int[] class to ask for a component type, and
+//     Class.forName("[I") has nothing to answer with. Class.isArray,
+//     Array.newInstance and Array.get work on the array values themselves.
+//
+// A member object (Field, Method, Constructor) is a handle: the class, which
+// table to read, and the index in it. It allocates once and holds no copy of
+// the metadata, so a Field taken now still reads the live field.
+//
+// Names are this language's: Class.getName answers "teyru.String" where javac
+// answers "java.lang.String", for the reason teyru.Throwable.toString already
+// gives -- the class really is teyru.String. Class.forName accepts both, so a
+// program that loads a class by Java's name still finds it.
+
+// ---- the exceptions ------------------------------------------------------
+
+/* Java's ReflectiveOperationException, and the six it covers. None of them is
+   a checked exception here: Teyru does not check, so a program is free to let
+   one out of main, as it lets any other. */
+class ReflectiveOperationException extends Exception {
+  public ReflectiveOperationException() {
+  }
+  public ReflectiveOperationException(String message) {
+    super(message)
+  }
+  public ReflectiveOperationException(String message, Throwable cause) {
+    super(message, cause)
+  }
+  public ReflectiveOperationException(Throwable cause) {
+    super(cause)
+  }
+}
+
+class ClassNotFoundException extends ReflectiveOperationException {
+  public ClassNotFoundException() {
+  }
+  public ClassNotFoundException(String message) {
+    super(message)
+  }
+  public ClassNotFoundException(String message, Throwable cause) {
+    super(message, cause)
+  }
+}
+
+class NoSuchFieldException extends ReflectiveOperationException {
+  public NoSuchFieldException() {
+  }
+  public NoSuchFieldException(String message) {
+    super(message)
+  }
+}
+
+class NoSuchMethodException extends ReflectiveOperationException {
+  public NoSuchMethodException() {
+  }
+  public NoSuchMethodException(String message) {
+    super(message)
+  }
+}
+
+class IllegalAccessException extends ReflectiveOperationException {
+  public IllegalAccessException() {
+  }
+  public IllegalAccessException(String message) {
+    super(message)
+  }
+}
+
+class InstantiationException extends ReflectiveOperationException {
+  public InstantiationException() {
+  }
+  public InstantiationException(String message) {
+    super(message)
+  }
+}
+
+/* What Method.invoke throws when the method itself threw. The cause is the
+   thrown object, and getTargetException is the name Java had for it before
+   getCause existed. */
+class InvocationTargetException extends ReflectiveOperationException {
+  public InvocationTargetException() {
+  }
+  public InvocationTargetException(Throwable target) {
+    super(target)
+  }
+  public InvocationTargetException(Throwable target, String message) {
+    super(message, target)
+  }
+  public Throwable getTargetException() {
+    return getCause()
+  }
+}
+
+// ---- Modifier ------------------------------------------------------------
+
+/* Java's Modifier: the same bit values, the same tests, and the same order in
+   toString. The values are the class file's, which is why they are written in
+   hexadecimal here rather than invented. */
+class Modifier {
+  public static final int PUBLIC = 0x00000001
+  public static final int PRIVATE = 0x00000002
+  public static final int PROTECTED = 0x00000004
+  public static final int STATIC = 0x00000008
+  public static final int FINAL = 0x00000010
+  public static final int SYNCHRONIZED = 0x00000020
+  public static final int VOLATILE = 0x00000040
+  public static final int TRANSIENT = 0x00000080
+  public static final int NATIVE = 0x00000100
+  public static final int INTERFACE = 0x00000200
+  public static final int ABSTRACT = 0x00000400
+  public static final int STRICT = 0x00000800
+
+  public static boolean isPublic(int mod) {
+    return (mod & PUBLIC) != 0
+  }
+  public static boolean isPrivate(int mod) {
+    return (mod & PRIVATE) != 0
+  }
+  public static boolean isProtected(int mod) {
+    return (mod & PROTECTED) != 0
+  }
+  public static boolean isStatic(int mod) {
+    return (mod & STATIC) != 0
+  }
+  public static boolean isFinal(int mod) {
+    return (mod & FINAL) != 0
+  }
+  public static boolean isSynchronized(int mod) {
+    return (mod & SYNCHRONIZED) != 0
+  }
+  public static boolean isVolatile(int mod) {
+    return (mod & VOLATILE) != 0
+  }
+  public static boolean isTransient(int mod) {
+    return (mod & TRANSIENT) != 0
+  }
+  public static boolean isNative(int mod) {
+    return (mod & NATIVE) != 0
+  }
+  public static boolean isInterface(int mod) {
+    return (mod & INTERFACE) != 0
+  }
+  public static boolean isAbstract(int mod) {
+    return (mod & ABSTRACT) != 0
+  }
+  public static boolean isStrict(int mod) {
+    return (mod & STRICT) != 0
+  }
+
+  /* The order is javac's: the JDK walks the same list, so Modifier.toString of
+     the same bits reads the same in both languages. */
+  public static String toString(int mod) {
+    StringBuilder b = new StringBuilder()
+    if ((mod & PUBLIC) != 0) {
+      b.append("public ")
+    }
+    if ((mod & PROTECTED) != 0) {
+      b.append("protected ")
+    }
+    if ((mod & PRIVATE) != 0) {
+      b.append("private ")
+    }
+    if ((mod & ABSTRACT) != 0) {
+      b.append("abstract ")
+    }
+    if ((mod & STATIC) != 0) {
+      b.append("static ")
+    }
+    if ((mod & FINAL) != 0) {
+      b.append("final ")
+    }
+    if ((mod & TRANSIENT) != 0) {
+      b.append("transient ")
+    }
+    if ((mod & VOLATILE) != 0) {
+      b.append("volatile ")
+    }
+    if ((mod & SYNCHRONIZED) != 0) {
+      b.append("synchronized ")
+    }
+    if ((mod & NATIVE) != 0) {
+      b.append("native ")
+    }
+    if ((mod & STRICT) != 0) {
+      b.append("strictfp ")
+    }
+    if ((mod & INTERFACE) != 0) {
+      b.append("interface ")
+    }
+    String s = b.toString()
+    if (s.length() == 0) {
+      return ""
+    }
+    /* javac's list leaves the trailing space on; Modifier.toString strips it. */
+    return s.substring(0, s.length() - 1)
+  }
+}
+
+// ---- Class ---------------------------------------------------------------
+
+/* A class, or an interface, or a primitive type, or the one array class every
+   array value belongs to.
+
+   Class values come in two forms, and both are Class values: a class literal
+   is the raw tyclass handle, and Object.getClass is a Class object built by the
+   runtime and cached per class. Every method here converts with handleOf first,
+   so both forms answer the same, and the conversion is the only place that
+   knows there are two. */
+class Class {
+  /* The handle a Class value stands for. */
+  static native long handleOf(Class c)
+
+  /* This class's own handle, for the methods below. Not part of Java's Class:
+     Java has no way to name the handle because it has no second form of a Class
+     value to reconcile. */
+  long handle() {
+    return handleOf(this)
+  }
+
+  public native String getName()
+
+  static native String simpleNameOf(long cm)
+  static native int modsOf(long cm)
+  static native boolean isPrimOf(long cm)
+  static native boolean isArrayOf(long cm)
+  static native boolean isEnumOf(long cm)
+  static native boolean isRecordOf(long cm)
+  static native boolean isInterfaceOf(long cm)
+  static native long superOf(long cm)
+  static native boolean isInstanceOf(long cm, Object o)
+  static native boolean assignableOf(long cm, long other)
+  static native int ifaceCountOf(long cm)
+  static native long ifaceAtOf(long cm, int i)
+  static native int fieldCountOf(long cm, boolean declared)
+  static native String fieldNameOf(long cm, boolean declared, int i)
+  static native long fieldTypeOf(long cm, boolean declared, int i)
+  static native long fieldOwnerOf(long cm, boolean declared, int i)
+  static native int fieldModsOf(long cm, boolean declared, int i)
+  static native Object fieldGetOf(long cm, boolean declared, int i, Object self)
+  static native void fieldSetOf(long cm, boolean declared, int i, Object self, Object v, boolean accessible)
+  static native int methodCountOf(long cm, boolean declared)
+  static native String methodNameOf(long cm, boolean declared, int i)
+  static native long methodOwnerOf(long cm, boolean declared, int i)
+  static native int methodModsOf(long cm, boolean declared, int i)
+  static native long methodRetOf(long cm, boolean declared, int i)
+  static native int methodParamCountOf(long cm, boolean declared, int i)
+  static native long methodParamOf(long cm, boolean declared, int i, int p)
+  static native Object methodInvokeOf(long cm, boolean declared, int i, Object self, Object[] args)
+  static native int ctorCountOf(long cm)
+  static native int ctorModsOf(long cm, int i)
+  static native int ctorParamCountOf(long cm, int i)
+  static native long ctorParamOf(long cm, int i, int p)
+  static native Object ctorNewOf(long cm, int i, Object[] args)
+  static native Object newInstOf(long cm)
+  static native int enumCountOf(long cm)
+  static native Object enumAtOf(long cm, int i)
+  /* The last two build a Class object, so the call site hands the runtime this
+     program's teyru.Class: a header-less C file cannot name it. */
+  static native Class makeOf(long h)
+  static native Class forNameOf(String name)
+
+  public String getSimpleName() {
+    return simpleNameOf(handle())
+  }
+
+  /* The name a source file would write: teyru.Outer.Inner where getName answers
+     teyru.Outer$Inner. A local or anonymous class has none -- its name carries
+     a number -- and Java answers null for it. */
+  public String getCanonicalName() {
+    String n = getName()
+    StringBuilder b = new StringBuilder()
+    int start = 0
+    int stop = n.indexOf('$', start)
+    while (stop >= 0) {
+      if (isNumbered(n.substring(start, stop))) {
+        return null
+      }
+      b.append(n.substring(start, stop))
+      b.append('.')
+      start = stop + 1
+      stop = n.indexOf('$', start)
+    }
+    String last = n.substring(start)
+    if (isNumbered(last)) {
+      return null
+    }
+    return b.toString() + last
+  }
+
+  private static boolean isNumbered(String part) {
+    if (part.length() == 0) {
+      return false
+    }
+    char c = part.charAt(0)
+    return c >= '0' && c <= '9'
+  }
+
+  public int getModifiers() {
+    return modsOf(handle())
+  }
+
+  public boolean isPrimitive() {
+    return isPrimOf(handle())
+  }
+
+  public boolean isArray() {
+    return isArrayOf(handle())
+  }
+
+  public boolean isEnum() {
+    return isEnumOf(handle())
+  }
+
+  public boolean isRecord() {
+    return isRecordOf(handle())
+  }
+
+  public boolean isInterface() {
+    return isInterfaceOf(handle())
+  }
+
+  public Class getSuperclass() {
+    long s = superOf(handle())
+    if (s == 0) {
+      return null
+    }
+    return makeOf(s)
+  }
+
+  public boolean isInstance(Object o) {
+    return o != null && isInstanceOf(handle(), o)
+  }
+
+  public boolean isAssignableFrom(Class other) {
+    if (other == null) {
+      return false
+    }
+    return assignableOf(handle(), handleOf(other))
+  }
+
+  public Class[] getInterfaces() {
+    long h = handle()
+    int n = ifaceCountOf(h)
+    Class[] out = new Class[n]
+    for (int i = 0 : i < n : i++) {
+      out[i] = makeOf(ifaceAtOf(h, i))
+    }
+    return out
+  }
+
+  public Field[] getDeclaredFields() {
+    return fieldsOf(true)
+  }
+
+  public Field[] getFields() {
+    return fieldsOf(false)
+  }
+
+  private Field[] fieldsOf(boolean declared) {
+    long h = handle()
+    int n = fieldCountOf(h, declared)
+    Field[] out = new Field[n]
+    for (int i = 0 : i < n : i++) {
+      out[i] = new Field(h, declared, i)
+    }
+    return out
+  }
+
+  public Method[] getDeclaredMethods() {
+    return methodsOf(true)
+  }
+
+  public Method[] getMethods() {
+    return methodsOf(false)
+  }
+
+  private Method[] methodsOf(boolean declared) {
+    long h = handle()
+    int n = methodCountOf(h, declared)
+    Method[] out = new Method[n]
+    for (int i = 0 : i < n : i++) {
+      out[i] = new Method(h, declared, i)
+    }
+    return out
+  }
+
+  public Constructor[] getDeclaredConstructors() {
+    return ctorsOf(true)
+  }
+
+  public Constructor[] getConstructors() {
+    return ctorsOf(false)
+  }
+
+  private Constructor[] ctorsOf(boolean all) {
+    long h = handle()
+    int n = ctorCountOf(h)
+    int keep = 0
+    for (int i = 0 : i < n : i++) {
+      if (all || Modifier.isPublic(ctorModsOf(h, i))) {
+        keep++
+      }
+    }
+    Constructor[] out = new Constructor[keep]
+    int at = 0
+    for (int i = 0 : i < n : i++) {
+      if (all || Modifier.isPublic(ctorModsOf(h, i))) {
+        out[at] = new Constructor(h, i)
+        at++
+      }
+    }
+    return out
+  }
+
+  public Field getDeclaredField(String name) {
+    return findField(name, true)
+  }
+
+  public Field getField(String name) {
+    return findField(name, false)
+  }
+
+  private Field findField(String name, boolean declared) {
+    long h = handle()
+    int n = fieldCountOf(h, declared)
+    for (int i = 0 : i < n : i++) {
+      if (fieldNameOf(h, declared, i).equals(name)) {
+        return new Field(h, declared, i)
+      }
+    }
+    throw new NoSuchFieldException(getName() + "." + name)
+  }
+
+  public Method getDeclaredMethod(String name, Class... params) {
+    return findMethod(name, params, true)
+  }
+
+  public Method getMethod(String name, Class... params) {
+    return findMethod(name, params, false)
+  }
+
+  /* Whether two parameter lists name the same classes. Class values are
+     compared by name: a class literal is the raw handle and Object.getClass is
+     a wrapper, so the two forms of one class do not share an address. */
+  static boolean sameParams(Class[] have, Class[] want) {
+    if (have.length != want.length) {
+      return false
+    }
+    for (int i = 0 : i < have.length : i++) {
+      if (!have[i].equals(want[i])) {
+        return false
+      }
+    }
+    return true
+  }
+
+  private Method findMethod(String name, Class[] params, boolean declared) {
+    long h = handle()
+    int n = methodCountOf(h, declared)
+    for (int i = 0 : i < n : i++) {
+      Method m = new Method(h, declared, i)
+      if (m.getName().equals(name) && sameParams(m.getParameterTypes(), params)) {
+        return m
+      }
+    }
+    String sig = ""
+    for (int i = 0 : i < params.length : i++) {
+      if (i > 0) {
+        sig = sig + ","
+      }
+      sig = sig + params[i].getName()
+    }
+    throw new NoSuchMethodException(getName() + "." + name + "(" + sig + ")")
+  }
+
+  public Constructor getDeclaredConstructor(Class... params) {
+    return findCtor(params, true)
+  }
+
+  public Constructor getConstructor(Class... params) {
+    return findCtor(params, false)
+  }
+
+  private Constructor findCtor(Class[] params, boolean all) {
+    long h = handle()
+    int n = ctorCountOf(h)
+    for (int i = 0 : i < n : i++) {
+      Constructor k = new Constructor(h, i)
+      if ((all || Modifier.isPublic(k.getModifiers())) && sameParams(k.getParameterTypes(), params)) {
+        return k
+      }
+    }
+    String sig = ""
+    for (int i = 0 : i < params.length : i++) {
+      if (i > 0) {
+        sig = sig + ","
+      }
+      sig = sig + params[i].getName()
+    }
+    throw new NoSuchMethodException(getName() + "(" + sig + ")")
+  }
+
+
+  public Object[] getEnumConstants() {
+    long h = handle()
+    int n = enumCountOf(h)
+    if (n == 0) {
+      return null
+    }
+    Object[] out = new Object[n]
+    for (int i = 0 : i < n : i++) {
+      out[i] = enumAtOf(h, i)
+    }
+    return out
+  }
+
+  public Object newInstance() {
+    return newInstOf(handle())
+  }
+
+  /* Java's forName, with this language's names. The name is the binary name a
+     class file carries -- teyru.Outer$Inner -- and a java.* name finds the
+     library class the import of it resolves to, which is the last segment
+     declared in teyru. The name matches the compiler's own rule, so a class a
+     program can import is a class it can load. */
+  public static Class forName(String name) {
+    try {
+      return forNameOf(name)
+    } catch (ClassNotFoundException e) {
+      int dot = name.lastIndexOf('.')
+      if (dot < 0) {
+        throw e
+      }
+      try {
+        return forNameOf("teyru." + name.substring(dot + 1))
+      } catch (ClassNotFoundException alias) {
+        throw e
+      }
+    }
+  }
+
+  public String toString() {
+    if (isPrimitive() || isArray()) {
+      return getName()
+    }
+    if (isInterface()) {
+      return "interface " + getName()
+    }
+    return "class " + getName()
+  }
+
+  public int hashCode() {
+    return getName().hashCode()
+  }
+
+  public boolean equals(Object o) {
+    if ((Object)this == o) {
+      return true
+    }
+    if (!(o instanceof Class)) {
+      return false
+    }
+    Class other = (Class)o
+    return getName().equals(other.getName())
+  }
+}
+
+/* The checked unboxers, for the reflective accessors. Field.getInt and
+   Array.getInt accept a box of exactly the type they name and answer
+   IllegalArgumentException for any other -- the box classes' own intValue()
+   reads whatever it is given -- so the check lives in one place, here, and both
+   classes call it. Package-private: no program writes Reflect. */
+class Reflect {
+  static native int toInt(Object o)
+  static native long toLong(Object o)
+  static native short toShort(Object o)
+  static native byte toByte(Object o)
+  static native char toChar(Object o)
+  static native boolean toBool(Object o)
+  static native float toFloat(Object o)
+  static native double toDouble(Object o)
+}
+
+// ---- Field ---------------------------------------------------------------
+
+/* One field of one class. `declared` says which table to read: the class's own
+   fields, or its own plus the public ones it inherits, which is what Java's
+   getField walks. */
+class Field {
+  /* Java's ACC_ENUM, the bit Field.isEnumConstant reads. */
+  private static final int ENUM = 0x00004000
+
+  private long cm
+  private boolean declared
+  private int idx
+  /* setAccessible(true): from then on the field can be written even when it is
+     final, which is the one thing Java's reflection gate holds back. */
+  private boolean accessible
+
+  Field(long cm, boolean declared, int idx) {
+    this.cm = cm
+    this.declared = declared
+    this.idx = idx
+  }
+
+  public String getName() {
+    return Class.fieldNameOf(cm, declared, idx)
+  }
+
+  public Class getType() {
+    return Class.makeOf(Class.fieldTypeOf(cm, declared, idx))
+  }
+
+  public Class getDeclaringClass() {
+    return Class.makeOf(Class.fieldOwnerOf(cm, declared, idx))
+  }
+
+  public int getModifiers() {
+    return Class.fieldModsOf(cm, declared, idx)
+  }
+
+  /* Java's Field.isEnumConstant: the ACC_ENUM bit of the field's own modifiers,
+     which Modifier does not name -- it is package-private there, as it is
+     here. */
+  public boolean isEnumConstant() {
+    return (getModifiers() & ENUM) != 0
+  }
+
+  public Object get(Object obj) {
+    return Class.fieldGetOf(cm, declared, idx, obj)
+  }
+
+  public void set(Object obj, Object value) {
+    Class.fieldSetOf(cm, declared, idx, obj, value, accessible)
+  }
+
+  public int getInt(Object obj) {
+    return Reflect.toInt(get(obj))
+  }
+  public long getLong(Object obj) {
+    return Reflect.toLong(get(obj))
+  }
+  public short getShort(Object obj) {
+    return Reflect.toShort(get(obj))
+  }
+  public byte getByte(Object obj) {
+    return Reflect.toByte(get(obj))
+  }
+  public char getChar(Object obj) {
+    return Reflect.toChar(get(obj))
+  }
+  public boolean getBoolean(Object obj) {
+    return Reflect.toBool(get(obj))
+  }
+  public float getFloat(Object obj) {
+    return Reflect.toFloat(get(obj))
+  }
+  public double getDouble(Object obj) {
+    return Reflect.toDouble(get(obj))
+  }
+
+  public void setInt(Object obj, int value) {
+    set(obj, value)
+  }
+  public void setLong(Object obj, long value) {
+    set(obj, value)
+  }
+  public void setShort(Object obj, short value) {
+    set(obj, value)
+  }
+  public void setByte(Object obj, byte value) {
+    set(obj, value)
+  }
+  public void setChar(Object obj, char value) {
+    set(obj, value)
+  }
+  public void setBoolean(Object obj, boolean value) {
+    set(obj, value)
+  }
+  public void setFloat(Object obj, float value) {
+    set(obj, value)
+  }
+  public void setDouble(Object obj, double value) {
+    set(obj, value)
+  }
+
+  public void setAccessible(boolean flag) {
+    accessible = flag
+  }
+
+  public boolean isAccessible() {
+    return accessible
+  }
+
+  public String toString() {
+    String m = Modifier.toString(getModifiers())
+    if (m.length() > 0) {
+      m = m + " "
+    }
+    return m + getType().getName() + " " + getDeclaringClass().getName() + "." + getName()
+  }
+
+  public int hashCode() {
+    return (int)cm * 31 + idx
+  }
+
+  public boolean equals(Object o) {
+    if ((Object)this == o) {
+      return true
+    }
+    if (!(o instanceof Field)) {
+      return false
+    }
+    Field f = (Field)o
+    return cm == f.cm && declared == f.declared && idx == f.idx
+  }
+}
+
+// ---- Method --------------------------------------------------------------
+
+class Method {
+  private long cm
+  private boolean declared
+  private int idx
+
+  Method(long cm, boolean declared, int idx) {
+    this.cm = cm
+    this.declared = declared
+    this.idx = idx
+  }
+
+  public String getName() {
+    return Class.methodNameOf(cm, declared, idx)
+  }
+
+  public Class getDeclaringClass() {
+    return Class.makeOf(Class.methodOwnerOf(cm, declared, idx))
+  }
+
+  public int getModifiers() {
+    return Class.methodModsOf(cm, declared, idx)
+  }
+
+  public Class getReturnType() {
+    return Class.makeOf(Class.methodRetOf(cm, declared, idx))
+  }
+
+  public int getParameterCount() {
+    return Class.methodParamCountOf(cm, declared, idx)
+  }
+
+  public Class[] getParameterTypes() {
+    int n = getParameterCount()
+    Class[] out = new Class[n]
+    for (int i = 0 : i < n : i++) {
+      out[i] = Class.makeOf(Class.methodParamOf(cm, declared, idx, i))
+    }
+    return out
+  }
+
+  /* Java's Method.invoke: a virtual call, so an override runs, with the
+     arguments boxed and the result boxed for a primitive. Whatever the method
+     threw comes back as the cause of an InvocationTargetException. */
+  public Object invoke(Object obj, Object... args) {
+    return Class.methodInvokeOf(cm, declared, idx, obj, args)
+  }
+
+  public String toString() {
+    String m = Modifier.toString(getModifiers())
+    if (m.length() > 0) {
+      m = m + " "
+    }
+    String ps = ""
+    int n = getParameterCount()
+    for (int i = 0 : i < n : i++) {
+      if (i > 0) {
+        ps = ps + ","
+      }
+      ps = ps + Class.makeOf(Class.methodParamOf(cm, declared, idx, i)).getName()
+    }
+    return m + getReturnType().getName() + " " + getDeclaringClass().getName() + "." + getName() + "(" + ps + ")"
+  }
+
+  public int hashCode() {
+    return (int)cm * 31 + idx
+  }
+
+  public boolean equals(Object o) {
+    if ((Object)this == o) {
+      return true
+    }
+    if (!(o instanceof Method)) {
+      return false
+    }
+    Method m = (Method)o
+    return cm == m.cm && declared == m.declared && idx == m.idx
+  }
+}
+
+// ---- Constructor ---------------------------------------------------------
+
+class Constructor {
+  private long cm
+  private int idx
+
+  Constructor(long cm, int idx) {
+    this.cm = cm
+    this.idx = idx
+  }
+
+  public String getName() {
+    return Class.makeOf(cm).getName()
+  }
+
+  public Class getDeclaringClass() {
+    return Class.makeOf(cm)
+  }
+
+  public int getModifiers() {
+    return Class.ctorModsOf(cm, idx)
+  }
+
+  public int getParameterCount() {
+    return Class.ctorParamCountOf(cm, idx)
+  }
+
+  public Class[] getParameterTypes() {
+    int n = getParameterCount()
+    Class[] out = new Class[n]
+    for (int i = 0 : i < n : i++) {
+      out[i] = Class.makeOf(Class.ctorParamOf(cm, idx, i))
+    }
+    return out
+  }
+
+  public Object newInstance(Object... args) {
+    return Class.ctorNewOf(cm, idx, args)
+  }
+
+  public String toString() {
+    String m = Modifier.toString(getModifiers())
+    if (m.length() > 0) {
+      m = m + " "
+    }
+    String ps = ""
+    int n = getParameterCount()
+    for (int i = 0 : i < n : i++) {
+      if (i > 0) {
+        ps = ps + ","
+      }
+      ps = ps + Class.makeOf(Class.ctorParamOf(cm, idx, i)).getName()
+    }
+    return m + getDeclaringClass().getName() + "(" + ps + ")"
+  }
+
+  public int hashCode() {
+    return (int)cm * 31 + idx
+  }
+
+  public boolean equals(Object o) {
+    if ((Object)this == o) {
+      return true
+    }
+    if (!(o instanceof Constructor)) {
+      return false
+    }
+    Constructor c = (Constructor)o
+    return cm == c.cm && idx == c.idx
+  }
+}
+
+// ---- Array ---------------------------------------------------------------
+
+/* java.lang.reflect.Array: the operations that need the array's element type
+   at run time, which a program cannot write any other way. newInstance builds
+   one from a component class -- including a primitive, which is the case an
+   array of Object could not express. */
+class Array {
+  static native Object newArrayOf(long cm, int len)
+  static native int lengthOf(Object a)
+  static native Object getOf(Object a, int i)
+  static native void setOf(Object a, int i, Object v)
+
+  private Array() {
+  }
+
+  public static Object newInstance(Class component, int length) {
+    if (component == null) {
+      throw new NullPointerException()
+    }
+    if (length < 0) {
+      throw new NegativeArraySizeException()
+    }
+    return newArrayOf(Class.handleOf(component), length)
+  }
+
+  public static int getLength(Object array) {
+    if (array == null) {
+      throw new NullPointerException()
+    }
+    return lengthOf(array)
+  }
+
+  public static Object get(Object array, int index) {
+    return getOf(array, index)
+  }
+
+  public static void set(Object array, int index, Object value) {
+    setOf(array, index, value)
+  }
+
+  public static boolean getBoolean(Object array, int index) {
+    return Reflect.toBool(getOf(array, index))
+  }
+  public static byte getByte(Object array, int index) {
+    return Reflect.toByte(getOf(array, index))
+  }
+  public static char getChar(Object array, int index) {
+    return Reflect.toChar(getOf(array, index))
+  }
+  public static short getShort(Object array, int index) {
+    return Reflect.toShort(getOf(array, index))
+  }
+  public static int getInt(Object array, int index) {
+    return Reflect.toInt(getOf(array, index))
+  }
+  public static long getLong(Object array, int index) {
+    return Reflect.toLong(getOf(array, index))
+  }
+  public static float getFloat(Object array, int index) {
+    return Reflect.toFloat(getOf(array, index))
+  }
+  public static double getDouble(Object array, int index) {
+    return Reflect.toDouble(getOf(array, index))
+  }
+
+  public static void setBoolean(Object array, int index, boolean value) {
+    setOf(array, index, value)
+  }
+  public static void setByte(Object array, int index, byte value) {
+    setOf(array, index, value)
+  }
+  public static void setChar(Object array, int index, char value) {
+    setOf(array, index, value)
+  }
+  public static void setShort(Object array, int index, short value) {
+    setOf(array, index, value)
+  }
+  public static void setInt(Object array, int index, int value) {
+    setOf(array, index, value)
+  }
+  public static void setLong(Object array, int index, long value) {
+    setOf(array, index, value)
+  }
+  public static void setFloat(Object array, int index, float value) {
+    setOf(array, index, value)
+  }
+  public static void setDouble(Object array, int index, double value) {
+    setOf(array, index, value)
+  }
+}

@@ -22,6 +22,9 @@ type Emitter struct {
 	fns         strings.Builder  // forward declarations
 	code        *strings.Builder // function bodies
 	data        strings.Builder  // globals: strings, class metadata
+	meta        strings.Builder  // member tables, shipped only if reflection is used
+	metaInit    []string         // the assignments that attach them at startup
+	reflectUsed bool             // whether any call site asks for reflection
 	strings     map[string]int
 	strOrder    []string
 	mainCls     *ast.Class
@@ -87,6 +90,16 @@ func Emit(p *sema.Program) string {
 	out.WriteString(e.types.String())
 	out.WriteString(e.fns.String())
 	out.WriteString(e.data.String())
+	// The member tables are written last, and only for a program that asks for
+	// them. They are the one part of a class's metadata that names other
+	// classes -- a field's type, a method's parameters -- so an array at file
+	// scope holding them would be a root: it would pin every class they
+	// mention, and through those the whole standard library, into every
+	// executable, whether or not the program can reflect. A program that never
+	// asks pays nothing; the emitter's call sites are what decide.
+	if e.reflectUsed {
+		out.WriteString(e.meta.String())
+	}
 	out.WriteString(e.code.String())
 	out.WriteString(e.entry())
 	return out.String()
@@ -95,6 +108,22 @@ func Emit(p *sema.Program) string {
 func (e *Emitter) run() {
 	for _, cl := range e.prog.Classes {
 		e.declareClass(cl)
+	}
+	// A class's object is named by the tables of other classes -- a field's
+	// type, a method's return type, the interface list of a subclass -- so
+	// every one of them is declared before any of them is defined. Two
+	// declarations of one static object, the first without an initializer,
+	// are one definition.
+	for _, cl := range e.prog.Classes {
+		if cl == nil {
+			continue
+		}
+		// The special classes are included: only their struct is a typedef of
+		// a runtime type, their class object is emitted like any other's.
+		fmt.Fprintf(&e.types, "static tyclass cls_%s;\n", mangle(cl.Full))
+	}
+	for k := ast.Void; k <= ast.Double; k++ {
+		fmt.Fprintf(&e.types, "static tyclass cls_%s;\n", primClassName(k))
 	}
 	for _, cl := range e.prog.Classes {
 		e.emitClassMeta(cl)
@@ -125,12 +154,17 @@ func primClassName(k ast.PrimKind) string {
 // runtime never reads the field), and it has no superclass or members, as a
 // primitive type has none.
 func (e *Emitter) emitPrimClassMeta() {
+	// All nine are written whether or not the program names one, because
+	// reflection can reach them without a literal: a field of type int reports
+	// int.class, and Array.get asks the element's class which box to build.
+	// The cost is a hundred bytes of .data each.
 	for k := ast.Void; k <= ast.Double; k++ {
-		if !e.primClasses[k] {
-			continue
+		kind := 0
+		if k != ast.Void {
+			kind = int(k)
 		}
-		fmt.Fprintf(&e.data, "static tyclass cls_%s = {%q, %d, 0, NULL, 0, NULL, 0, NULL, NULL, 0, 0, NULL, 0, NULL, 0, NULL};\n",
-			primClassName(k), (&ast.PrimType{Kind: k}).String(), -1-int(k))
+		fmt.Fprintf(&e.data, "static tyclass cls_%s = {\n  .name = %q, .id = %d, .mods = %d, .prim = %d,\n};\n",
+			primClassName(k), (&ast.PrimType{Kind: k}).String(), -1-int(k), jPrimClassMods, kind)
 	}
 }
 
@@ -300,6 +334,11 @@ func (e *Emitter) emitClassMeta(cl *ast.Class) {
 	if isIface {
 		flags |= 1
 	}
+	if cl.Special == "array" {
+		// The class every array value belongs to is marked as one, which is
+		// what Class.isArray and the reflective array accessors read.
+		flags |= 2
+	}
 	if cl.Special == "box" {
 		flags |= 4
 	}
@@ -381,11 +420,32 @@ func (e *Emitter) emitClassMeta(cl *ast.Class) {
 	if cl.ClInit != nil {
 		clinit = "(void*)" + e.cfunc(cl.ClInit)
 	}
-	fmt.Fprintf(&e.data, "static tyclass cls_%s = {%q, %d, %d, %s, %d, if_%s, %d, vt_%s, %s, %d, %d, %s, 0, NULL, %d, refs_%s};\n",
-		mangle(cl.Full), cl.Full, cl.ID, flags, sup, len(cl.Ifaces), mangle(cl.Full),
-		len(cl.VTable), mangle(cl.Full), clinit, int(off), imapLen, imapName, len(offs), mangle(cl.Full))
-	if cl.Outer != nil && cl.Inner {
+	// The reflection tables, which is what java.lang.reflect reads. They are
+	// written here, with the class, because a reader of the generated C should
+	// find a class's metadata in one place.
+	fieldsTbl := e.emitFieldTable(cl)
+	methodsTbl := e.emitMethodTable(cl)
+	constsTbl := e.emitConstTable(cl)
+	flagsExpr := fmt.Sprint(flags)
+	if cl.Decl != nil && cl.Decl.Kind == ast.KindRecord {
+		flagsExpr = fmt.Sprintf("(%d | TY_CLS_RECORD)", flags)
 	}
+	// Written with designators rather than in order: the struct grows as
+	// reflection learns more about a class, and position would put a new fact
+	// in an old field the first time someone forgets to update this line.
+	fmt.Fprintf(&e.data, "static tyclass cls_%s = {\n", mangle(cl.Full))
+	fmt.Fprintf(&e.data, "  .name = %q, .id = %d, .flags = %s,\n", cl.Full, cl.ID, flagsExpr)
+	fmt.Fprintf(&e.data, "  .super = %s, .niface = %d, .ifaces = if_%s,\n", sup, len(cl.Ifaces), mangle(cl.Full))
+	fmt.Fprintf(&e.data, "  .nvt = %d, .vtable = vt_%s, .clinit = %s,\n", len(cl.VTable), mangle(cl.Full), clinit)
+	fmt.Fprintf(&e.data, "  .isize = %d, .isel = %d, .imap = %s,\n", int(off), imapLen, imapName)
+	fmt.Fprintf(&e.data, "  .nref = %d, .refoffs = refs_%s,\n", len(offs), mangle(cl.Full))
+	fmt.Fprintf(&e.data, "  .mods = %d, .prim = 0,\n", e.classMods(cl))
+	// The member tables are not named here: whether they ship is a decision the
+	// program's call sites make later, so the startup attaches them (see meta).
+	_ = fieldsTbl
+	_ = methodsTbl
+	fmt.Fprintf(&e.data, "  .consts = %s, .nconsts = %d,\n", constsTbl, len(cl.EnumConsts))
+	e.data.WriteString("};\n")
 }
 
 func boxStruct(cl *ast.Class) string {
@@ -723,6 +783,13 @@ func (e *Emitter) entry() string {
 	// `(Object) a` and `"" + a` behave, and the collector can see that an array's
 	// elements are references and trace them
 	b.WriteString("  TY_ARRAY = &cls_" + mangle(e.prog.ArrayClass().Full) + ";\n")
+	// the member tables, attached here rather than in the class object's
+	// initializer so that a program which never reflects does not carry them
+	if e.reflectUsed {
+		for _, line := range e.metaInit {
+			b.WriteString("  " + line + "\n")
+		}
+	}
 	// sorted: iterating the map directly would emit TY_BOX assignments in a
 	// different order every run, so two builds of one program would not produce
 	// the same C and the output could not be diffed
@@ -741,6 +808,9 @@ func (e *Emitter) entry() string {
 		{"TY_ILLARG", e.prog.Builtins.IllArg}, {"TY_ILLSTATE", e.prog.Builtins.IllState},
 		{"TY_NOSUCHELEM", e.prog.Builtins.NoSuchElem}, {"TY_UNSUP", e.prog.Builtins.Unsup},
 		{"TY_ARRAYSTORE", e.prog.Builtins.ArrayStore},
+		{"TY_CNF", e.prog.Builtins.ClassNotFound}, {"TY_NSFE", e.prog.Builtins.NoSuchField},
+		{"TY_NSME", e.prog.Builtins.NoSuchMethod}, {"TY_ILLACCESS", e.prog.Builtins.IllAccess},
+		{"TY_INVOCATION", e.prog.Builtins.Invocation}, {"TY_INSTANTIATION", e.prog.Builtins.Instantiation},
 	} {
 		if cl, ok := pair[1].(*ast.Class); ok && cl != nil {
 			fmt.Fprintf(&b, "  %s = &cls_%s;\n", pair[0], mangle(cl.Full))

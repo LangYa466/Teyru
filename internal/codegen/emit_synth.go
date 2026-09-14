@@ -14,32 +14,39 @@ func nativeKey(m *ast.Method) string {
 }
 
 // emitSynthetic writes the C body of a compiler-synthesized method.
+// forNameKey is Class.forName's compiled form. It is not a native method with a
+// binding like the rest of reflection: its table has to be written inside its
+// own body, which is a shape a binding cannot express.
+const forNameKey = "Class.forNameOf(String)"
+
 func (e *Emitter) emitSynthetic(cl *ast.Class, m *ast.Method) {
 	e.indent = 0
 	fmt.Fprintf(e.code, "static %s {\n", e.signature(m))
 	e.indent++
+	if nativeKey(m) == forNameKey {
+		// Class.forName searches the program's classes. The table cannot live at
+		// file scope -- see forNameTable -- so it is written here, in the body
+		// of the one function that reads it.
+		table, count := e.forNameTable()
+		e.line("return (C_%s*)ty_class_forname_in(a0, %s, %d, &cls_%s);\n",
+			mangle(m.Owner.Full), table, count, mangle(m.Owner.Full))
+		e.indent--
+		e.code.WriteString("}\n\n")
+		return
+	}
 	if nf, ok := nativeTable[nativeKey(m)]; ok {
-		var parts []string
 		args := make([]string, 0, len(m.Params))
 		for i := range m.Params {
 			args = append(args, fmt.Sprintf("a%d", i))
 		}
-		if m.IsStatic() {
-			if nf.recv != "" && len(args) > 0 {
-				args[0] = "(" + nf.recv + ")" + args[0]
-			}
-		} else if nf.recv != "" {
-			parts = append(parts, "("+nf.recv+")this")
+		recv := ""
+		if !m.IsStatic() {
+			recv = "this"
 		}
-		parts = append(parts, args...)
-		call := nf.fn + "(" + strings.Join(parts, ", ") + ")"
-		// A helper that carries its own prototype is declared here, the way
-		// nativeCall does it: a prelude class's native method has no other
-		// place to declare it, and the generated C is compiled with -w but not
-		// with an implicit-declaration allowance.
-		if nf.proto != "" {
-			call = "({ extern " + nf.proto + "; " + call + "; })"
-		}
+		// nativeInlineCall is where the receiver cast, the appended class and
+		// the helper's own prototype are applied, so a synthesized native and a
+		// call site in a prelude body reach the runtime the same way.
+		call := e.nativeInlineCall(nf, m, recv, args)
 		if m.Result == ast.TVoid {
 			e.line("(void)%s;\n", call)
 		} else {

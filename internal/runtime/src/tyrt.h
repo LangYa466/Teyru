@@ -41,6 +41,47 @@ typedef struct tymap {
   void *fn;
 } tymap;
 
+/* ---- reflection metadata ----------------------------------------------
+
+   One static table per class, written by the compiler, read by
+   java.lang.reflect. Nothing here is built at run time, no object carries any
+   of it, and the collector never walks it: a program pays for reflection in
+   .data and in code, never in the object header or in a call.
+
+   A method's fn is an invoker rather than the method itself: it takes the
+   receiver and a void** of boxed arguments and answers with a boxed result,
+   which is what Method.invoke has to do. The invoker is what the compiler
+   emits per method, and it is the only place that knows the method's C
+   signature. */
+
+/* tymethod.kind */
+#define TY_METH_INSTANCE 0
+#define TY_METH_STATIC 1
+#define TY_METH_CTOR 2
+#define TY_METH_VARARGS 4
+
+typedef struct tyfield {
+  const char *name;
+  tyclass *type;
+  tyclass *owner;
+  int32_t off;  /* byte offset of the field in an instance, -1 for a static */
+  int32_t mods; /* java.lang.reflect.Modifier bits */
+  void *addr;   /* address of a static field, NULL for an instance field */
+  int32_t prim; /* primitive kind when the type is a primitive, else 0 */
+} tyfield;
+
+typedef struct tymethod {
+  const char *name;
+  void *fn; /* void *(*)(void *self, void **args), boxed in and out */
+  tyclass *owner;
+  tyclass *ret;
+  const tyclass **params;
+  int32_t nparams;
+  int32_t mods;
+  int32_t kind;
+  int32_t primret; /* primitive kind of the result, else 0 */
+} tymethod;
+
 struct tyclass {
   const char *name;
   int32_t id;
@@ -58,6 +99,17 @@ struct tyclass {
   tyclass **subs;
   int32_t nref;     /* number of traced reference fields */
   int32_t *refoffs; /* byte offsets of reference fields */
+  /* reflection: the class's own modifiers, its fields, its methods (with the
+     constructors), and its enum constants when it is an enum. Everything is
+     static data; a class with nothing to report carries NULL and 0. */
+  int32_t mods; /* java.lang.reflect.Modifier bits */
+  int32_t prim; /* primitive kind when this class *is* a primitive, else 0 */
+  const tyfield *fields;
+  int32_t nfields;
+  const tymethod *methods;
+  int32_t nmethods;
+  void **consts; /* enum constants, in declaration order */
+  int32_t nconsts;
 };
 
 /* Class handles installed by generated startup code. */
@@ -82,6 +134,12 @@ void ty_uncaught(void *e) __attribute__((noreturn));
 extern tyclass *TY_NPE, *TY_AIOOBE, *TY_ARITH, *TY_CCE, *TY_NEGARR, *TY_ASSERT,
     *TY_ILLARG, *TY_ILLSTATE, *TY_NOSUCHELEM, *TY_UNSUP, *TY_ARRAYSTORE;
 
+/* The exceptions java.lang.reflect throws by name. A program that never
+   reflects never names one, and the generated startup leaves the pointer NULL
+   then; the reflection entry points are the only code that reads them. */
+extern tyclass *TY_CNF, *TY_NSFE, *TY_NSME, *TY_ILLACCESS, *TY_INVOCATION,
+    *TY_INSTANTIATION;
+
 void *ty_npe(void);
 void *ty_aioobe(int64_t idx, int64_t len);
 void *ty_arith(const char *msg);
@@ -100,6 +158,9 @@ void *ty_assertfail(const char *msg);
 /* the class describes an array: its payload is a tyarr whose element slots the
    collector has to trace when the array holds references */
 #define TY_CLS_ARRAY 2
+/* the class is a record: Java answers Class.isRecord with it, and a record's
+   canonical constructor is the one its binding reads */
+#define TY_CLS_RECORD 16
 #define TY_HDR 16
 #define TY_ALIGN 16
 extern char *ty_bump;
@@ -198,6 +259,17 @@ static inline void *ty_itab(void *p, int32_t sel) {
 
 int32_t ty_instanceof(void *o, tyclass *c);
 void *ty_checkcast(void *o, tyclass *c);
+
+/* ty_class_is_sub reports whether k is c, or inherits from it: the walk both
+   instanceof and Class.isAssignableFrom need, in one place. */
+int32_t ty_class_is_sub(tyclass *k, tyclass *c);
+
+/* ty_class_target answers with the class a Class value names, for either form
+   the value comes in as (see ty_class_target in tyrt_reflect.c). ty_class_make
+   builds the wrapper for a class, which is what Class.forName and the members
+   handed back by reflection need. */
+tyclass *ty_class_target(void *c);
+void *ty_class_make(int64_t h, tyclass *clscls);
 
 /* ---- arrays ----------------------------------------------------------- */
 tyarr *ty_array_new(int64_t len, int64_t elemsize);
@@ -301,6 +373,109 @@ void ty_unimplemented(const char *what) __attribute__((noreturn));
 void ty_clinit(tyclass *c);
 void *ty_class_of(void *o);
 tystr *ty_class_name(void *c);
+
+/* ---- reflection ---------------------------------------------------------
+
+   The natives java.lang.reflect is written on. Everything here reads the
+   static tables the compiler emits; nothing builds a table at run time.
+
+   cm arguments are a Class *value* cast through int64_t: the prelude holds one
+   in a long field, because a Class value is either the object ty_class_of_cls
+   returns or the raw handle a class literal produces, and both are accepted by
+   ty_class_target. i arguments are indices into the class's own tables, and
+   the prelude only asks for indices a count it read first allows. */
+
+/* The tyclass a Class value names, whichever form it came in as. */
+tyclass *ty_class_target(void *c);
+
+/* Every entry point below takes cm: a Class value cast through int64_t, which
+   is how the prelude holds one (a Class value is either the object
+   ty_class_of_cls returns or the raw handle a class literal produces). One
+   that hands a class back returns another cm, 0 for null. */
+int64_t ty_class_handle(void *c);
+int32_t ty_class_mods(int64_t cm);
+int32_t ty_class_primkind(int64_t cm);
+int32_t ty_class_isprim(int64_t cm);
+int32_t ty_class_isarray(int64_t cm);
+int32_t ty_class_isenum(int64_t cm);
+int32_t ty_class_isrecord(int64_t cm);
+int32_t ty_class_isannotation(int64_t cm);
+int32_t ty_class_isinterface(int64_t cm);
+int32_t ty_class_isinstance(int64_t cm, void *o);
+int32_t ty_class_assignable(int64_t cm, int64_t other);
+int32_t ty_class_ifacecount(int64_t cm);
+int64_t ty_class_ifaceat(int64_t cm, int32_t i);
+tystr *ty_class_simplename(int64_t cm);
+int32_t ty_class_enumcount(int64_t cm);
+void *ty_class_enumat(int64_t cm, int32_t i);
+int64_t ty_class_superof(int64_t cm);
+
+/* forName: the name is matched against the program's own class names, the
+   binary names Java uses ("teyru.List", "main.Outer$Inner"). clscls is the
+   program's teyru.Class, which the call site hands over so the object it
+   returns is an instance of it. */
+/* forName: the name is matched against the table the call site passes -- the
+   program's own class names, the binary names Java uses ("teyru.List",
+   "main.Outer$Inner"). clscls is the program's teyru.Class, handed over so the
+   object returned is an instance of it.
+
+   The table is an argument rather than a global because of what a global
+   costs: an array naming every class pins every class, its tables and its
+   interface tables into every executable, whether or not the program can ever
+   reach forName. The emitter writes it inside the generated forNameOf, where
+   link-time optimisation drops it together with the function. */
+void *ty_class_forname_in(tystr *name, tyclass **table, int32_t count, tyclass *clscls);
+
+int32_t ty_class_fieldcount(int64_t cm, int32_t declared);
+tystr *ty_field_name(int64_t cm, int32_t declared, int32_t i);
+int64_t ty_field_type(int64_t cm, int32_t declared, int32_t i);
+int64_t ty_field_owner(int64_t cm, int32_t declared, int32_t i);
+int32_t ty_field_mods(int64_t cm, int32_t declared, int32_t i);
+void *ty_field_get(int64_t cm, int32_t declared, int32_t i, void *self);
+/* accessible is Field.setAccessible(true), which is what lets a final field be
+   written, as it is in Java. */
+void ty_field_set(int64_t cm, int32_t declared, int32_t i, void *self, void *v, int32_t accessible);
+
+int32_t ty_class_methodcount(int64_t cm, int32_t declared);
+tystr *ty_method_name(int64_t cm, int32_t declared, int32_t i);
+int64_t ty_method_owner(int64_t cm, int32_t declared, int32_t i);
+int32_t ty_method_mods(int64_t cm, int32_t declared, int32_t i);
+int32_t ty_method_kind(int64_t cm, int32_t declared, int32_t i);
+int64_t ty_method_ret(int64_t cm, int32_t declared, int32_t i);
+int32_t ty_method_paramcount(int64_t cm, int32_t declared, int32_t i);
+int64_t ty_method_param(int64_t cm, int32_t declared, int32_t i, int32_t p);
+void *ty_method_invoke(int64_t cm, int32_t declared, int32_t i, void *self, tyarr *args);
+
+int32_t ty_class_ctorcount(int64_t cm);
+int32_t ty_ctor_mods(int64_t cm, int32_t i);
+int32_t ty_ctor_paramcount(int64_t cm, int32_t i);
+int64_t ty_ctor_param(int64_t cm, int32_t i, int32_t p);
+void *ty_ctor_new(int64_t cm, int32_t i, tyarr *args);
+void *ty_class_newinst(int64_t cm);
+
+/* Argument conversion for Method.invoke and Constructor.newInstance. Java boxes
+   the arguments and checks each one against the parameter's type: a null or a
+   foreign box for a primitive parameter is an IllegalArgumentException, and so
+   is a reference of the wrong class. The plain ty_unbox_* helpers read the box
+   they are given without asking what it is, which is right for the prelude --
+   it knows -- and wrong here, where the argument came from a caller that does
+   not. */
+int32_t ty_rv_int(void *o);
+int64_t ty_rv_long(void *o);
+double ty_rv_double(void *o);
+float ty_rv_float(void *o);
+int16_t ty_rv_short(void *o);
+int8_t ty_rv_byte(void *o);
+uint16_t ty_rv_char(void *o);
+int32_t ty_rv_bool(void *o);
+void *ty_rv_ref(void *o, tyclass *want);
+
+/* java.lang.reflect.Array */
+void *ty_reflect_array_new(int64_t component, int32_t len);
+int32_t ty_reflect_array_len(void *a);
+void *ty_reflect_array_get(void *a, int32_t i);
+void ty_reflect_array_set(void *a, int32_t i, void *v);
+
 tystr *ty_str_ident(tystr *s);
 tystr *ty_str_copy(tystr *s);
 int32_t ty_str_eq_obj(tystr *s, void *o);

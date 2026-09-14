@@ -25,3 +25,12 @@ var Extra string
 //
 //go:embed src/tyrt_net.c
 var Net string
+
+// Reflect is tyrt_reflect.c: class metadata access, the field and method
+// tables, and reflective invocation. It is a file of its own for the same
+// reason as Net: a program that never reflects should not have to link the
+// invoker thunks' callee, and a reader looking for java.lang.reflect's
+// behaviour should not have to read past the allocator to find it.
+//
+//go:embed src/tyrt_reflect.c
+var Reflect string

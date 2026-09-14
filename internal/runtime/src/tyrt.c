@@ -26,6 +26,10 @@ tyclass *TY_OBJECT = NULL;
 
 tyclass *TY_NPE, *TY_AIOOBE, *TY_ARITH, *TY_CCE, *TY_NEGARR, *TY_ASSERT;
 tyclass *TY_ILLARG, *TY_ILLSTATE, *TY_NOSUCHELEM, *TY_UNSUP, *TY_ARRAYSTORE;
+/* java.lang.reflect's own exceptions. A program that never reflects never
+   names one and the generated startup leaves it NULL. */
+tyclass *TY_CNF, *TY_NSFE, *TY_NSME, *TY_ILLACCESS, *TY_INVOCATION,
+    *TY_INSTANTIATION;
 
 /* The class an array carries. The generated startup installs the program's own
    array class in TY_ARRAY; a program that links the runtime without that
@@ -53,8 +57,16 @@ static void *default_array_vt[5] = {
     (void *)default_array_tostring, (void *)default_array_hashcode,
     (void *)default_array_equals, (void *)default_array_getclass,
     (void *)default_array_clone};
-static tyclass default_array_cls = {"[array]", -1, TY_CLS_ARRAY, NULL, 0, NULL, 5,
-                                    default_array_vt, NULL, 0, 0, NULL, 0, NULL, 0, NULL};
+/* Designated rather than positional: the struct grows whenever reflection
+   learns something new about a class, and a positional initializer would grow a
+   silent zero in the wrong field every time. */
+static tyclass default_array_cls = {
+    .name = "[array]",
+    .id = -1,
+    .flags = TY_CLS_ARRAY,
+    .nvt = 5,
+    .vtable = default_array_vt,
+};
 
 static tyclass *array_class(void) {
   if (TY_ARRAY) return TY_ARRAY;
@@ -483,46 +495,38 @@ void ty_throw(void *e) {
   longjmp(ty_cur_catch->buf, 1);
 }
 
-static tyobj *make_ex(tyclass *c, const char *msg) {
-  tystr *m = ty_str_new(msg, (int64_t)strlen(msg));
-  tyobj *o = (tyobj *)ty_alloc(sizeof(tyobj) + 2 * sizeof(void *));
-  o->cls = c;
-  ((void **)((char *)o + sizeof(tyobj)))[0] = m;
-  ((void **)((char *)o + sizeof(tyobj)))[1] = NULL;
-  return o;
-}
 
 void *ty_npe(void) {
   tystr *m = ty_str_intern("null");
-  ty_throw(make_ex(TY_NPE, "null"));
+  ty_throw(ty_make_ex(TY_NPE, "null"));
   return m;
 }
 void *ty_aioobe(int64_t idx, int64_t len) {
   char buf[128];
   snprintf(buf, sizeof buf, "index %lld out of bounds for length %lld", (long long)idx, (long long)len);
-  ty_throw(make_ex(TY_AIOOBE, buf));
+  ty_throw(ty_make_ex(TY_AIOOBE, buf));
   return NULL;
 }
 void *ty_arith(const char *msg) {
-  ty_throw(make_ex(TY_ARITH, msg));
+  ty_throw(ty_make_ex(TY_ARITH, msg));
   return NULL;
 }
 void *ty_cce(tyclass *from, tyclass *to) {
   char buf[256];
   snprintf(buf, sizeof buf, "class %s cannot be cast to class %s", from ? from->name : "?", to ? to->name : "?");
-  ty_throw(make_ex(TY_CCE, buf));
+  ty_throw(ty_make_ex(TY_CCE, buf));
   return NULL;
 }
 void *ty_arraystore(void) {
-  ty_throw(make_ex(TY_ARRAYSTORE, "array element type mismatch"));
+  ty_throw(ty_make_ex(TY_ARRAYSTORE, "array element type mismatch"));
   return NULL;
 }
 void *ty_negarr(void) {
-  ty_throw(make_ex(TY_NEGARR, "Negative array size"));
+  ty_throw(ty_make_ex(TY_NEGARR, "Negative array size"));
   return NULL;
 }
 void *ty_assertfail(const char *msg) {
-  ty_throw(make_ex(TY_ASSERT, msg ? msg : "assertion failed"));
+  ty_throw(ty_make_ex(TY_ASSERT, msg ? msg : "assertion failed"));
   return NULL;
 }
 
@@ -546,16 +550,15 @@ static int iface_reaches(tyclass *k, tyclass *c, int depth) {
   return 0;
 }
 
-int32_t ty_instanceof(void *p, tyclass *c) {
-  tyobj *o = (tyobj *)p;
-  if (!o) return 0;
-  tyclass *k = o->cls;
-  if (!k) return 0;
+/* ty_class_is_sub is the walk instanceof and Class.isAssignableFrom share: is
+   k the class c, or does it inherit from it? An interface test looks at every
+   class in the chain, not only the one a value was built from, because a
+   subclass inherits the interfaces its superclasses implement and did not
+   redeclare them. */
+int32_t ty_class_is_sub(tyclass *k, tyclass *c) {
+  if (!k || !c) return 0;
   if (k == c) return 1;
   if (c->flags & 1) {
-    /* An interface test looks at every class in the chain, not only the one
-     * this value was built from: a subclass inherits the interfaces its
-     * superclasses implement, and it did not redeclare them. */
     for (tyclass *s = k; s; s = s->super)
       if (iface_reaches(s, c, 0)) return 1;
     return 0;
@@ -563,6 +566,12 @@ int32_t ty_instanceof(void *p, tyclass *c) {
   for (tyclass *s = k->super; s; s = s->super)
     if (s == c) return 1;
   return 0;
+}
+
+int32_t ty_instanceof(void *p, tyclass *c) {
+  tyobj *o = (tyobj *)p;
+  if (!o) return 0;
+  return ty_class_is_sub(o->cls, c);
 }
 
 void *ty_checkcast(void *o, tyclass *c) {

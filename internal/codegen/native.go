@@ -22,6 +22,13 @@ type nativeFn struct {
 	// runtime builds a Class object from a tyclass this header-less C file
 	// cannot name.
 	classHint string
+	// clsArg names a prelude class whose generated tyclass is appended as the
+	// call's last argument while fn keeps its own name. classHint cannot do
+	// this: it replaces the helper with ty_class_of_cls, which is what one
+	// caller needed. Reflection's factories need the other shape -- the runtime
+	// builds a Class object and a header-less C file cannot name the program's
+	// teyru.Class.
+	clsArg string
 	// proto is the C prototype of fn, repeated as an `extern` at every call
 	// site. A table that carries its own declaration needs nothing added to
 	// tyrt.h, which is what lets a feature (networking, say) ship its native
@@ -118,6 +125,62 @@ var nativeTable = map[string]nativeFn{
 	"Object.equals(Object)": {fn: "ty_obj_eq", recv: "void*"},
 	"Object.getClass()":     {fn: "ty_class_of", recv: "void*", classHint: "teyru.Class"},
 	"Class.getName()":       {fn: "ty_class_name", recv: "void*"},
+
+	// ---- java.lang.reflect
+	//
+	// One entry per prelude native in lib/26_reflect.teyru. The receivers are
+	// static methods taking a class handle as an int64_t, or a member object
+	// whose fields the C side never reads -- it is handed the handle, the table
+	// and the index, which is what a member object is.
+	"Class.handleOf(Class)":                   {fn: "ty_class_handle"},
+	"Class.simpleNameOf(J)":                   {fn: "ty_class_simplename"},
+	"Class.modsOf(J)":                         {fn: "ty_class_mods"},
+	"Class.isPrimOf(J)":                       {fn: "ty_class_isprim"},
+	"Class.isArrayOf(J)":                      {fn: "ty_class_isarray"},
+	"Class.isEnumOf(J)":                       {fn: "ty_class_isenum"},
+	"Class.isRecordOf(J)":                     {fn: "ty_class_isrecord"},
+	"Class.isInterfaceOf(J)":                  {fn: "ty_class_isinterface"},
+	"Class.superOf(J)":                        {fn: "ty_class_superof"},
+	"Class.isInstanceOf(J,Object)":            {fn: "ty_class_isinstance"},
+	"Class.assignableOf(J,J)":                 {fn: "ty_class_assignable"},
+	"Class.ifaceCountOf(J)":                   {fn: "ty_class_ifacecount"},
+	"Class.ifaceAtOf(J,I)":                    {fn: "ty_class_ifaceat"},
+	"Class.fieldCountOf(J,Z)":                 {fn: "ty_class_fieldcount"},
+	"Class.fieldNameOf(J,Z,I)":                {fn: "ty_field_name"},
+	"Class.fieldTypeOf(J,Z,I)":                {fn: "ty_field_type"},
+	"Class.fieldOwnerOf(J,Z,I)":               {fn: "ty_field_owner"},
+	"Class.fieldModsOf(J,Z,I)":                {fn: "ty_field_mods"},
+	"Class.fieldGetOf(J,Z,I,Object)":          {fn: "ty_field_get"},
+	"Class.fieldSetOf(J,Z,I,Object,Object,Z)": {fn: "ty_field_set"},
+	"Class.methodCountOf(J,Z)":                {fn: "ty_class_methodcount"},
+	"Class.methodNameOf(J,Z,I)":               {fn: "ty_method_name"},
+	"Class.methodOwnerOf(J,Z,I)":              {fn: "ty_method_owner"},
+	"Class.methodModsOf(J,Z,I)":               {fn: "ty_method_mods"},
+	"Class.methodRetOf(J,Z,I)":                {fn: "ty_method_ret"},
+	"Class.methodParamCountOf(J,Z,I)":         {fn: "ty_method_paramcount"},
+	"Class.methodParamOf(J,Z,I,I)":            {fn: "ty_method_param"},
+	"Class.methodInvokeOf(J,Z,I,Object,A)":    {fn: "ty_method_invoke"},
+	"Class.ctorCountOf(J)":                    {fn: "ty_class_ctorcount"},
+	"Class.ctorModsOf(J,I)":                   {fn: "ty_ctor_mods"},
+	"Class.ctorParamCountOf(J,I)":             {fn: "ty_ctor_paramcount"},
+	"Class.ctorParamOf(J,I,I)":                {fn: "ty_ctor_param"},
+	"Class.ctorNewOf(J,I,A)":                  {fn: "ty_ctor_new"},
+	"Class.newInstOf(J)":                      {fn: "ty_class_newinst"},
+	"Class.enumCountOf(J)":                    {fn: "ty_class_enumcount"},
+	"Class.enumAtOf(J,I)":                     {fn: "ty_class_enumat"},
+	"Class.makeOf(J)":                         {fn: "ty_class_make", clsArg: "teyru.Class"},
+	"Array.newArrayOf(J,I)":                   {fn: "ty_reflect_array_new"},
+	"Array.lengthOf(Object)":                  {fn: "ty_reflect_array_len"},
+	"Array.getOf(Object,I)":                   {fn: "ty_reflect_array_get"},
+	"Array.setOf(Object,I,Object)":            {fn: "ty_reflect_array_set"},
+	"Reflect.toInt(Object)":                   {fn: "ty_rv_int"},
+	"Reflect.toLong(Object)":                  {fn: "ty_rv_long"},
+	"Reflect.toDouble(Object)":                {fn: "ty_rv_double"},
+	"Reflect.toFloat(Object)":                 {fn: "ty_rv_float"},
+	"Reflect.toShort(Object)":                 {fn: "ty_rv_short"},
+	"Reflect.toByte(Object)":                  {fn: "ty_rv_byte"},
+	"Reflect.toChar(Object)":                  {fn: "ty_rv_char"},
+	"Reflect.toBool(Object)":                  {fn: "ty_rv_bool"},
 
 	// ---- String
 	"String.length()":           {fn: "ty_str_len", recv: "tystr*"},
@@ -570,7 +633,11 @@ var nativeTable = map[string]nativeFn{
 func (e *Emitter) nativeCall(m *ast.Method, recv string, args []ast.Expr) string {
 	nf, ok := nativeTable[nativeKey(m)]
 	if !ok {
-		return "0"
+		// A native method with no binding is this compiler's bug rather than
+		// the program's: the prelude declared an operation the runtime has no
+		// helper for. It used to emit 0 -- the program built, ran and answered
+		// wrong -- so the call fails loudly where it is made instead.
+		return "({ ty_unimplemented(" + e.cstr(m.Owner.Full+"."+m.Name) + "); 0; })"
 	}
 	vals := make([]string, 0, len(args))
 	for i, a := range args {
@@ -580,12 +647,31 @@ func (e *Emitter) nativeCall(m *ast.Method, recv string, args []ast.Expr) string
 		}
 		vals = append(vals, e.coerce(e.expr(a), a.GetType(), want))
 	}
+	return e.nativeInlineCall(nf, m, recv, vals)
+}
+
+// nativeInlineCall renders the call to a bound helper: the receiver, then the
+// arguments, with the class the runtime needs appended where the table says so.
+// A call site in a prelude method and a synthesized body both come through
+// here, so clsArg, classHint and proto cannot be honoured by one of them and
+// forgotten by the other -- forgotten clsArg is a missing argument and a
+// mismatched prototype, which the C compiler reports as an error inside the
+// runtime's header.
+func (e *Emitter) nativeInlineCall(nf nativeFn, m *ast.Method, recv string, vals []string) string {
 	var call string
 	if t := e.psTwin(m, nf); t != nil {
 		// The receiver comes first: which descriptor the text goes to is a
 		// property of the PrintStream object, not of the method.
 		body := t.name + "(" + strings.Join(append([]string{"(void*)" + recv}, vals...), ", ") + ")"
 		call = "({ extern " + t.proto + "; " + body + "; })"
+	} else if nf.clsArg != "" {
+		if cl := e.prog.LookupClass(nf.clsArg); cl != nil {
+			all := append([]string{}, vals...)
+			all = append(all, "(tyclass*)&cls_"+mangle(cl.Full))
+			call = nf.fn + "(" + strings.Join(all, ", ") + ")"
+		} else {
+			call = "0"
+		}
 	} else if nf.classHint != "" && e.prog.LookupClass(nf.classHint) != nil {
 		// getClass hands the runtime the tyclass of this program's Class, so
 		// that the object it returns is an instance of it.
