@@ -191,7 +191,9 @@ source → lexer → parser → ast → sema → codegen
   - 沒有泛型型別參數的反射（`getGenericType` 等不存在）。
   - 原生型別的取值器只收完全相符的裝箱型別，Java 的拓寬（例如對 `byte` 欄位
     呼叫 `getInt`）在這裡是 `IllegalArgumentException`。
-  - 存取控制不檢查，只有 final 攔（`setAccessible(true)` 之後可寫）。
+  - 存取控制不檢查：私有成員可以直接讀寫。final 一律攔，`setAccessible(true)`
+    之後可以寫 instance final，但 static final 一律拒絕（javac 也是這樣：JDK 不再
+    讓它通過，即使 setAccessible 過）。
   - 內部類別與區域類別不能被反射建構（沒有外圍實例可用）。
   - 成員表（欄位、方法與 invoker）只在使用者程式真的可能用到反射時才寫進執行檔
     （`emit.go` 的 `reflectUsed`）：它們是唯一會指名別的類別的中繼資料，擺在檔案

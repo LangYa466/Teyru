@@ -24,6 +24,9 @@ abstract class Number extends Object {
    program that prints the exception's message should print what Java prints. */
 
 class Byte extends Number implements Comparable<Byte> {
+  /* Java's Byte.TYPE: the class byte.class denotes, so a program that writes one
+     and a program that writes the other are holding the same object. */
+  public static final Class TYPE = byte.class
   public static final byte MIN_VALUE = -128
   public static final byte MAX_VALUE = 127
   public static final int SIZE = 8
@@ -74,6 +77,9 @@ class Byte extends Number implements Comparable<Byte> {
 }
 
 class Short extends Number implements Comparable<Short> {
+  /* Java's Short.TYPE: the class short.class denotes, so a program that writes one
+     and a program that writes the other are holding the same object. */
+  public static final Class TYPE = short.class
   public static final short MIN_VALUE = -32768
   public static final short MAX_VALUE = 32767
   public static final int SIZE = 16
@@ -121,6 +127,9 @@ class Short extends Number implements Comparable<Short> {
 }
 
 class Integer extends Number implements Comparable<Integer> {
+  /* Java's Integer.TYPE: the class int.class denotes, so a program that writes one
+     and a program that writes the other are holding the same object. */
+  public static final Class TYPE = int.class
   public static final int MIN_VALUE = -2147483648
   public static final int MAX_VALUE = 2147483647
   public static final int SIZE = 32
@@ -214,6 +223,9 @@ class Integer extends Number implements Comparable<Integer> {
 }
 
 class Long extends Number implements Comparable<Long> {
+  /* Java's Long.TYPE: the class long.class denotes, so a program that writes one
+     and a program that writes the other are holding the same object. */
+  public static final Class TYPE = long.class
   public static final long MIN_VALUE = -9223372036854775808L
   public static final long MAX_VALUE = 9223372036854775807L
   public static final int SIZE = 64
@@ -301,6 +313,9 @@ class Long extends Number implements Comparable<Long> {
 }
 
 class Float extends Number implements Comparable<Float> {
+  /* Java's Float.TYPE: the class float.class denotes, so a program that writes one
+     and a program that writes the other are holding the same object. */
+  public static final Class TYPE = float.class
   public static final float MAX_VALUE = 3.4028235E38f
   public static final float MIN_VALUE = 1.4E-45f
   public static final float POSITIVE_INFINITY = 1.0f / 0.0f
@@ -354,6 +369,9 @@ class Float extends Number implements Comparable<Float> {
 }
 
 class Double extends Number implements Comparable<Double> {
+  /* Java's Double.TYPE: the class double.class denotes, so a program that writes one
+     and a program that writes the other are holding the same object. */
+  public static final Class TYPE = double.class
   public static final double MAX_VALUE = 1.7976931348623157E308
   public static final double MIN_VALUE = 4.9E-324
   public static final double POSITIVE_INFINITY = 1.0 / 0.0
@@ -407,6 +425,9 @@ class Double extends Number implements Comparable<Double> {
 }
 
 class Character extends Object implements Comparable<Character> {
+  /* Java's Character.TYPE: the class char.class denotes, so a program that writes one
+     and a program that writes the other are holding the same object. */
+  public static final Class TYPE = char.class
   public static final char MIN_VALUE = 0
   public static final char MAX_VALUE = 65535
   public static final int MIN_RADIX = 2
@@ -438,6 +459,9 @@ class Character extends Object implements Comparable<Character> {
 }
 
 class Boolean extends Object implements Comparable<Boolean> {
+  /* Java's Boolean.TYPE: the class boolean.class denotes, so a program that writes one
+     and a program that writes the other are holding the same object. */
+  public static final Class TYPE = boolean.class
   public static final Boolean TRUE = Boolean.valueOf(true)
   public static final Boolean FALSE = Boolean.valueOf(false)
 
