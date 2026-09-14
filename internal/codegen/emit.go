@@ -618,7 +618,19 @@ func (e *Emitter) emitMethod(cl *ast.Class, m *ast.Method, idx int) {
 	if m.IsCtor {
 		e.emitCtorBody(cl, m)
 	} else if body != nil {
-		e.emitBlockInner(body)
+		if m.Mods.Has(ast.ModSynchronized) {
+			// A synchronized method holds its monitor for the whole body, the
+			// way Java's does. The lock is the instance, or the class for a
+			// static method -- the same object Java locks, since a Class value
+			// in Teyru is that class's tyclass and there is exactly one per
+			// class. Until the runtime's monitors became real this modifier was
+			// parsed, kept for reflection and emitted as nothing at all.
+			e.syncBlock(syncMethodLock(cl, m), false, func() {
+				e.emitBlockInner(body)
+			})
+		} else {
+			e.emitBlockInner(body)
+		}
 	} else {
 		// Only reachable for abstract or native methods with no implementation;
 		// fail loudly instead of returning an undefined value.
@@ -626,6 +638,17 @@ func (e *Emitter) emitMethod(cl *ast.Class, m *ast.Method, idx int) {
 	}
 	e.indent--
 	e.code.WriteString("}\n\n")
+}
+
+// syncMethodLock is the monitor of a synchronized method: the receiver for an
+// instance method, and the class itself for a static one. A tyclass address is
+// stable for the life of the program and unique per class, which is what a
+// monitor needs of a key; Java locks the Class object, and this is that class's.
+func syncMethodLock(cl *ast.Class, m *ast.Method) string {
+	if m.IsStatic() {
+		return "(void*)&cls_" + mangle(cl.Full)
+	}
+	return "(void*)this"
 }
 
 // ctorCallIndex returns the position of the this()/super() call in a
@@ -784,6 +807,11 @@ func (e *Emitter) tmpName() string {
 	return fmt.Sprintf("_t%d", e.tmp)
 }
 
+// threadFinish is what main does last: wait for every other thread, so that a
+// thread's output is not cut off by main returning. It is a call and not a
+// scheduling trick because the runtime owns the thread registry (tyrt_thread.c).
+const threadFinish = "ty_thread_join_all();\n"
+
 // entry emits main() and the startup sequence.
 func (e *Emitter) entry() string {
 	var b strings.Builder
@@ -820,6 +848,7 @@ func (e *Emitter) entry() string {
 		{"TY_NEGARR", e.prog.Builtins.NegArr}, {"TY_ASSERT", e.prog.Builtins.Assertion},
 		{"TY_ILLARG", e.prog.Builtins.IllArg}, {"TY_ILLSTATE", e.prog.Builtins.IllState},
 		{"TY_NOSUCHELEM", e.prog.Builtins.NoSuchElem}, {"TY_UNSUP", e.prog.Builtins.Unsup},
+		{"TY_ILLMON", e.prog.Builtins.IllMon},
 		{"TY_ARRAYSTORE", e.prog.Builtins.ArrayStore},
 		{"TY_CNF", e.prog.Builtins.ClassNotFound}, {"TY_NSFE", e.prog.Builtins.NoSuchField},
 		{"TY_NSME", e.prog.Builtins.NoSuchMethod}, {"TY_ILLACCESS", e.prog.Builtins.IllAccess},
@@ -850,7 +879,7 @@ func (e *Emitter) entry() string {
 		fmt.Fprintf(&b, "  ty_clinit(&cls_%s);\n", mangle(cl.Full))
 	}
 	if main == nil {
-		b.WriteString("  return 0;\n}\n")
+		b.WriteString("  " + threadFinish + "  return 0;\n}\n")
 		return b.String()
 	}
 	recv := ""
@@ -870,7 +899,12 @@ func (e *Emitter) entry() string {
 	} else {
 		fmt.Fprintf(&b, "  %s(%s);\n", e.cfunc(main), strings.TrimSuffix(recv, ", "))
 	}
-	b.WriteString("  return 0;\n}\n")
+	// The process ends with its last thread, not with main: a program that
+	// starts a thread and returns must not lose what that thread printed, which
+	// is what java.lang.Thread's "the virtual machine exits when every
+	// non-daemon thread has finished" means here. It is a walk of the thread
+	// registry that a program without threads pays a call for.
+	b.WriteString("  " + threadFinish + "  return 0;\n}\n")
 	return b.String()
 }
 

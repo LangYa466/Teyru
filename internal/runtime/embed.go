@@ -34,3 +34,14 @@ var Net string
 //
 //go:embed src/tyrt_reflect.c
 var Reflect string
+
+// Thread is tyrt_thread.c: the per-thread runtime state, the thread registry,
+// the stop-the-world protocol a collection runs the other threads through, and
+// the monitors `synchronized` and Object.wait are built on. It is a file of its
+// own because it is the one part of the runtime that is about more than one
+// thread at a time: a program that never starts a thread still links it (the
+// main thread is a thread), but a reader looking for the allocator or for
+// java.lang has no reason to read past it.
+//
+//go:embed src/tyrt_thread.c
+var Thread string
