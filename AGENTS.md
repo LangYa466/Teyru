@@ -199,6 +199,10 @@ source → lexer → parser → ast → sema → codegen
     （`emit.go` 的 `reflectUsed`）：它們是唯一會指名別的類別的中繼資料，擺在檔案
     層級會把整個標準程式庫釘進每一支程式（實測 hello world 從 445.9 KB 漲到
     2.9 MB）。用到反射的程式仍要付出整份約 3 MB，這是這個設計尚未解決的成本。
+  - 啟動時的尖峰記憶體（hello world）從 2.2 MB 變成 4.1 MB：加入反射翻譯單元之後，
+    LTO 不再丟掉那塊 8 MB 的 `ty_roots` 保留區與相關符號。差異已量到，根因未定——
+    同一支程式額外帶一塊 8 MB 的未觸碰 `.bss` 時 RSS 只多 64 kB，所以不是那塊保留區
+    本身；把 `forName` 的表拿掉也只降回約 4.1 MB。
 - 沒有執行緒（`java.util` 集合、`java.io`、`java.net` 都有）。
 - 與 Java 生態不相容（沒有 JAR、沒有 JDK 類別庫、沒有 JNI）。
 - GC 為保守式標記清除，非分代；大量短命物件的情境仍落後 HotSpot 的逃逸分析。
