@@ -72,6 +72,174 @@ package teyru
 
 // ---------------------------------------------------------------- messages
 
+// MultipartFile is one part of a multipart/form-data request: the field it was
+// sent as, the name the client's file had, the type the part declared, and the
+// part's bytes as they arrived. Spring's MultipartFile also knows how to write
+// itself to disk or hand out a stream; this is the four things a handler reads,
+// and the content is a String because a request body already is one: the
+// server reads it as text, so a file arrives as the characters that were sent.
+class MultipartFile {
+  public String name = ""
+  public String originalFilename = ""
+  public String contentType = ""
+  public String content = ""
+
+  // isEmpty distinguishes a part that was sent with no bytes -- a form field a
+  // browser submits empty, a file upload of a zero-length file -- which is the
+  // question a handler asks before storing what it was given.
+  public boolean isEmpty() {
+    return content.isEmpty()
+  }
+
+  public int size() {
+    return content.length()
+  }
+
+  public String toString() {
+    return name + " (" + originalFilename + ", " + contentType + ", " + size() + " bytes)"
+  }
+}
+
+// MultipartForm parses a multipart/form-data body (RFC 7578).
+//
+// The body is a sequence of parts, each introduced by a line holding "--" and
+// the boundary the Content-Type named, then the part's own headers
+// (Content-Disposition names the field and, for an upload, the file), then a
+// blank line, then the content up to the CRLF in front of the next delimiter.
+// The delimiter the request declares is the one string a part's content cannot
+// contain, which is what makes the framing work at all.
+//
+// Everything here answers with what it found rather than throwing: a request
+// that is not multipart, or names no boundary, or whose body stops before the
+// closing delimiter is a request that does not carry what was asked for. What
+// to do about that -- a 400, a default -- is the handler's to decide.
+class MultipartForm {
+  // boundary is the boundary a Content-Type names, or "" when the type is not
+  // multipart/form-data or its boundary parameter is not there.
+  public static String boundary(String contentType) {
+    if (contentType.toLowerCase().startsWith("multipart/form-data") == false) {
+      return ""
+    }
+    return parameter(contentType, "boundary")
+  }
+
+  // part answers the part a field name was sent as, or null when the request
+  // carries no such part.
+  public static MultipartFile part(String body, String boundary, String name) {
+    if (boundary.length() == 0) {
+      return null
+    }
+    List<MultipartFile> all = parts(body, boundary)
+    for (int i = 0 : i < all.size() : i++) {
+      if (all.get(i).name.equals(name)) {
+        return all.get(i)
+      }
+    }
+    return null
+  }
+
+  // parts splits a body into the parts read so far. A body that stops in the
+  // middle of a part ends the parse, which is what a truncated upload can be
+  // answered with: the parts before the break are still parts.
+  public static List<MultipartFile> parts(String body, String boundary) {
+    List<MultipartFile> out = new ArrayList<MultipartFile>()
+    if (boundary.length() == 0) {
+      return out
+    }
+    String delimiter = "--" + boundary
+    int start = body.indexOf(delimiter)
+    while (start >= 0) {
+      int line = start + delimiter.length()
+      // the closing delimiter is the one followed by "--"
+      if (body.startsWith("--", line)) {
+        return out
+      }
+      // the delimiter's CRLF, then the part's headers, then the blank line
+      // that ends them
+      int blank = body.indexOf("\r\n\r\n", line)
+      int next = blank < 0 ? -1 : body.indexOf(delimiter, blank)
+      if (next < 0) {
+        return out
+      }
+      String headers = body.substring(line + 2, blank + 2)
+      // the content ends at the CRLF in front of the next delimiter
+      int begin = blank + 4
+      int end = next
+      if (end - 2 >= begin && body.charAt(end - 2) == '\r' && body.charAt(end - 1) == '\n') {
+        end -= 2
+      }
+      MultipartFile f = of(headers, body.substring(begin, end))
+      if (f != null) {
+        out.add(f)
+      }
+      // the delimiter that ended this part is the one that introduces the
+      // next, so the loop reads it again -- and sees it close the body when it
+      // is the last one
+      start = next
+    }
+    return out
+  }
+
+  // of is one part's headers and content as a MultipartFile, or null when the
+  // headers do not name the field the part belongs to: a part without a
+  // Content-Disposition cannot be asked for by name, so it is not one.
+  private static MultipartFile of(String headers, String content) {
+    MultipartFile f = new MultipartFile()
+    f.content = content
+    for (String line : WebUtil.splitRawLines(headers)) {
+      int colon = line.indexOf(":")
+      if (colon <= 0) {
+        continue
+      }
+      String field = line.substring(0, colon).trim().toLowerCase()
+      String value = line.substring(colon + 1).trim()
+      if (field.equals("content-disposition")) {
+        f.name = parameter(value, "name")
+        f.originalFilename = parameter(value, "filename")
+      } else if (field.equals("content-type")) {
+        f.contentType = value
+      }
+    }
+    return f.name.length() == 0 ? null : f
+  }
+
+  // parameter is one parameter of a header value -- the boundary of a
+  // Content-Type, the name or the filename of a Content-Disposition. The value
+  // may be quoted, which is how a filename with a space survives, and a
+  // parameter is only a parameter when it follows a ";" or starts the value, so
+  // that "name" is not found inside "filename".
+  public static String parameter(String header, String param) {
+    String lower = header.toLowerCase()
+    int at = 0
+    while (true) {
+      int i = lower.indexOf(param, at)
+      if (i < 0) {
+        return ""
+      }
+      at = i + param.length()
+      if (i > 0 && lower.charAt(i - 1) != ';' && lower.charAt(i - 1) != ' ') {
+        continue
+      }
+      while (at < header.length() && header.charAt(at) == ' ') {
+        at++
+      }
+      if (at >= header.length() || header.charAt(at) != '=') {
+        continue
+      }
+      int v = at + 1
+      if (v < header.length() && header.charAt(v) == '"') {
+        int quote = header.indexOf('"', v + 1)
+        if (quote < 0) {
+          return header.substring(v + 1)
+        }
+        return header.substring(v + 1, quote)
+      }
+      int semi = header.indexOf(';', v)
+      return semi < 0 ? header.substring(v).trim() : header.substring(v, semi).trim()
+    }
+  }
+}
+
 class HttpRequest {
   public String method = ""
   public String path = ""
@@ -146,6 +314,20 @@ class HttpRequest {
       formNames.add(WebUtil.urldecode(pair.substring(0, eq)))
       formValues.add(WebUtil.urldecode(pair.substring(eq + 1)))
     }
+  }
+
+  // multipart answers the file a multipart/form-data request carries as the
+  // field `name`, or null -- when the request is not multipart, when its
+  // Content-Type names no boundary, when it carries no part of that name, or
+  // when its body is not the multipart it claims to be. A handler asks a
+  // question about the request, and a request that is not what it says is an
+  // answer of "no file": what to do about that is the handler's to decide.
+  //
+  // The form fields of a multipart request are not parts of readForm: a part
+  // is asked for here by name, the way a file is, because the two arrive
+  // together and only one of them has a filename.
+  public MultipartFile multipart(String name) {
+    return MultipartForm.part(body, MultipartForm.boundary(header("Content-Type")), name)
   }
 
   // keepAlive answers whether the connection stays open after this request.
@@ -1196,6 +1378,14 @@ class HttpServer {
     } catch (TypeMismatchException e) {
       // the request named a value the parameter cannot hold: the client's
       // mistake, so it is a 400 rather than the advice below
+      out = new HttpResponse()
+      out.status = 400
+      out.body = "bad request: " + e.getMessage()
+    } catch (ValidationException e) {
+      // a body the binding built broke a constraint its own class declares --
+      // a field that may not be null, a length, a bound. The client sent it,
+      // so it is a 400 like the mismatch above, and the message names the
+      // field the client has to fix.
       out = new HttpResponse()
       out.status = 400
       out.body = "bad request: " + e.getMessage()

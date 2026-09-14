@@ -116,12 +116,18 @@ class RouteParams {
 
   // body is a @RequestBody: a String parameter is the body as it arrived, and
   // any other type is the body parsed into that class, which is the JSON
-  // binding reading the class as it does anywhere else.
+  // binding reading the class as it does anywhere else. A bound object is then
+  // checked against the constraints its fields declare (lib/36_validation.teyru):
+  // a body that does not satisfy the type it was sent for is a 400 the caller
+  // has to fix, and the check is here because this is the one place a handler
+  // parameter becomes a whole object.
   public static Object body(HttpRequest req, Class type) {
     if (type.equals(String.class)) {
       return req.body
     }
-    return JsonBinding.readFrom(req.body, type)
+    Object bound = JsonBinding.readFrom(req.body, type)
+    Validation.check(bound)
+    return bound
   }
 
   // convert is the text of a request as the type the method declares. A value
@@ -172,8 +178,11 @@ class RouteParams {
       throw new TypeMismatchException(WebConvert.mismatch(raw, param, type.getSimpleName()))
     }
     // a handler parameter that is an object is bound from the body, which is
-    // what @RequestBody would have said
-    return JsonBinding.readFrom(raw, type)
+    // what @RequestBody would have said -- and, like one, is checked before the
+    // handler sees it
+    Object bound = JsonBinding.readFrom(raw, type)
+    Validation.check(bound)
+    return bound
   }
 }
 
