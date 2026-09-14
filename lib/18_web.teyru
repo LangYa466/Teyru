@@ -951,11 +951,12 @@ class Router {
 
 // ---------------------------------------------------------------- server
 
-// HttpServer serves the routes on a port. Requests are handled one at a time:
-// the language has no threads, so a second connection waits for the first to
+// HttpServer serves the routes on a port. Requests are handled one at a time by
+// whichever thread runs the loop, so a second connection waits for the first to
 // finish. That is honest about what it is -- a server for a program that
-// answers requests, not one that serves a crowd -- and the shape is the one a
-// thread-per-connection version needs.
+// answers requests, not one that serves a crowd -- and it is what makes the
+// server usable from a thread: ServerTask is the loop on one, and a program
+// that wants a connection answered while it does something else puts it there.
 class HttpServer {
   private int port
   private int boundPort = -1
@@ -1039,11 +1040,10 @@ class HttpServer {
   // serve accepts connections and answers them, one at a time, until the
   // program ends.
   //
-  // One at a time is not a limitation of this code but of the language: there
-  // are no threads (docs/language.md §13), so a second client waits for the
-  // first to finish. The shape is the one a thread-per-connection version needs
-  // -- accept, read one request, answer it, close -- so adding threads later
-  // changes where the loop runs, not what it does.
+  // One at a time is the shape -- accept, read one request, answer it, close --
+  // and it is a loop, so a second client waits for the first to finish. A
+  // program that cannot wait for it puts the loop on a thread of its own,
+  // which is what ServerTask does; the loop itself does not change.
   public void serve() {
     bind()
     try {
@@ -1479,6 +1479,70 @@ class HttpServer {
       chain = ctx == null ? new ArrayList<HandlerInterceptor>() : WebAdvice.interceptors(ctx)
     }
     return chain
+  }
+}
+
+// ServerTask runs a server's accept loop on a thread of its own.
+//
+// A server answers one connection at a time, and both of its loops are shaped
+// for a program that has nothing else to do: serve() runs until the program
+// ends, and serveIdle() gives up after a wait with no connection and hands
+// back how many it answered. A program with something else to do -- a client
+// of its own, a scheduled task, a test that calls the server it started --
+// needs the loop somewhere else and a way to stop it, which is this:
+//
+//   ServerTask task = new ServerTask(server)
+//   Thread thread = new Thread(task, "server")
+//   thread.start()
+//   ... requests ...
+//   task.stop()
+//   thread.join()
+//
+// Each pass of the loop is one serveIdle burst, so a stop is noticed within a
+// burst's wait rather than at the end of a connection that may never come. The
+// listener stays open between passes -- that is what serveIdle does -- so a
+// client that connects while the loop is between two of them is answered on the
+// next one rather than refused.
+class ServerTask implements Runnable {
+  private HttpServer server
+  // idleMs is how long one pass waits for a connection, and therefore how long
+  // a stop may take to be noticed. A fiftieth of a second is short enough that
+  // stopping is immediate to a caller and long enough that a server answering
+  // requests does not spin between them.
+  private int idleMs = 20
+  private boolean running = false
+
+  public ServerTask(HttpServer server) {
+    this.server = server
+  }
+
+  // run serves until stop() is called. It is what a Thread runs, and it is the
+  // loop itself: the serving starts when the thread does.
+  public void run() {
+    synchronized (this) {
+      running = true
+    }
+    // bind is what a caller that wants the port first -- to build a URL, to say
+    // what it is listening on -- calls before starting the thread; the server
+    // binds once, so calling it here again is nothing.
+    server.bind()
+    while (isRunning()) {
+      server.serveIdle(idleMs)
+    }
+  }
+
+  // stop asks the loop to finish. It does not interrupt a connection that is
+  // being answered: the loop stops between connections, which is the only
+  // place it can stop without leaving a client without an answer.
+  public synchronized void stop() {
+    running = false
+  }
+
+  // isRunning answers whether the loop is going, which is how run() is asked
+  // whether to take another pass -- under the same monitor stop() takes, so
+  // that the answer a thread reads is the one the caller wrote.
+  public synchronized boolean isRunning() {
+    return running
   }
 }
 
