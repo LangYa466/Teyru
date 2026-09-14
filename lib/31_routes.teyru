@@ -178,6 +178,9 @@ class RouteResponse {
     if (out instanceof HttpResponse) {
       return (HttpResponse) out
     }
+    if (out instanceof ResponseEntity) {
+      return ((ResponseEntity) out).toHttpResponse()
+    }
     HttpResponse res = new HttpResponse()
     if (out == null) {
       return res

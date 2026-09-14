@@ -27,9 +27,12 @@ class BeanScanner {
   // componentStereotypes are the annotations that make a class a bean. They are
   // synonyms, as in Spring: the name says what layer the class belongs to, not
   // what the container does with it.
-  public static BeanDefinition[] all(Class type) {
+  public static BeanDefinition[] all(Class type, String profile) {
     Annotation[] classAnnos = type.getAnnotations()
     List<BeanDefinition> out = new ArrayList<BeanDefinition>()
+    if (active(classAnnos, profile) == false) {
+      return new BeanDefinition[0]
+    }
     if (stereotype(classAnnos) != null) {
       out.add(of(type, classAnnos))
     }
@@ -48,6 +51,30 @@ class BeanScanner {
       all[i] = out.get(i)
     }
     return all
+  }
+
+  // active answers whether a class is built under the profile a program was
+  // started with: a class with no @Profile always is, a class with one is when
+  // the profile is named in `spring.profiles.active`, and a profile list is
+  // comma separated the way Spring writes it.
+  public static boolean active(Annotation[] annos, String profile) {
+    Annotation a = has(annos, "Profile")
+    if (a == null) {
+      return true
+    }
+    String want = a.stringValue("value")
+    if (want.length() == 0) {
+      return true
+    }
+    if (profile == null || profile.length() == 0) {
+      return false
+    }
+    for (String p : profile.split(",")) {
+      if (p.trim().equals(want)) {
+        return true
+      }
+    }
+    return false
   }
 
   // stereotype answers with the annotation that makes the class a bean, or null
@@ -286,9 +313,73 @@ class ReflectInjector implements BeanInjector {
         fs[i].set(bean, ctx.getBean(fs[i].getType(), qualifier))
       }
     }
+    bindProperties(bean, ctx)
     Method[] ms = type.getDeclaredMethods()
     for (int i = 0 : i < ms.length : i++) {
       if (ms[i].isAnnotationPresent(PostConstruct.class)) {
+        ms[i].invoke(bean)
+      }
+    }
+  }
+
+  // bindProperties is @ConfigurationProperties: a class's fields are read from
+  // the configuration under the prefix the annotation names, so a settings class
+  // is a class with fields rather than a call per property. The key is the
+  // field's name with its capitals turned into dashes, which is the relaxed
+  // binding Spring documents: `maxSize` is read as `max-size`.
+  public void bindProperties(Object bean, ApplicationContext ctx) {
+    Annotation a = BeanScanner.has(type.getAnnotations(), "ConfigurationProperties")
+    if (a == null) {
+      return
+    }
+    String prefix = a.stringValue("prefix")
+    if (prefix.length() == 0) {
+      prefix = a.stringValue("value")
+    }
+    if (prefix.length() == 0) {
+      return
+    }
+    Field[] fs = type.getDeclaredFields()
+    for (int i = 0 : i < fs.length : i++) {
+      if (Modifier.isStatic(fs[i].getModifiers())) {
+        continue
+      }
+      String key = prefix + "." + kebab(fs[i].getName())
+      if (ctx.hasProperty(key) == false) {
+        continue
+      }
+      fs[i].setAccessible(true)
+      fs[i].set(bean, ContainerConvert.to(ctx.getProperty(key), fs[i].getType()))
+    }
+  }
+
+  // kebab turns a field's name into the key a properties file writes it as.
+  public static String kebab(String name) {
+    StringBuilder b = new StringBuilder()
+    for (int i = 0 : i < name.length() : i++) {
+      char c = name.charAt(i)
+      if (c >= 'A' && c <= 'Z') {
+        if (i > 0) {
+          b.append('-')
+        }
+        b.append((char) (c + 32))
+      } else {
+        b.append(c)
+      }
+    }
+    return b.toString()
+  }
+
+  // destroy runs the @PreDestroy methods of a bean, which is what a context
+  // does on its way out: a pooled resource, a file handle, a server of one's own
+  // is closed here rather than left to the process ending.
+  public static void destroy(Object bean, Class type) {
+    if (bean == null || type == null) {
+      return
+    }
+    Method[] ms = type.getDeclaredMethods()
+    for (int i = 0 : i < ms.length : i++) {
+      if (ms[i].isAnnotationPresent(PreDestroy.class)) {
         ms[i].invoke(bean)
       }
     }

@@ -1,0 +1,252 @@
+package teyru
+
+// The Spring Boot shape: one call that boots a program, a file to configure it
+// from, and the pieces a web application expects to have.
+//
+// What Boot gives that this did not: a program was two calls (boot, then serve)
+// and its settings were whatever `--key=value` arguments said. It is now one
+// call -- SpringApplication.run(Main.class, args) -- and the settings come from
+// `application.properties` first, then from the arguments, which is Boot's own
+// order: a file a developer edits, arguments a deployment overrides it with.
+//
+// The pieces are here rather than in the web layer because they are what an
+// application is made of: a ResponseEntity a controller answers with, a profile
+// a bean is only built under, a @PreDestroy that runs when the context closes,
+// and a way to ask the server a question without a socket, so a test can.
+
+// SpringApplication is Spring Boot's entry point. Teyru's entry is main, and a
+// main that serves is one line:
+//
+//   public static void main(String[] args) {
+//     SpringApplication.run(Main.class, args)
+//   }
+class SpringApplication {
+  // run reads the configuration, builds the container, registers what the
+  // classes declare, and serves until the server is idle.
+  public static ApplicationContext run(Class source, String[] args) {
+    ApplicationContext ctx = new ApplicationContext()
+    loadConfig(ctx, args)
+    ctx.refresh()
+    if (ctx.getProperty("spring.web.enabled", "true").equals("false")) {
+      return ctx
+    }
+    int port = parseIntOr(ctx.getProperty("server.port", "8080"), 8080)
+    int idle = parseIntOr(ctx.getProperty("spring.web.idle-ms", "0"), 0)
+    HttpServer server = new HttpServer(port, Application.routerFrom(ctx), ctx)
+    WebSocketScanner.register(ctx, server)
+    WebSocketApi.register(ctx, server)
+    server.bind()
+    ctx.setServer(server)
+    server.serveIdle(idle)
+    return ctx
+  }
+
+  // run without a source class, which is what a program that is not written the
+  // Spring way uses. Boot has both signatures for the same reason.
+  public static ApplicationContext run(String[] args) {
+    return run(null, args)
+  }
+
+  // loadConfig reads application.properties when it is there, then lets the
+  // arguments override it. `spring.config.name` changes the file's name, which
+  // is how a test points at a different one.
+  public static void loadConfig(ApplicationContext ctx, String[] args) {
+    String name = "application.properties"
+    for (String a : args) {
+      if (a.startsWith("--spring.config.name=")) {
+        name = a.substring("--spring.config.name=".length())
+      }
+    }
+    PropertiesFile.load(ctx, name)
+    for (String a : args) {
+      int eq = a.indexOf('=')
+      if (a.startsWith("--") && eq > 2) {
+        ctx.setProperty(a.substring(2, eq), a.substring(eq + 1))
+      }
+    }
+  }
+
+  public static int parseIntOr(String text, int fallback) {
+    try {
+      return Integer.parseInt(text)
+    } catch (NumberFormatException e) {
+      return fallback
+    }
+  }
+}
+
+// PropertiesFile is the file half of the configuration: `key=value` lines, `#`
+// comments, blank lines skipped, and the whitespace around both sides of a line
+// not part of the key or the value. It is not a full properties implementation
+// -- no continuations, no escapes, no unicode escapes -- and it says so.
+class PropertiesFile {
+  public static int load(ApplicationContext ctx, String path) {
+    if (Files.exists(path) == false) {
+      return 0
+    }
+    String text = Files.readString(path)
+    int n = 0
+    for (String line : text.split("\n")) {
+      String trimmed = line.trim()
+      if (trimmed.length() == 0 || trimmed.startsWith("#") || trimmed.startsWith("!")) {
+        continue
+      }
+      int eq = trimmed.indexOf('=')
+      if (eq < 0) {
+        eq = trimmed.indexOf(':')
+      }
+      if (eq <= 0) {
+        continue
+      }
+      ctx.setProperty(trimmed.substring(0, eq).trim(), trimmed.substring(eq + 1).trim())
+      n++
+    }
+    return n
+  }
+}
+
+// ResponseEntity is Spring's: a status, headers and a body as one value, which
+// is what a controller returns when the status is not 200 or a header has to be
+// set. A handler may still return a String or an object; this is for when it
+// wants to say more.
+class ResponseEntity {
+  public int status = 200
+  public Object body = null
+  public String contentType = "application/json; charset=utf-8"
+  private List<String> headerNames = new ArrayList<String>()
+  private List<String> headerValues = new ArrayList<String>()
+
+  public static ResponseEntity ok(Object body) {
+    ResponseEntity r = new ResponseEntity()
+    r.body = body
+    return r
+  }
+
+  public static ResponseEntity status(int code) {
+    ResponseEntity r = new ResponseEntity()
+    r.status = code
+    return r
+  }
+
+  public static ResponseEntity of(int code, Object body) {
+    ResponseEntity r = new ResponseEntity()
+    r.status = code
+    r.body = body
+    return r
+  }
+
+  public static ResponseEntity created(String location, Object body) {
+    return of(201, body).header("Location", location)
+  }
+
+  public static ResponseEntity noContent() {
+    return of(204, null)
+  }
+
+  public static ResponseEntity notFound() {
+    return of(404, "not found")
+  }
+
+  public ResponseEntity header(String name, String value) {
+    headerNames.add(name)
+    headerValues.add(value)
+    return this
+  }
+
+  public ResponseEntity text(String body) {
+    contentType = "text/plain; charset=utf-8"
+    this.body = body
+    return this
+  }
+
+  public int headerCount() {
+    return headerNames.size()
+  }
+
+  public String headerName(int i) {
+    return headerNames.get(i)
+  }
+
+  public String headerValue(int i) {
+    return headerValues.get(i)
+  }
+
+  // toHttpResponse is the response the server writes, which is where the body's
+  // text comes from: a String is the body, anything else is written as JSON.
+  public HttpResponse toHttpResponse() {
+    HttpResponse res = new HttpResponse()
+    res.status = status
+    res.contentType = contentType
+    for (int i = 0 : i < headerNames.size() : i++) {
+      res.header(headerNames.get(i), headerValues.get(i))
+    }
+    if (body == null) {
+      return res
+    }
+    if (body instanceof String) {
+      res.body = (String) body
+      return res
+    }
+    res.body = JsonBinding.writeTo(body).toString()
+    return res
+  }
+}
+
+// MockServer asks a server a question without a socket, which is what a test
+// wants: the same handle() the connection loop calls, with a request written
+// out as text. Spring's MockMvc does the same thing for the same reason -- a
+// test of a route should not need a port, a client, or two threads.
+class MockServer {
+  private HttpServer server
+  private ApplicationContext ctx
+
+  public MockServer(ApplicationContext ctx) {
+    this.ctx = ctx
+    this.server = new HttpServer(0, Application.routerFrom(ctx), ctx)
+    WebSocketScanner.register(ctx, server)
+  }
+
+  // request sends one raw request and answers what the server would write.
+  public HttpResponse request(String method, String target) {
+    return request(method, target, "", "")
+  }
+
+  public HttpResponse request(String method, String target, String body, String contentType) {
+    HttpRequest req = new HttpRequest()
+    req.method = method
+    req.path = target
+    req.version = "HTTP/1.1"
+    int q = target.indexOf('?')
+    if (q >= 0) {
+      req.path = target.substring(0, q)
+      req.query = target.substring(q + 1)
+    }
+    if (body.length() > 0) {
+      req.body = body
+      req.addHeader("Content-Type", contentType.length() > 0 ? contentType : "application/json")
+      req.addHeader("Content-Length", "" + body.length())
+    }
+    return server.handle(req)
+  }
+
+  // json sends a POST of JSON and answers the body as text, which is what most
+  // tests of a route want.
+  public String postJson(String target, String json) {
+    return request("POST", target, json, "application/json").body
+  }
+
+  public String get(String target) {
+    return request("GET", target).body
+  }
+}
+
+// WebSocketApi is where a program's WebSocket endpoints are declared in a file
+// the way controllers are not: a @WebSocketMapping class is found by the
+// container's class list, and this is the call that puts them on the server.
+// It exists so that SpringApplication.run and a hand-written main do the same
+// thing.
+class WebSocketApi {
+  public static int register(ApplicationContext ctx, HttpServer server) {
+    return WebSocketScanner.register(ctx, server)
+  }
+}
