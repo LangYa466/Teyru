@@ -1,0 +1,285 @@
+package teyru
+
+// The JSON binding, built by looking at a class instead of by the compiler
+// writing it out.
+//
+// Gson binds a class to JSON with reflection: fromJson(s, Person.class) asks
+// the runtime to look at Person's fields. This used to be the compiler's work --
+// it generated a reader and a writer per bound class and rewrote each call to
+// use them -- and the rewritten call is what JsonBinding was for. The binding
+// now reads the class with java.lang.reflect (lib/26_reflect.teyru), the way
+// Gson does, so a class the compiler never saw bound still binds, and the
+// generated code and its table are gone.
+//
+// What a reader does is what the generated one did: build the object, then fill
+// the fields the document carries, leaving the rest as the class initialized
+// them. A record is read through its canonical constructor instead, which is
+// the only way to make one. A field's JSON name is its own unless
+// @SerializedName says otherwise, and a field whose value is an object is read
+// by the same machinery, one class deeper.
+
+// JsonFields answers the fields of a class in declaration order, which is the
+// order the generated writer wrote them in and the order the document's members
+// are expected in.
+class JsonFields {
+  public static Field[] of(Class type) {
+    Field[] all = type.getDeclaredFields()
+    int keep = 0
+    for (int i = 0 : i < all.length : i++) {
+      if (bindable(all[i])) {
+        keep++
+      }
+    }
+    Field[] out = new Field[keep]
+    int at = 0
+    for (int i = 0 : i < all.length : i++) {
+      if (bindable(all[i])) {
+        out[at] = all[i]
+        at++
+      }
+    }
+    return out
+  }
+
+  // bindable is what Gson binds: an instance field, not a static one, and not
+  // the synthetic field an inner class carries its enclosing instance in.
+  public static boolean bindable(Field f) {
+    return Modifier.isStatic(f.getModifiers()) == false && f.getName().indexOf("$") < 0
+  }
+
+  // jsonName is the member name a field is written and read as.
+  public static String jsonName(Field f) {
+    Annotation a = f.getAnnotation(SerializedName.class)
+    if (a != null) {
+      String named = a.stringValue("value")
+      if (named.length() > 0) {
+        return named
+      }
+    }
+    return f.getName()
+  }
+}
+
+// JsonConvert turns a JSON value into a field of a declared type, and a value
+// back into a tree. The two directions have to agree: whatever is written has to
+// be readable, so a char is a one-character string both ways and an Object field
+// carries the tree that arrived.
+class JsonConvert {
+  // to is the reading direction: the declared type says what the text is.
+  public static Object to(Class type, JsonElement e) {
+    if (e == null || e.isJsonNull()) {
+      return null
+    }
+    if (type.equals(String.class)) {
+      return e.getAsString()
+    }
+    if (type.equals(int.class) || type.equals(Integer.class)) {
+      return e.getAsInt()
+    }
+    if (type.equals(long.class) || type.equals(Long.class)) {
+      return e.getAsLong()
+    }
+    if (type.equals(short.class) || type.equals(Short.class)) {
+      return e.getAsShort()
+    }
+    if (type.equals(byte.class) || type.equals(Byte.class)) {
+      return e.getAsByte()
+    }
+    if (type.equals(double.class) || type.equals(Double.class)) {
+      return e.getAsDouble()
+    }
+    if (type.equals(float.class) || type.equals(Float.class)) {
+      return e.getAsFloat()
+    }
+    if (type.equals(boolean.class) || type.equals(Boolean.class)) {
+      return e.getAsBoolean()
+    }
+    if (type.equals(char.class) || type.equals(Character.class)) {
+      // a char went out as a one-character string, so a string is what brings
+      // it back; a number is accepted too, because a document may carry one
+      if (e.isJsonPrimitive() && e.getAsJsonPrimitive().isString()) {
+        String s = e.getAsString()
+        return (s.length() == 0 ? (char) 0 : s.charAt(0))
+      }
+      return e.getAsCharacter()
+    }
+    if (type.isEnum()) {
+      return enumValue(type, e.getAsString())
+    }
+    if (e.isJsonObject() && type.equals(Object.class)) {
+      return e
+    }
+    if (type.equals(JsonElement.class) || type.equals(Object.class)) {
+      return e
+    }
+    return JsonBinding.reader(type).read(e)
+  }
+
+  // enumValue matches a constant by name, which is what Gson does and what makes
+  // a name the document never mentioned an error rather than a null.
+  public static Object enumValue(Class type, String name) {
+    Object[] all = type.getEnumConstants()
+    if (all != null) {
+      for (int i = 0 : i < all.length : i++) {
+        if (((Enum) all[i]).name().equals(name)) {
+          return all[i]
+        }
+      }
+    }
+    throw new JsonParseException("no " + type.getName() + " constant named " + name)
+  }
+
+  // from is the writing direction: the value's own type says what the tree is.
+  public static JsonElement from(Object v) {
+    if (v == null) {
+      return JsonNull.INSTANCE
+    }
+    if (v instanceof JsonElement) {
+      // a value that is already a tree is written as it stands: an Object field
+      // holds whatever arrived, and a JsonObject read out of one has to survive
+      // being written back rather than being looked up as a class
+      return (JsonElement) v
+    }
+    if (v instanceof String) {
+      return new JsonPrimitive((String) v)
+    }
+    if (v instanceof Character) {
+      // Gson writes a char as a one-character string, so a document and a field
+      // agree on what a char is
+      return new JsonPrimitive(((Character) v).toString())
+    }
+    if (v instanceof Boolean) {
+      return new JsonPrimitive((Boolean) v)
+    }
+    if (v instanceof Integer) {
+      return new JsonPrimitive((Integer) v)
+    }
+    if (v instanceof Long) {
+      return new JsonPrimitive((Long) v)
+    }
+    if (v instanceof Short) {
+      return new JsonPrimitive((Short) v)
+    }
+    if (v instanceof Byte) {
+      return new JsonPrimitive((Byte) v)
+    }
+    if (v instanceof Double) {
+      return new JsonPrimitive((Double) v)
+    }
+    if (v instanceof Float) {
+      return new JsonPrimitive((Float) v)
+    }
+    if (v instanceof Enum) {
+      return new JsonPrimitive(((Enum) v).name())
+    }
+    return JsonBinding.writer(v.getClass()).write(v)
+  }
+}
+
+// ReflectReader is the reader of one class: the fields it was asked about, read
+// off the class the first time it was asked for.
+class ReflectReader implements JsonReader2 {
+  private Class type
+
+  public ReflectReader(Class type) {
+    this.type = type
+  }
+
+  public Object read(JsonElement e) {
+    if (e == null || e.isJsonNull()) {
+      return null
+    }
+    if (type.isRecord()) {
+      return readRecord(e)
+    }
+    JsonObject o = e.getAsJsonObject()
+    Object out = type.newInstance()
+    Field[] fs = JsonFields.of(type)
+    for (int i = 0 : i < fs.length : i++) {
+      JsonElement v = o.get(JsonFields.jsonName(fs[i]))
+      if (v == null) {
+        // a member the document does not carry keeps what the class gave it
+        continue
+      }
+      fs[i].set(out, JsonConvert.to(fs[i].getType(), v))
+    }
+    return out
+  }
+
+  // readRecord builds a record through its canonical constructor. A record has
+  // no no-argument constructor and no writable fields, so the components are
+  // gathered in declaration order -- which is the canonical constructor's
+  // parameter order -- and a component the document omits keeps the default its
+  // type gives, since there is no field initializer to keep instead.
+  private Object readRecord(JsonElement e) {
+    JsonObject o = e.getAsJsonObject()
+    Field[] fs = JsonFields.of(type)
+    Constructor ctor = type.getDeclaredConstructors()[0]
+    Object[] args = new Object[fs.length]
+    for (int i = 0 : i < fs.length : i++) {
+      JsonElement v = o.get(JsonFields.jsonName(fs[i]))
+      if (v == null) {
+        args[i] = zeroOf(fs[i].getType())
+        continue
+      }
+      args[i] = JsonConvert.to(fs[i].getType(), v)
+    }
+    return ctor.newInstance(args)
+  }
+
+  // zeroOf is the value a component takes when the document has nothing for it:
+  // what Java gives a field that was never assigned.
+  private Object zeroOf(Class type) {
+    if (type.equals(boolean.class)) {
+      return false
+    }
+    if (type.equals(char.class)) {
+      return (char) 0
+    }
+    if (type.equals(int.class)) {
+      return 0
+    }
+    if (type.equals(long.class)) {
+      return 0L
+    }
+    if (type.equals(short.class)) {
+      return (short) 0
+    }
+    if (type.equals(byte.class)) {
+      return (byte) 0
+    }
+    if (type.equals(double.class)) {
+      return 0.0
+    }
+    if (type.equals(float.class)) {
+      return 0.0f
+    }
+    return null
+  }
+}
+
+// ReflectWriter is the writer of one class.
+class ReflectWriter implements JsonWriter2 {
+  private Class type
+
+  public ReflectWriter(Class type) {
+    this.type = type
+  }
+
+  public JsonElement write(Object v) {
+    if (v == null) {
+      return JsonNull.INSTANCE
+    }
+    JsonObject out = new JsonObject()
+    Field[] fs = JsonFields.of(type)
+    for (int i = 0 : i < fs.length : i++) {
+      Object value = fs[i].get(v)
+      if (value == null) {
+        // Gson's default: a null member is not written at all
+        continue
+      }
+      out.add(JsonFields.jsonName(fs[i]), JsonConvert.from(value))
+    }
+    return out
+  }
+}

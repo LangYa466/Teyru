@@ -72,30 +72,16 @@ type Checker struct {
 	fwSpecs []*beanSpec
 	// fwRoutes is the mappings the controllers declare, registered by the same
 	// generated setup that registers the beans.
-	fwRoutes []routeSpec
-	// jsonAdapters holds the JSON binding generated for each class that a Gson
-	// call binds, keyed by class so it is generated once.
-	jsonAdapters map[*ast.Class]*jsonAdapterPair
-	// jsonSpeculative is set while a binding is generated for a class the call
-	// site did not name -- every class in the program, because an Object-typed
-	// toJson can carry any of them. A class that cannot be bound is skipped
-	// rather than reported there, so the diagnostics stay about the code the
-	// program actually wrote.
-	jsonSpeculative bool
-	// jsonProgramBound remembers that the program-wide binding has run, so that
-	// a second Object-typed call does not walk the classes again; jsonProgramQueued
-	// remembers that it is waiting for the check to finish.
-	jsonProgramBound  bool
-	jsonProgramQueued bool
-	selector          int
-	todo              []func()
-	Props             map[ast.Expr]ast.Expr
-	Direct            map[ast.Expr]bool // varargs calls that pass the array itself
-	program           *Program
-	objType           *ast.ClassType
-	strType           *ast.ClassType
-	arrCls            *ast.Class
-	extensions        map[*ast.Class][]*ast.Class
+	fwRoutes   []routeSpec
+	selector   int
+	todo       []func()
+	Props      map[ast.Expr]ast.Expr
+	Direct     map[ast.Expr]bool // varargs calls that pass the array itself
+	program    *Program
+	objType    *ast.ClassType
+	strType    *ast.ClassType
+	arrCls     *ast.Class
+	extensions map[*ast.Class][]*ast.Class
 }
 
 // Check analyses the prelude plus user files.
