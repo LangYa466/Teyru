@@ -780,3 +780,113 @@ tystr *ty_file_temp_dir(tystr *prefix) {
   free(tpl);
   return s;
 }
+
+
+/* ------------------------------------------------------------------- sha-1
+
+   RFC 6455's handshake is SHA-1 of the client's key and a fixed string, so the
+   web layer needs it. It is here rather than in the standard library because
+   the library has no hashing and this is the one hash a protocol the library
+   speaks requires; a program that wants another can write it in Teyru. */
+
+typedef struct {
+  uint32_t h[5];
+  uint64_t bits;
+  uint8_t buf[64];
+  size_t n;
+} ty_sha1_ctx;
+
+static uint32_t sha1_rol(uint32_t v, int n) { return (v << n) | (v >> (32 - n)); }
+
+static void sha1_block(ty_sha1_ctx *c, const uint8_t *p) {
+  uint32_t w[80];
+  for (int i = 0; i < 16; i++) {
+    w[i] = ((uint32_t)p[i * 4] << 24) | ((uint32_t)p[i * 4 + 1] << 16) |
+           ((uint32_t)p[i * 4 + 2] << 8) | (uint32_t)p[i * 4 + 3];
+  }
+  for (int i = 16; i < 80; i++) {
+    w[i] = sha1_rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+  }
+  uint32_t a = c->h[0], b = c->h[1], d = c->h[2], e = c->h[3], f = c->h[4];
+  for (int i = 0; i < 80; i++) {
+    uint32_t k, t;
+    if (i < 20) {
+      k = 0x5a827999u;
+      t = (b & d) | ((~b) & e);
+    } else if (i < 40) {
+      k = 0x6ed9eba1u;
+      t = b ^ d ^ e;
+    } else if (i < 60) {
+      k = 0x8f1bbcdcu;
+      t = (b & d) | (b & e) | (d & e);
+    } else {
+      k = 0xca62c1d6u;
+      t = b ^ d ^ e;
+    }
+    uint32_t tmp = sha1_rol(a, 5) + t + f + k + w[i];
+    f = e;
+    e = d;
+    d = sha1_rol(b, 30);
+    b = a;
+    a = tmp;
+  }
+  c->h[0] += a;
+  c->h[1] += b;
+  c->h[2] += d;
+  c->h[3] += e;
+  c->h[4] += f;
+}
+
+void ty_sha1(const uint8_t *data, int64_t len, uint8_t out[20]) {
+  ty_sha1_ctx c;
+  c.h[0] = 0x67452301u;
+  c.h[1] = 0xefcdab89u;
+  c.h[2] = 0x98badcfeu;
+  c.h[3] = 0x10325476u;
+  c.h[4] = 0xc3d2e1f0u;
+  c.bits = 0;
+  c.n = 0;
+  for (int64_t i = 0; i < len; i++) {
+    c.buf[c.n++] = data[i];
+    if (c.n == 64) {
+      sha1_block(&c, c.buf);
+      c.bits += 512;
+      c.n = 0;
+    }
+  }
+  /* the padding: a one bit, zeros, and the length in bits as a big-endian
+     sixty-four bit number */
+  uint64_t total = c.bits + (uint64_t)c.n * 8;
+  c.buf[c.n++] = 0x80;
+  if (c.n > 56) {
+    while (c.n < 64) c.buf[c.n++] = 0;
+    sha1_block(&c, c.buf);
+    c.n = 0;
+  }
+  while (c.n < 56) c.buf[c.n++] = 0;
+  for (int i = 7; i >= 0; i--) {
+    c.buf[c.n++] = (uint8_t)((total >> (i * 8)) & 0xff);
+  }
+  sha1_block(&c, c.buf);
+  for (int i = 0; i < 5; i++) {
+    out[i * 4] = (uint8_t)(c.h[i] >> 24);
+    out[i * 4 + 1] = (uint8_t)(c.h[i] >> 16);
+    out[i * 4 + 2] = (uint8_t)(c.h[i] >> 8);
+    out[i * 4 + 3] = (uint8_t)(c.h[i]);
+  }
+}
+
+/* The digest as the twenty bytes of a Teyru array, which is what the handshake
+   asks for: the caller base64s it. */
+tyarr *ty_sha1_bytes(tyarr *data) {
+  uint8_t *in = NULL;
+  int64_t len = 0;
+  if (data) {
+    in = (uint8_t *)data->data;
+    len = data->len;
+  }
+  tyarr *out = ty_alloc_arr(20, 1);
+  out->refs = 0;
+  ty_sha1(in, len, (uint8_t *)out->data);
+  return out;
+}

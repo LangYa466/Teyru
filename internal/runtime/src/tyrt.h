@@ -540,6 +540,9 @@ uint16_t ty_rv_char(void *o);
 int32_t ty_rv_bool(void *o);
 void *ty_rv_ref(void *o, tyclass *want);
 
+/* SHA-1 of a byte array, which RFC 6455's handshake asks for. */
+tyarr *ty_sha1_bytes(tyarr *data);
+
 /* java.lang.reflect.Array */
 void *ty_reflect_array_new(int64_t component, int32_t len);
 int32_t ty_reflect_array_len(void *a);
