@@ -1,0 +1,7 @@
+package pkg1.sub
+
+public class Thing {
+  public static String hi() {
+    return "thing"
+  }
+}

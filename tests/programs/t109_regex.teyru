@@ -15,8 +15,8 @@
 // PatternSyntaxException.getMessage -- reason and index, the pattern, and a
 // caret under the offending character when the index is inside the pattern.
 
-import java.util.regex.Matcher
-import java.util.regex.Pattern
+import teyru.Matcher
+import teyru.Pattern
 
 class Main {
   public static void main(String[] args) {

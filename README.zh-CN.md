@@ -307,7 +307,8 @@ class Main {
 ## 标准库
 
 标准库以 **Teyru 本身**编写（`lib/*.teyru`），每次编译都和使用者程序一起被编译与
-检查。包名沿用 Java 的写法，所以 `import java.util.List` 原样可用：
+检查。标准库是一个 Teyru 包（`teyru`），所以导入写 `import teyru.List`
+或一行 `import teyru.*`；Java 写法的 `import java.util.List` 也照样接受，Java 源码不改就能编译：
 
 | 包 | 内容 |
 |---|---|

@@ -49,6 +49,15 @@ type Checker struct {
 	// name is only unique within its package (JLS 7.7): `c.global` keeps the
 	// full names plus the default package and the prelude.
 	byPkg map[string]map[string]*ast.Class
+	// byDeclared holds the same types keyed by the package name their file
+	// declares, which is the name an import is written with. The two differ
+	// for a file of a module, whose identity is its directory's import path:
+	// `package todo` in a module is `example.com/app/todo`, and an import of
+	// it says `todo`. Two packages may declare one name -- that is what the
+	// identity is for -- so this index is not where duplicate declarations are
+	// caught; a name that two of them provide is reported as ambiguous where
+	// it is used.
+	byDeclared map[string]map[string]*ast.Class
 	// ambiguous remembers the on-demand import collisions already reported, so
 	// that a name looked up many times is reported once
 	ambiguous map[string]bool
@@ -87,7 +96,7 @@ type Checker struct {
 
 // Check analyses the prelude plus user files.
 func Check(files []*ast.File, diags *source.Diagnostics) *Program {
-	c := &Checker{diags: diags, files: files, global: map[string]*ast.Class{}, byPkg: map[string]map[string]*ast.Class{}, ambiguous: map[string]bool{}, anonN: map[*ast.Class]int{}, Props: map[ast.Expr]ast.Expr{}, Direct: map[ast.Expr]bool{}}
+	c := &Checker{diags: diags, files: files, global: map[string]*ast.Class{}, byPkg: map[string]map[string]*ast.Class{}, byDeclared: map[string]map[string]*ast.Class{}, ambiguous: map[string]bool{}, anonN: map[*ast.Class]int{}, Props: map[ast.Expr]ast.Expr{}, Direct: map[ast.Expr]bool{}}
 	defer func() { c.program.c = c }()
 	c.program = &Program{Files: files, StringLits: map[string]int{}}
 	for _, f := range files {
@@ -398,6 +407,19 @@ func (c *Checker) declareClass(f *ast.File, cd *ast.ClassDecl, outer *ast.Class)
 			} else {
 				m[cd.Name] = cl
 			}
+			// The package the file *declares* is the name an import of it is
+			// written with, and for a file of a module that is a different
+			// string from the identity above.
+			if name := f.DeclaredPackage; name != "" && name != pkg {
+				dm := c.byDeclared[name]
+				if dm == nil {
+					dm = map[string]*ast.Class{}
+					c.byDeclared[name] = dm
+				}
+				if dm[cd.Name] == nil {
+					dm[cd.Name] = cl
+				}
+			}
 			// The prelude's names are global as well as packaged. A file in
 			// `package teyru` finds its own package first, which is what keeps
 			// a user's `class Node` in the default package from breaking the
@@ -616,6 +638,24 @@ func (c *Checker) fileClass(env *typeEnv, name string) *ast.Class {
 			return cl
 		}
 	}
+	// A package is a name, not a directory: a file that declares `package todo`
+	// is in it wherever its directory sits.
+	if f.DeclaredPackage != "" && f.DeclaredPackage != f.Package {
+		if cl := c.byDeclared[f.DeclaredPackage][name]; cl != nil {
+			return cl
+		}
+	}
+	// A type the compilation unit declares itself is in scope before any
+	// on-demand import brings one in (JLS 6.5.5.1), and a file in the default
+	// package keeps its own names global: `import teyru.*` beside a local
+	// `class Node` must not take the standard library's Node. A prelude name
+	// still loses to an on-demand import from elsewhere, which is what makes
+	// `import a.*` able to provide a name the prelude also has.
+	if f.Package == "" {
+		if cl := c.global[name]; cl != nil && !cl.Builtin {
+			return cl
+		}
+	}
 	// Two on-demand imports that both provide the name make it ambiguous, and
 	// Java refuses the reference (JLS 6.5.5.1) rather than letting declaration
 	// order pick a type. Silently taking one compiles a program that means
@@ -626,24 +666,27 @@ func (c *Checker) fileClass(env *typeEnv, name string) *ast.Class {
 		if !imp.Star || imp.Static {
 			continue
 		}
-		m := c.byPkg[imp.Path]
-		if m == nil {
-			continue
-		}
-		cl := m[name]
-		if cl == nil {
-			continue
-		}
-		if found != nil && found != cl {
-			key := f.Src.Path + ":" + name
-			if !c.ambiguous[key] {
-				c.ambiguous[key] = true
-				c.errf(f.Types[0].Pos, "TY-TYP-0099",
-					"reference to %s is ambiguous: it is declared in both %s and %s", name, from, imp.Path)
+		// both spellings of the package: the identity an import path gives it
+		// and the name its files declare
+		for _, m := range []map[string]*ast.Class{c.byPkg[imp.Path], c.byDeclared[imp.Path]} {
+			if m == nil {
+				continue
 			}
-			return cl
+			cl := m[name]
+			if cl == nil {
+				continue
+			}
+			if found != nil && found != cl {
+				key := f.Src.Path + ":" + name
+				if !c.ambiguous[key] {
+					c.ambiguous[key] = true
+					c.errf(f.Types[0].Pos, "TY-TYP-0099",
+						"reference to %s is ambiguous: it is declared in both %s and %s", name, from, imp.Path)
+				}
+				return cl
+			}
+			found, from = cl, imp.Path
 		}
-		found, from = cl, imp.Path
 	}
 	return found
 }
@@ -657,6 +700,11 @@ func (c *Checker) classByPath(path string) *ast.Class {
 	if i := strings.LastIndexByte(path, '.'); i >= 0 {
 		pkg, simple := path[:i], path[i+1:]
 		if cl := c.byPkg[pkg][simple]; cl != nil {
+			return cl
+		}
+		// an import names a package the way its file declares it, which for a
+		// module's own tree is not the identity the package is held under
+		if cl := c.byDeclared[pkg][simple]; cl != nil {
 			return cl
 		}
 		// the prelude is package teyru, and Java's packages are spelled as

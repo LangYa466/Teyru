@@ -308,7 +308,8 @@ class Main {
 ## 標準程式庫
 
 標準程式庫以 **Teyru 本身**撰寫（`lib/*.teyru`），每次編譯都與使用者程式
-一起被編譯與檢查。套件名照 Java 的寫法，所以 `import java.util.List` 原樣可用：
+一起被編譯與檢查。標準程式庫是一個 Teyru 套件（`teyru`），所以匯入寫 `import teyru.List`
+或一行 `import teyru.*`；Java 風格的 `import java.util.List` 也照樣收，Java 原始碼不改就能編：
 
 | 套件 | 內容 |
 |---|---|

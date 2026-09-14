@@ -1,0 +1,39 @@
+// `import teyru.*` is the standard library in one line: the library is one
+// Teyru package whose classes carry Java's names, so Teyru code that wants to
+// say where `List` comes from says `teyru`. The Java-style paths are still
+// accepted (that is what lets Java source compile unchanged) but they are not
+// what this repository writes.
+//
+// A name the file declares itself is in scope before any on-demand import
+// brings one in (JLS 6.5.5.1), which is the point of the local `Node`: the
+// standard library has a Node of its own in the regex engine, and the star
+// import must not take it.
+
+import teyru.*
+
+class Node {
+  String label
+  Node(String label) { this.label = label }
+  public String toString() { return "mine(" + label + ")" }
+}
+
+class Main {
+  public static void main(String[] args) {
+    Node n = new Node("x")
+    System.out.println(n)
+
+    List<String> xs = new ArrayList<String>()
+    xs.add("a")
+    xs.add("b")
+    System.out.println(xs + " " + Collections.max(xs))
+
+    Matcher m = Pattern.compile("[0-9]+").matcher("ab123cd")
+    System.out.println(m.find() + " " + m.group())
+
+    Map<String, Integer> counts = new TreeMap<String, Integer>()
+    counts.put("k", 1)
+    System.out.println(Objects.toString(counts.get("k")))
+
+    System.out.println(new StringBuilder().append("sb").append(1).toString())
+  }
+}

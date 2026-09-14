@@ -318,7 +318,9 @@ class Main {
 
 標準ライブラリは **Teyru 自身**で書かれ（`lib/*.teyru`）、どのプログラムでも一緒に
 コンパイルされ型検査される。パッケージ名は Java の綴りのままなので、
-`import java.util.List` がそのまま通る:
+標準ライブラリはひとつの Teyru パッケージ（`teyru`）なので、インポートは `import teyru.List`、
+または一行の `import teyru.*` と書く。Java 流の `import java.util.List` もそのまま通るので、
+Java のソースは変更なしでコンパイルできる:
 
 | パッケージ | 内容 |
 |---|---|

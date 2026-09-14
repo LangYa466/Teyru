@@ -1,7 +1,7 @@
 package todo
 
-import java.util.ArrayList
-import java.util.List
+import teyru.ArrayList
+import teyru.List
 
 // A service with state, which is the point of a singleton bean: the count is
 // the same count whichever request asks for it.

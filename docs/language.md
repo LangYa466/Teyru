@@ -440,7 +440,10 @@ try {
 
 標準程式庫以 **Teyru 本身**撰寫（`lib/*.teyru`），每次編譯都與使用者程式一起被
 編譯與檢查——它沒有什麼特別的地位，`lib/` 底下的檔案就是用 Teyru 寫的普通程式。
-套件名照 Java 的寫法，所以 Java 程式碼的 `import java.util.List` 原樣可用。
+標準程式庫是**一個** Teyru 套件：`teyru`。裡面的類別取 Java 的名字，所以 Teyru
+程式碼寫 `import teyru.List`（或一行 `import teyru.*`），而 Java 風格的
+`import java.util.List` 也照樣收——那是「Java 原始碼不改就能編」的那條路，見
+下面的〈名稱怎麼找〉。
 
 ### java.lang（`lib/01`–`lib/07`）
 
@@ -500,11 +503,19 @@ for (String n : names) {
 `import p.*` 都提供同一個名字時是 `TY-TYP-0099`，不會照宣告順序挑一個。
 
 **匯入本身會被檢查**（`TY-TYP-0115`）：一條 `import` 必須指向標準程式庫回答的套件
-（`java.util`、`com.google.gson`、`lombok`…，見上一節的套件表）、這次建置裡某個
-檔案宣告的套件，或是完整名稱就是那條路徑的型別。名字在 Teyru 是照**簡單名稱**
-找的，前面寫什麼套件都一樣，所以 `import java.utli.List` 曾經是安靜地被忽略、
-然後照樣拿到 `List`；現在它是錯誤。模組匯入（`example.com/dep/pkg`）由建置解析，
-不在此檢查範圍。
+（`teyru`，以及相容用的 `java.util`、`com.google.gson`、`lombok`…，見上一節的
+套件表）、這次建置裡某個檔案宣告的套件，或是完整名稱就是那條路徑的型別。名字在
+Teyru 是照**簡單名稱**找的，前面寫什麼套件都一樣，所以 `import java.utli.List`
+曾經是安靜地被忽略、然後照樣拿到 `List`；現在它是錯誤。模組匯入
+（`example.com/dep/pkg`）由建置解析，不在此檢查範圍。
+
+**單一型別匯入與 on-demand 匯入（`import p.*`）都可以。** 匯入寫的是套件**宣告的
+名字**：在模組建置裡，一個套件的 identity 是它目錄的 import path
+（`package todo` 在 `example.com/app` 裡是 `example.com/app/todo`），而 import 寫的
+是 `todo`——兩種寫法都查得到。`import p.*` 提供該套件的所有公開名稱；兩個 on-demand
+匯入都提供同一個名字時是 `TY-TYP-0099`。檔案**自己宣告**的型別優先於 on-demand
+匯入（JLS 6.5.5.1），所以 `import teyru.*` 旁邊寫一個 `class Node` 不會被標準庫的
+`Node` 蓋掉。
 
 前綴的名字是全域的——這正是 `List`、`String` 不加 import 就能用的原因——但
 **具名套件看不到預設套件**（JLS 7.4.2）。所以使用者在預設套件宣告 `class Node`

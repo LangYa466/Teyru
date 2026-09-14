@@ -90,6 +90,11 @@ import example.com.greeting.text   // 點的拼法
 `import example.com/dep/pkg.Widget` 匯入那個型別，沒有尾綴的
 `import example.com/dep/pkg` 匯入整個套件。
 
+匯入路徑也可以寫**套件宣告的名字**：`package todo` 的目錄，身分是
+`example.com/app/todo`，而 `import todo.Store` 與 `import todo.*` 都指得到它——
+名字是作者寫的那一個，身分是建置給的那一個，兩個都查。兩個不同套件宣告了同一個
+名字、又都提供同一個型別時，在使用處報 `TY-TYP-0099`，不會照載入順序挑一個。
+
 ### 套件的身分是匯入路徑
 
 建置會把每個檔案的 `ast.File.Package` 改寫成它所屬套件的**匯入路徑**。宣告的

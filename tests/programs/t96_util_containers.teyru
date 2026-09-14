@@ -1,21 +1,21 @@
-import java.util.ArrayDeque
-import java.util.ArrayList
-import java.util.Arrays
-import java.util.Collections
-import java.util.Comparator
-import java.util.Deque
-import java.util.HashMap
-import java.util.HashSet
-import java.util.LinkedHashMap
-import java.util.LinkedHashSet
-import java.util.List
-import java.util.Map
-import java.util.Objects
-import java.util.Optional
-import java.util.Set
-import java.util.SortedSet
-import java.util.TreeMap
-import java.util.TreeSet
+import teyru.ArrayDeque
+import teyru.ArrayList
+import teyru.Arrays
+import teyru.Collections
+import teyru.Comparator
+import teyru.Deque
+import teyru.HashMap
+import teyru.HashSet
+import teyru.LinkedHashMap
+import teyru.LinkedHashSet
+import teyru.List
+import teyru.Map
+import teyru.Objects
+import teyru.Optional
+import teyru.Set
+import teyru.SortedSet
+import teyru.TreeMap
+import teyru.TreeSet
 
 /* The java.util containers, one contract at a time: what each one promises
  * about order, what it promises about equality, and what it returns when the

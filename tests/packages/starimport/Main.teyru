@@ -1,0 +1,18 @@
+// An import names a package the way that package's files declare it, which in
+// a module is not the identity the build gives it: `package pkg1.sub` is
+// `example.com/starimport/pkg1/sub` to the build and `pkg1.sub` to the import.
+// Both spellings resolve -- `import pkg1.sub.*` here, and a single-type import
+// of the same package in the other case.
+package main
+
+import pkg1.sub.*
+import pkg2.Other
+import teyru.*
+
+class Main {
+  public static void main(String[] args) {
+    List<String> xs = new ArrayList<String>()
+    xs.add(Thing.hi())
+    System.out.println(Other.hi() + " " + xs.get(0))
+  }
+}
