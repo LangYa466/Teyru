@@ -29,6 +29,14 @@ type nativeFn struct {
 	// builds a Class object and a header-less C file cannot name the program's
 	// teyru.Class.
 	clsArg string
+	// selClass and selMethod name an interface method whose dispatch selector is
+	// appended as the call's last argument. The runtime cannot know a selector:
+	// the compiler assigns them per program, and a runtime compiled once cannot
+	// carry a number only one program uses. Thread.start() is what needs it --
+	// the thread it creates has to call the program's own run(), which is the
+	// same interface dispatch the generated code makes.
+	selClass  string
+	selMethod string
 	// proto is the C prototype of fn, repeated as an `extern` at every call
 	// site. A table that carries its own declaration needs nothing added to
 	// tyrt.h, which is what lets a feature (networking, say) ship its native
@@ -124,7 +132,31 @@ var nativeTable = map[string]nativeFn{
 	"Object.hashCode()":     {fn: "ty_obj_hash", recv: "void*"},
 	"Object.equals(Object)": {fn: "ty_obj_eq", recv: "void*"},
 	"Object.getClass()":     {fn: "ty_class_of", recv: "void*", classHint: "teyru.Class"},
-	"Class.getName()":       {fn: "ty_class_name", recv: "void*"},
+	// The monitor operations `synchronized` is built on: the lock these take is
+	// the one ty_sync_enter takes on the same receiver, so a thread that is
+	// inside wait() has given up the monitor of the object it is notified
+	// through. tyrt_thread.c has the monitor itself.
+	"Object.wait(J)":     {fn: "ty_mon_wait", recv: "void*"},
+	"Object.notify()":    {fn: "ty_mon_notify", recv: "void*"},
+	"Object.notifyAll()": {fn: "ty_mon_notify_all", recv: "void*"},
+	"Class.getName()":    {fn: "ty_class_name", recv: "void*"},
+
+	// ---- java.lang.Thread
+	//
+	// lib/35_thread.teyru declares these. start0 is the one entry that needs a
+	// selector as well as its arguments: it runs the thread, and the thread runs
+	// the program's own run(), which only the compiler knows how to dispatch.
+	"Thread.start0(Thread,J,String)": {
+		fn: "ty_thread_start0", selClass: "teyru.Runnable", selMethod: "run",
+	},
+	"Thread.join0(J)":      {fn: "ty_thread_join"},
+	"Thread.alive0(J)":     {fn: "ty_thread_alive"},
+	"Thread.nextId0()":     {fn: "ty_thread_next_id"},
+	"Thread.current0()":    {fn: "ty_thread_current_obj"},
+	"Thread.currentId0()":  {fn: "ty_thread_current_id"},
+	"Thread.bind0(Thread)": {fn: "ty_thread_bind"},
+	"Thread.sleep(J)":      {fn: "ty_thread_sleep_ms"},
+	"Thread.yield()":       {fn: "ty_thread_yield"},
 
 	// ---- java.lang.reflect
 	//
@@ -696,6 +728,18 @@ func (e *Emitter) nativeInlineCall(nf nativeFn, m *ast.Method, recv string, vals
 			call = nf.fn + "(" + strings.Join(all, ", ") + ")"
 		} else {
 			call = "0"
+		}
+	} else if nf.selClass != "" {
+		if cl := e.prog.LookupClass(nf.selClass); cl != nil && e.selectorOf(cl, nf.selMethod) >= 0 {
+			all := append([]string{}, vals...)
+			all = append(all, fmt.Sprintf("(int32_t)%d", e.selectorOf(cl, nf.selMethod)))
+			call = nf.fn + "(" + strings.Join(all, ", ") + ")"
+		} else {
+			// No such interface method in this program, so there is nothing to
+			// dispatch to. A helper called without its selector would read
+			// whatever the register held, which is how a thread would run
+			// something that is not run().
+			call = "({ ty_unimplemented(" + e.cstr(nf.selClass+"."+nf.selMethod) + "); 0; })"
 		}
 	} else if nf.classHint != "" && e.prog.LookupClass(nf.classHint) != nil {
 		// getClass hands the runtime the tyclass of this program's Class, so

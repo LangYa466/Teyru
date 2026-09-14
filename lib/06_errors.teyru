@@ -128,6 +128,17 @@ class IllegalStateException extends RuntimeException {
   }
 }
 
+/* Thrown by Object.wait/notify/notifyAll when the calling thread does not hold
+   the monitor of the object it names -- java.lang's exception for exactly that,
+   and the one the runtime throws (tyrt_thread.c). */
+class IllegalMonitorStateException extends RuntimeException {
+  public IllegalMonitorStateException() {
+  }
+  public IllegalMonitorStateException(String message) {
+    super(message)
+  }
+}
+
 class NoSuchElementException extends RuntimeException {
   public NoSuchElementException() {
   }

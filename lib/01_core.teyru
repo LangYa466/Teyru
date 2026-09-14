@@ -11,6 +11,18 @@ class Object {
      teyru.Class: getClass has to return a real Class object, and only the
      call site knows which generated class that is. */
   public final native Class getClass()
+
+  /* The monitor, which is also the one `synchronized` takes: the lock these
+     three release, wait on and wake is the lock the block on this object holds,
+     so a thread inside wait() has given the monitor up and has to be given it
+     back when it wakes. They throw IllegalMonitorStateException when the
+     calling thread does not own the monitor, as java.lang.Object says.
+
+     wait(long) is the whole of waiting here: the unbounded wait() and the
+     nanosecond form are not implemented, and nothing declares them. */
+  public final native void wait(long timeoutMillis)
+  public final native void notify()
+  public final native void notifyAll()
 }
 
 interface Cloneable {

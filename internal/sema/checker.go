@@ -26,7 +26,12 @@ type Builtins struct {
 	Object, String, Enum, Record, Throwable, Iterable, Iterator, StringBuilder *ast.Class
 	AutoCloseable, Cloneable, Comparable                                       *ast.Class
 	IllArg, IllState, NoSuchElem, Unsup, ArrayStore                            *ast.Class
-	NPE, AIOOBE, Arith, CCE, NegArr, Assertion                                 *ast.Class
+	// IllegalMonitorStateException: what Object.wait/notify/notifyAll throw when
+	// the calling thread does not own the monitor. It is a builtin rather than
+	// just a prelude class because the runtime throws it, and the runtime only
+	// knows the classes the generated startup installs here.
+	IllMon                                     *ast.Class
+	NPE, AIOOBE, Arith, CCE, NegArr, Assertion *ast.Class
 	// java.lang.reflect's checked exceptions. Teyru does not check them --
 	// nothing here is checked -- but they are the classes the runtime throws
 	// and a program catches, so they are named like the rest.
@@ -467,6 +472,7 @@ func (c *Checker) initBuiltins() {
 		Cloneable: get("Cloneable"), Comparable: get("Comparable"),
 		IllArg: get("IllegalArgumentException"), IllState: get("IllegalStateException"),
 		NoSuchElem: get("NoSuchElementException"), Unsup: get("UnsupportedOperationException"),
+		IllMon:     get("IllegalMonitorStateException"),
 		ArrayStore: get("ArrayStoreException"),
 		NPE:        get("NullPointerException"), AIOOBE: get("ArrayIndexOutOfBoundsException"),
 		ClassNotFound: get("ClassNotFoundException"), NoSuchField: get("NoSuchFieldException"),

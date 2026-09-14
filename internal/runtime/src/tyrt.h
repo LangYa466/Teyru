@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <setjmp.h>
+#include <pthread.h>
 #include <string.h>
 
 typedef struct tyclass tyclass;
@@ -174,14 +175,16 @@ typedef struct tycatch {
   tyobj *ex;
 } tycatch;
 
-extern tycatch *ty_cur_catch;
+/* Per thread: see tyrt_thread.c's empty catch frames and ty_throw. */
+extern _Thread_local tycatch *ty_cur_catch;
 
 void ty_throw(void *e) __attribute__((noreturn));
 void ty_uncaught(void *e) __attribute__((noreturn));
 
 /* Preallocated exception classes (filled by generated code at startup). */
 extern tyclass *TY_NPE, *TY_AIOOBE, *TY_ARITH, *TY_CCE, *TY_NEGARR, *TY_ASSERT,
-    *TY_ILLARG, *TY_ILLSTATE, *TY_NOSUCHELEM, *TY_UNSUP, *TY_ARRAYSTORE;
+    *TY_ILLARG, *TY_ILLSTATE, *TY_NOSUCHELEM, *TY_UNSUP, *TY_ARRAYSTORE,
+    *TY_ILLMON;
 
 /* The exceptions java.lang.reflect throws by name. A program that never
    reflects never names one, and the generated startup leaves the pointer NULL
@@ -212,20 +215,131 @@ void *ty_assertfail(const char *msg);
 #define TY_CLS_RECORD 16
 #define TY_HDR 16
 #define TY_ALIGN 16
-extern char *ty_bump;
-extern char *ty_bump_end;
-extern int64_t ty_alloc_since;
+
+/* ---- threads and the per-thread state ---------------------------------
+
+   Everything the runtime keeps for one thread lives in the struct below,
+   reached through one thread-local pointer. It is a struct rather than a set of
+   thread-local variables because two of its fields have to be written by
+   *another* thread: the collector resets a stopped thread's allocation budget
+   after a collection and reads the stack pointer it parked at, and C11 has no
+   way to address another thread's thread-local storage.
+
+   The first four fields are the allocation buffer the fast path below bumps,
+   which is why this header carries the struct at all: allocation is inlined
+   into the generated program, so the layout it walks has to be visible to it.
+   tyrt_thread.c explains the protocol these fields take part in. */
+typedef struct tythread tythread;
+struct tythread {
+  /* The thread's own slab of the heap. `bump` walks it and `bump_end` is where
+     it ends, so an allocation is a pointer comparison and a pointer bump; only
+     a refill -- the slab running out, or the collection budget running out --
+     enters the runtime and takes the heap lock. `chunk` is the slab itself, a
+     tychunk the heap owns and the collector walks. */
+  char *bump, *bump_end;
+  int64_t alloc_since;
+  void *chunk;
+  /* The shadow stack: the roots the runtime's own C code pushes around an
+     object it holds across a call (tyrt_net.c and tyrt_reflect.c). Generated
+     code needs none: its live references are on the C stack, which the
+     collector scans conservatively. */
+  void **roots;
+  int64_t sp;
+  /* The C stack this thread runs on, as the collector sees it: `stack_base` is
+     the lowest address of the stack and `stack_top` the highest. `park_sp` is
+     the stack pointer taken the last time the thread stopped, and a stopped
+     thread is scanned from there upwards. It only ever moves down, so it stays
+     a lower bound on what has to be scanned. */
+  char *stack_base, *stack_top, *park_sp;
+  pthread_t tid;
+  pthread_mutex_t mtx; /* guards the fields below, and signals a joiner */
+  pthread_cond_t cv;
+  int64_t id;             /* what Thread.getId() reports */
+  void *obj;              /* the Teyru Thread object, NULL before one is bound */
+  tystr *name;            /* the thread's name, for an uncaught exception */
+  int32_t state;          /* one of TY_TH_* below */
+  /* How many stop points this thread is inside. Stopping is not nested -- no
+     path in the runtime blocks inside another blocking call -- and the depth is
+     what keeps the transitions honest anyway: only the transition from 0 to 1
+     takes the thread out of the collector's way, and only 1 to 0 puts it back. */
+  int32_t stop_depth;
+  /* Whether the thread collecting was itself stopped when it started, which is
+     what a collection started from an allocation does: it holds the heap lock,
+     and waiting for that lock counts as stopped. The collector must not count
+     itself among the threads it is waiting for. */
+  int32_t was_stopped_for_gc;
+  /* Set by the thread itself as its last act before it returns: what join()
+     waits for, and what isAlive() answers. The registry entry is not the
+     thread's stack -- it outlives the thread -- so this, and not the operating
+     system's idea of the thread, is what the program asks about. */
+  int32_t finished;
+  struct tythread *next;  /* the registry the collector walks */
+};
+
+/* What a thread is doing, as the stop-the-world protocol cares: a RUNNING
+   thread is the only kind that can be holding a reference the collector has not
+   seen yet, and so the only kind a collection waits for. A thread is PARKED at
+   a safepoint (see ty_safepoint) or BLOCKED inside a runtime call that waits
+   (a sleep, a join, a monitor); DONE threads are not scanned at all -- their
+   stacks are going away with them. */
+#define TY_TH_RUNNING 0
+#define TY_TH_PARKED 1
+#define TY_TH_BLOCKED 2
+#define TY_TH_DONE 3
+
+extern _Thread_local tythread *ty_self;
+
+#define TY_SHADOW_MAX (1 << 20)
+/* A spawned thread's shadow stack. The runtime pushes a handful of roots at a
+   time -- one per native call that holds an object across a call that can
+   collect -- so this is far more than any thread needs; the main thread keeps
+   the larger static block it has always had. */
+#define TY_SHADOW_THREAD (1 << 16)
+#define TY_ROOT_PUSH(v) (ty_self->roots[ty_self->sp++] = (void *)(v))
+#define TY_ROOT_POP() (--ty_self->sp)
+
+/* ---- stop the world ----------------------------------------------------
+
+   Set while a collection is stopping the world: a thread that reads it set has
+   to park before it touches the heap again. It is read through __atomic and not
+   through a lock, because the check sits on loop back-edges and has to cost one
+   load and one predictable branch. */
+extern int32_t ty_stw_request;
+void ty_safepoint_slow(void);
+
+/* ty_safepoint is the cooperative half of the stop-the-world protocol. A thread
+   that arrives here while a collection is running stops -- its stack and
+   registers made visible to the collector -- and runs again only once the
+   collection is over. The generated code puts one at the top of every loop
+   body, so a loop that allocates nothing and calls nothing still gets stopped;
+   the runtime puts one on the allocation slow path and inside every call that
+   blocks.
+
+   What is *not* a safepoint, and what it costs: a thread inside a call that
+   neither loops nor blocks -- a long calculation, a read() on a socket, a sleep
+   inside libc -- never reaches one, and a collection waits for every running
+   thread to reach one. Such a thread therefore stalls the collector (and with
+   it every other thread that wants to allocate) until it comes back. This is
+   documented at the top of tyrt_thread.c together with the rest of the
+   protocol. */
+static inline void ty_safepoint(void) {
+  if (__atomic_load_n(&ty_stw_request, __ATOMIC_ACQUIRE)) ty_safepoint_slow();
+}
+
+/* ---- allocation -------------------------------------------------------- */
+
 extern int64_t ty_gc_threshold;
 void *ty_alloc_slow(size_t total);
 
 static inline void *ty_alloc(size_t size) {
   size_t total = (size + TY_HDR + TY_ALIGN - 1) & ~(size_t)(TY_ALIGN - 1);
-  char *p = ty_bump;
-  if (p + total > ty_bump_end || ty_alloc_since > ty_gc_threshold) {
+  tythread *me = ty_self;
+  char *p = me->bump;
+  if (p + total > me->bump_end || me->alloc_since > ty_gc_threshold) {
     return ty_alloc_slow(total);
   }
-  ty_bump = p + total;
-  ty_alloc_since += (int64_t)total;
+  me->bump = p + total;
+  me->alloc_since += (int64_t)total;
   *(uint64_t *)p = (uint64_t)total;
   *(uint64_t *)(p + 8) = 0;
   void *obj = p + TY_HDR;
@@ -235,13 +349,108 @@ static inline void *ty_alloc(size_t size) {
 void *ty_alloc_arr(int64_t len, size_t elemsize);
 void ty_gc_init(void);
 void ty_gc(void);
-#define TY_SHADOW_MAX (1 << 20)
-extern void *ty_roots[];   /* shadow stack */
-extern int64_t ty_sp;
-#define TY_ROOT_PUSH(v) (ty_roots[ty_sp++] = (void *)(v))
-#define TY_ROOT_POP() (--ty_sp)
 void ty_gc_register_static(void *p);
 void ty_free_block(void *payload, size_t total);
+
+/* ---- the heap, as tyrt_thread.c needs to see it ------------------------ */
+
+/* The lock every thread takes to refill its slab and to sweep. It is not the
+   lock the stop-the-world protocol uses: a collector holds this one across the
+   whole collection, so a thread parking for that collection cannot be waiting
+   for it. */
+void ty_heap_lock(void);
+void ty_heap_unlock(void);
+/* Publish this thread's slab watermark. The inlined fast path bumps a pointer
+   and nothing else, so the slab's `used` watermark trails behind it; the
+   collector walks slabs by that watermark and has to see the true one. Called
+   wherever a thread stops (it is about to be walked) and by the thread that
+   hands its own slab back. */
+void ty_heap_sync(void);
+/* Give this thread's slab back to the shared heap, which is what makes its
+   free space available to the other threads and lets a collection reclaim the
+   whole slab once nothing in it is live. */
+void ty_heap_detach(void);
+/* The collection itself, for a caller that already holds the heap lock -- the
+   allocation slow path, which is where nearly every collection is asked for. */
+void ty_gc_locked(void);
+
+/* ---- the registry, as tyrt.c needs to see it --------------------------- */
+
+tythread *ty_thread_list(void);
+void ty_thread_init(void);
+void ty_gc_stop_world(void);
+void ty_gc_resume_world(void);
+
+/* Stop the calling thread for a collection, from here until the matching
+   ty_thread_stopped_end: the caller is doing something that leaves it out of the
+   heap (waiting for the heap lock, most of all), and a collection must not wait
+   for it. Both are tyrt_thread.c's; tyrt.c's heap lock is the caller that
+   matters. */
+void ty_thread_stopped_begin(void);
+void ty_thread_stopped_end(void);
+
+/* ---- threads ----------------------------------------------------------- */
+
+/* The body of a spawned thread: pthread_create is handed this, it installs the
+   new thread's runtime state (its shadow stack, its stack bounds, its place in
+   the registry), runs fn(arg), marks itself finished and wakes a joiner. It
+   returns NULL. */
+void *ty_thread_start(void *(*fn)(void *), void *arg);
+
+/* Create a thread that runs ty_thread_start(fn, arg). obj is the Teyru Thread
+   object the thread runs for: it stays a root for as long as the thread lives
+   (the thread pushes it onto its own shadow stack), and it is what
+   Thread.currentThread() answers with inside the new thread. id is the id that
+   object was given when it was built, so Thread.getId() is the same number
+   before and after start(). name is what an uncaught exception prints. Returns
+   id. */
+int64_t ty_thread_spawn(void *(*fn)(void *), void *arg, void *obj, int64_t id, tystr *name);
+/* The id Thread.getId() reports for a Thread object that was never started: a
+   counter that only ever goes up, as java.lang.Thread's does. */
+int64_t ty_thread_next_id(void);
+void ty_thread_join(int64_t id);
+int32_t ty_thread_alive(int64_t id);
+void ty_thread_sleep_ms(int64_t millis);
+int64_t ty_thread_current_id(void);
+void ty_thread_yield(void);
+/* The Teyru Thread object of the calling thread, or NULL when the calling
+   thread has none yet (the main thread before anything asks for it). */
+void *ty_thread_current_obj(void);
+/* Bind this object to the calling thread, so that currentThread() answers with
+   it from here on. The prelude's Thread.currentThread() uses it for the main
+   thread, which no start() ever created an object for. */
+void ty_thread_bind(void *obj);
+/* Wait for every other thread to finish, which is what the end of main does:
+   Java's process ends when its last non-daemon thread does, and a program that
+   starts a thread and returns should not lose the thread's output. */
+void ty_thread_join_all(void);
+
+/* The C half of lib/35_thread.teyru's Thread.start(): obj is the Thread object
+   to run, sel is the interface selector of Runnable.run, which is how a thread
+   reaches the program's own run() without the runtime knowing the layout of a
+   class it was not compiled against. */
+int64_t ty_thread_start0(void *obj, int64_t id, tystr *name, int32_t sel);
+
+/* A thread's uncaught exception: the same line the main thread's handler
+   prints, with the thread's name, after which the thread ends and the process
+   carries on -- again, what Java does. */
+void ty_uncaught_thread(void *e, tythread *t);
+
+/* ---- monitors ---------------------------------------------------------- */
+
+/* The monitor of an object: a mutex, an owner and a recursion count, kept in a
+   hash table keyed by the object's address rather than in a field of every
+   object. A field would cost eight bytes in every allocation in the program --
+   including every program that never synchronizes on anything -- and would
+   change the instance layout the compiler computes field offsets from. */
+/* ty_sync_enter/ty_sync_exit are what a `synchronized` block compiles to, and
+   they are declared with the rest of the runtime below; what Object.wait below
+   needs is the same monitor, held or given up. */
+/* Object.wait/monitor's own semantics: release the monitor, wait for a notify
+   or for `millis` to pass, take it back. A negative timeout waits forever. */
+void ty_mon_wait(void *obj, int64_t millis);
+void ty_mon_notify(void *obj);
+void ty_mon_notify_all(void *obj);
 
 /* ---- strings ---------------------------------------------------------- */
 tystr *ty_str_new(const char *data, int64_t len);

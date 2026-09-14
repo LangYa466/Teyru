@@ -70,6 +70,7 @@ func (e *Emitter) stmt(s ast.Stmt) {
 			e.hoistPatterns(v.Cond)
 			e.line("while (%s) {\n", e.cond(v.Cond))
 			e.indent++
+			e.safepoint()
 			e.pushLoop("")
 			e.stmtAsBlock(v.Body)
 			e.popLoop()
@@ -93,6 +94,7 @@ func (e *Emitter) stmt(s ast.Stmt) {
 		cond := e.cond(v.Cond)
 		e.line("do {\n")
 		e.indent++
+		e.safepoint()
 		e.pushLoop("")
 		e.stmtAsBlock(v.Body)
 		e.popLoop()
@@ -124,6 +126,7 @@ func (e *Emitter) stmt(s ast.Stmt) {
 		cont := e.tmpName()
 		e.line("while (%s) {\n", cond)
 		e.indent++
+		e.safepoint()
 		e.pushLoop(cont)
 		e.stmtAsBlock(v.Body)
 		e.popLoop()
@@ -204,15 +207,9 @@ func (e *Emitter) stmt(s ast.Stmt) {
 	case *ast.Assert:
 		e.line("if (!(%s)) { ty_assertfail(%s); }\n", e.cond(v.Cond), e.assertMsg(v))
 	case *ast.Sync:
-		// Java tests the monitor for null before entering it (JLS 14.19):
-		// `synchronized (null)` throws NullPointerException. Without the test
-		// the block locked on address zero and printed its body.
-		e.line("{ void* _lock = (void*)%s; if (!_lock) ty_npe(); ty_sync_enter(_lock);\n", e.refExpr(v.Lock))
-		e.indent++
-		e.emitBlockInner(v.Body)
-		e.line("ty_sync_exit(_lock);\n")
-		e.indent--
-		e.line("}\n")
+		e.syncBlock("(void*)"+e.refExpr(v.Lock), true, func() {
+			e.emitBlockInner(v.Body)
+		})
 	}
 }
 
@@ -596,6 +593,7 @@ func (e *Emitter) forEach(v *ast.ForEach) {
 			e.line("int64_t %s = 0;\n", ix+"_i")
 			e.line("for (%s = 0; %s < %s->len; %s++) {\n", ix+"_i", ix+"_i", ix, ix+"_i")
 			e.indent++
+			e.safepoint()
 			raw := e.tmpName()
 			if e.isRefElem(v.Elem) {
 				e.line("%s %s = (%s)((void**)%s->data)[%s];\n", e.ctype(v.Elem), raw, e.ctype(v.Elem), ix, ix+"_i")
@@ -623,6 +621,7 @@ func (e *Emitter) forEach(v *ast.ForEach) {
 	e.line("void* %s = ((void*(*)(void*))ty_itab((tyobj*)%s, %d))((tyobj*)%s);\n", it, x, itSel, x)
 	e.line("while (((int32_t(*)(void*))ty_itab((tyobj*)%s, %d))(%s)) {\n", it, hnSel, it)
 	e.indent++
+	e.safepoint()
 	if v.Var.Sym != nil {
 		// `for (int v : list)` unboxes the element the iterator hands back
 		raw := e.tmpName()
@@ -639,6 +638,61 @@ func (e *Emitter) forEach(v *ast.ForEach) {
 	e.indent--
 	e.line("}\n")
 	e.brkLabels(labels)
+}
+
+// syncBlock emits a body that runs holding a monitor: the enter, the body, and
+// the release on every way out. The lock expression is evaluated once, before
+// the enter, so that a `synchronized (obj.field)` releases the object it locked
+// rather than whatever the field holds by then.
+//
+// The release is a finally action -- the same machinery try/finally uses -- and
+// that is the point: the shape this replaced released the monitor only on the
+// path that ran off the end of the body. A `return` inside a synchronized block
+// returned still holding the monitor, and an exception thrown inside one left it
+// held for the rest of the program's life, because the throw longjmps past the
+// release. With real (and now thread-visible) monitors, either one hangs every
+// other thread that asks for the object.
+//
+// nullTest is Java's `synchronized (null)` check (JLS 14.19), which only a block
+// needs: a synchronized method's monitor is `this` or the class, and neither is
+// ever null.
+func (e *Emitter) syncBlock(lock string, nullTest bool, body func()) {
+	e.line("{ void* _lock = %s;\n", lock)
+	if nullTest {
+		e.line("if (!_lock) ty_npe();\n")
+	}
+	e.line("ty_sync_enter(_lock);\n")
+	e.indent++
+	frame := finFrame{depth: len(e.loops), name: e.tmpName()}
+	frame.emit = func() { e.line("ty_sync_exit(_lock);\n") }
+	e.line("{ tycatch %s; tyobj* %s_ex = NULL;\n", frame.name, frame.name)
+	e.indent++
+	e.line("%s.prev = ty_cur_catch; %s.ex = NULL; ty_cur_catch = &%s;\n", frame.name, frame.name, frame.name)
+	e.line("if (setjmp(%s.buf) == 0) {\n", frame.name)
+	e.indent++
+	e.finallys = append(e.finallys, frame)
+	body()
+	e.finallys = e.finallys[:len(e.finallys)-1]
+	e.indent--
+	e.line("} else { %s_ex = %s.ex; }\n", frame.name, frame.name)
+	e.line("ty_cur_catch = %s.prev;\n", frame.name)
+	frame.emit()
+	e.line("if (%s_ex) ty_throw(%s_ex);\n", frame.name, frame.name)
+	e.indent--
+	e.line("}\n")
+	e.indent--
+	e.line("}\n")
+}
+
+// safepoint writes the statement a loop body begins with, so that a thread in a
+// loop is always about to pass one: the collector's stop-the-world protocol
+// (internal/runtime/src/tyrt_thread.c) is cooperative, and a loop that neither
+// allocates nor calls anything is otherwise a thread no collection can stop.
+// A loop is where a long-running thread spends its time, so a loop is where the
+// check has to be, and it is one load and one predicted branch where no
+// collection is running.
+func (e *Emitter) safepoint() {
+	e.line("ty_safepoint();\n")
 }
 
 func (e *Emitter) selectorOf(cl *ast.Class, name string) int {

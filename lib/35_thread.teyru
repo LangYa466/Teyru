@@ -1,0 +1,174 @@
+package teyru
+
+// Threads, shaped like java.lang.Thread.
+//
+// The C half lives in internal/runtime/src/tyrt_thread.c: a Teyru thread is an
+// operating system thread, the runtime keeps one registry entry per thread, and
+// the collector stops every one of them before it traces the heap. This file is
+// the part a program writes against: a Thread object with a Runnable to run,
+// and the handful of methods java.lang.Thread has for asking about it.
+//
+// What is implemented, and what it costs to be honest about the rest:
+//
+//   - Thread(Runnable), Thread(Runnable, String), Thread() and Thread(String);
+//   - start(), which creates the thread and runs run() on it. Calling run()
+//     directly runs it on the calling thread, as it does in Java; calling
+//     start() twice throws IllegalStateException (Java throws
+//     IllegalThreadStateException, which this standard library does not have);
+//   - join(), join(long) is not here -- join() waits for as long as the thread
+//     takes, and there is no form that gives up after a while;
+//   - isAlive(), getId(), getName(), setName(String);
+//   - Thread.sleep(long), Thread.yield(), Thread.currentThread().
+//
+// Not implemented, and deliberately not declared: interrupt(),
+// setDaemon/isDaemon, the thread priorities, ThreadGroup, the uncaught
+// exception handler (the runtime prints the same line Java's default handler
+// prints, and the thread ends), Thread.State, ThreadLocal, and the constructors
+// that take a ThreadGroup or a stack size.
+//
+// The one place this differs from Java in behaviour rather than in surface:
+// getId() is assigned when the Thread object is built and never changes, and the
+// main thread is 1. Both are Java's rule; the numbers simply are not the JVM's.
+
+class Thread implements Runnable {
+  // ------------------------------------------------------------------ natives
+  //
+  // Each is the C entry point of the same name without the 0 suffix, except
+  // where the C name would collide with a name this class already has. They are
+  // declared here, before anything calls them, because a method has to be
+  // declared before it is called.
+
+  /* Start a thread that runs t.run(), and answer with the id it was given. The
+     runtime is handed the object rather than a function because the call it has
+     to make is the program's own run(), dispatched the way the compiler
+     dispatches every other interface call. */
+  private static native long start0(Thread t, long id, String name)
+
+  /* The id a Thread object gets when it is built: the runtime's counter, so that
+     getId() answers the same number before and after start(). */
+  private static native long nextId0()
+
+  /* The Thread object of the calling thread, or null when no object has been
+     made for it yet -- which for the main thread is exactly once, the first time
+     something calls currentThread(). */
+  private static native Object current0()
+  private static native long currentId0()
+
+  /* Attach this object to the calling thread, so that every later
+     currentThread() answers with it. Used for the main thread, which no start()
+     ever made an object for. */
+  private static native void bind0(Thread t)
+
+  private static native void join0(long id)
+  private static native boolean alive0(long id)
+
+  // ------------------------------------------------------------------- fields
+
+  private Runnable target
+  private String name
+  /* The id, whether or not the thread has been started: java.lang.Thread gives
+     every thread a number at construction, and a program may read it then. */
+  private long tid
+  private boolean started
+  /* The Thread object standing for the main thread, made on first use. It is a
+     static reference, so it is a root the collector keeps: a thread's own object
+     must not be collected while the program can still ask about it. */
+  private static Thread mainOf
+
+  // ----------------------------------------------------------- constructors
+
+  public Thread() {
+    this(null, null)
+  }
+
+  public Thread(Runnable target) {
+    this(target, null)
+  }
+
+  public Thread(String name) {
+    this(null, name)
+  }
+
+  public Thread(Runnable target, String name) {
+    this.tid = Thread.nextId0()
+    this.target = target
+    this.name = (name == null) ? ("Thread-" + this.tid) : name
+  }
+
+  // -------------------------------------------------------------- the thread
+
+  /* What the thread runs. A Thread built with a Runnable runs that Runnable's
+     run(); a subclass of Thread that overrides run() runs its own, because the
+     runtime dispatches this method and not the target. */
+  public void run() {
+    if (this.target != null) {
+      this.target.run()
+    }
+  }
+
+  /* Run it. The thread that comes back is a real one: it allocates, it can take
+     monitors, and the collector scans its stack like any other thread's. */
+  public void start() {
+    if (this.started) {
+      throw new IllegalStateException("thread already started")
+    }
+    this.started = true
+    Thread.start0(this, this.tid, this.name)
+  }
+
+  /* Wait for this thread to finish. A thread that was never started has nothing
+     to wait for, and one that has already finished returns at once -- both are
+     what java.lang.Thread.join does. */
+  public void join() {
+    Thread.join0(this.tid)
+  }
+
+  public boolean isAlive() {
+    return Thread.alive0(this.tid)
+  }
+
+  public long getId() {
+    return this.tid
+  }
+
+  public String getName() {
+    return this.name
+  }
+
+  public void setName(String name) {
+    this.name = name
+  }
+
+  // ----------------------------------------------------------------- statics
+
+  /* Give the processor up. Java's Thread.yield is a hint with no guarantee, and
+     this is the same hint: the operating system chooses what runs next. */
+  public static native void yield()
+
+  /* Sleep for at least this many milliseconds. A negative duration is an
+     IllegalArgumentException, as it is in Java; sleep(0) yields. */
+  public static native void sleep(long millis)
+
+  /* The Thread object of the calling thread. Inside a started thread that is the
+     object start() was called on; in the main thread it is an object this makes
+     the first time it is asked for, named "main" and numbered 1, so that the two
+     threads a program is most likely to ask about behave alike. */
+  private static Thread mainThread() {
+    if (Thread.mainOf == null) {
+      Thread t = new Thread()
+      // the runtime already knows this thread: it is the one that has always
+      // been there, and its id is 1
+      t.tid = Thread.currentId0()
+      t.name = "main"
+      t.started = true
+      Thread.bind0(t)
+      Thread.mainOf = t
+    }
+    return Thread.mainOf
+  }
+
+  public static Thread currentThread() {
+    Thread t = (Thread) Thread.current0()
+    return (t != null) ? t : Thread.mainThread()
+  }
+}

@@ -18,7 +18,10 @@ void __asan_unpoison_memory_region(void *, size_t);
 #endif
 #endif
 
-tycatch *ty_cur_catch = NULL;
+/* Thread-local because a catch frame belongs to the thread that set it: two
+   threads running the same generated code have two frames, and ty_throw has to
+   longjmp to the one on this thread's stack. */
+_Thread_local tycatch *ty_cur_catch = NULL;
 tyclass *TY_STRING = NULL;
 tyclass *TY_ARRAY = NULL;
 tyclass *TY_BOX[9] = {0};
@@ -26,6 +29,7 @@ tyclass *TY_OBJECT = NULL;
 
 tyclass *TY_NPE, *TY_AIOOBE, *TY_ARITH, *TY_CCE, *TY_NEGARR, *TY_ASSERT;
 tyclass *TY_ILLARG, *TY_ILLSTATE, *TY_NOSUCHELEM, *TY_UNSUP, *TY_ARRAYSTORE;
+tyclass *TY_ILLMON;
 /* java.lang.reflect's own exceptions. A program that never reflects never
    names one and the generated startup leaves it NULL. */
 tyclass *TY_CNF, *TY_NSFE, *TY_NSME, *TY_ILLACCESS, *TY_INVOCATION,
@@ -93,25 +97,53 @@ typedef struct tychunk {
   uint8_t *starts;
 } tychunk;
 
+/* The slabs no thread is bumping in: a thread hands its slab here when the slab
+   is exhausted and it takes a new one, and when the thread ends. Everything in
+   this list can be reclaimed by a collection; a thread's private slab cannot,
+   because the thread still walks it. */
 static tychunk *chunks = NULL;
 static void **roots_static = NULL; /* addresses of global slots */
 static size_t nroots_static = 0, caproots_static = 0;
-static char *stack_top = NULL;   /* highest address of the current thread stack */
-int64_t ty_alloc_since = 0;
 int64_t ty_gc_threshold = 4 << 20;
 static int64_t live_bytes = 0;
-char *ty_bump = NULL;
-char *ty_bump_end = NULL;
 static int gc_disabled = 0;
+
+/* The slabs one collection walks: the shared list above, plus every registered
+   thread's private slab (tyrt_thread.c). It is rebuilt at the start of each
+   collection, because a thread's slab is only walkable while that thread is
+   stopped and its watermark exact, and because the set changes as threads come
+   and go. Both the block-start pass and the sweep iterate it, and so does
+   valid_obj -- an object in a thread's private slab is as much an object as one
+   in a shared slab, and a scan that only knew about the shared list would treat
+   a pointer to it as garbage and free what it points at. */
+static tychunk **gc_slabs = NULL;
+static size_t gc_nslabs = 0, gc_capslabs = 0;
+/* How many of the slabs above are shared (the first gc_nshared of them) and how
+   many are a thread's private slab. Only a shared slab may be released
+   wholesale. */
+static size_t gc_nshared = 0;
+
+/* The heap lock: held by a thread while it refills its slab, and by the
+   collector for the whole of a collection. ty_heap_lock counts the caller as
+   stopped while it waits, which is what keeps a collector holding this lock from
+   waiting for the threads that want it. */
+static pthread_mutex_t heap_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+/* Where a scan of a stopped thread starts, below the point the thread recorded
+   when it stopped. The frame that blocks belongs to libc (pthread_cond_wait,
+   nanosleep) and its saved registers are just below that point; none of them can
+   be found by arithmetic, so a fixed margin is scanned conservatively instead.
+   The words in it are stale stack words like the thousands the scan already
+   walks, so the cost is a little retention and the alternative -- missing a
+   register that holds the only reference to a live object -- is a crash. The
+   scan never starts below the thread's own stack base. */
+#define TY_PARK_MARGIN 1024
 
 /* Free lists, declared here because the collector rebuilds them. */
 #define TY_NCLASS 64
 static void *freelist[TY_NCLASS];
 static void *bigfree = NULL;
 void ty_free_block(void *payload, size_t total);
-
-void *ty_roots[TY_SHADOW_MAX];
-int64_t ty_sp = 0;
 
 #define TY_MARK_BIT 1u
 /* The high bit of the size word marks a block that is on a free list. The
@@ -131,15 +163,48 @@ void ty_gc_register_static(void *p) {
   roots_static[nroots_static++] = p;
 }
 
-/* The inlined fast path in tyrt.h bumps ty_bump and nothing else, so the head
-   chunk's `used` watermark trails behind it. Every reader of `used` has to see
-   the true watermark first: the slow allocator would otherwise hand out memory
-   the fast path already handed out (two live objects in one block), and
-   valid_obj/the sweep walk would stop below the watermark and leave live
-   objects above it untraced. */
-static void sync_head_used(void) {
-  if (chunks && ty_bump >= chunks->mem && ty_bump <= chunks->mem + chunks->cap)
-    chunks->used = (size_t)(ty_bump - chunks->mem);
+/* The inlined fast path in tyrt.h bumps a pointer and nothing else, so the
+   thread's slab watermark trails behind it. Every reader of `used` has to see
+   the true watermark first: a collection walks a stopped thread's slab by it,
+   and the sweep must not stop below live objects or start inside one.
+
+   Only the thread that owns a slab writes its watermark, so this needs no lock;
+   the collector reads it only while the owner is stopped, and the handshake that
+   stopped the thread is what orders the two. */
+void ty_heap_sync(void) {
+  tychunk *c = (tychunk *)ty_self->chunk;
+  if (c) c->used = (size_t)(ty_self->bump - c->mem);
+}
+
+void ty_heap_lock(void) {
+  /* Waiting for the heap is waiting: a thread that has not got the lock yet has
+     done nothing to the heap, and a collection must not wait for it -- the
+     collector is holding this very lock. */
+  ty_thread_stopped_begin();
+  pthread_mutex_lock(&heap_mtx);
+}
+
+void ty_heap_unlock(void) {
+  pthread_mutex_unlock(&heap_mtx);
+  ty_thread_stopped_end();
+}
+
+/* Hand this thread's slab to the shared heap. Called with the slab's watermark
+   already exact, and with the thread stopped for a collection if one is running,
+   so that a slab is never walked twice: the collector walks it through the
+   registry while the thread owns it, and through the shared list afterwards. */
+void ty_heap_detach(void) {
+  ty_heap_lock();
+  tychunk *c = (tychunk *)ty_self->chunk;
+  if (c) {
+    ty_heap_sync();
+    c->next = chunks;
+    chunks = c;
+    ty_self->chunk = NULL;
+    ty_self->bump = NULL;
+    ty_self->bump_end = NULL;
+  }
+  ty_heap_unlock();
 }
 
 static tychunk *valid_obj_last = NULL;
@@ -166,15 +231,16 @@ static int obj_in_chunk(tychunk *c, char *p) {
 static int valid_obj(char *p) {
   if (((uintptr_t)p) & (TY_ALIGN - 1)) return 0;
   /* A collection tests thousands of candidate words, and they are almost always
-     in the chunk the previous one was in, so the last chunk that answered is
-     tried first: walking the whole list every time makes a collection
-     quadratic in the number of chunks. ty_gc clears the cache, because the
-     sweep can free the chunk it points at. */
+     in the slab the previous one was in, so the last slab that answered is tried
+     first: walking every slab every time makes a collection quadratic in the
+     number of slabs. ty_gc clears the cache, because the sweep can free the slab
+     it points at. */
   if (valid_obj_last) {
     int r = obj_in_chunk(valid_obj_last, p);
     if (r >= 0) return r;
   }
-  for (tychunk *c = chunks; c; c = c->next) {
+  for (size_t i = 0; i < gc_nslabs; i++) {
+    tychunk *c = gc_slabs[i];
     if (c == valid_obj_last) continue;
     int r = obj_in_chunk(c, p);
     if (r >= 0) {
@@ -192,11 +258,11 @@ static void mark_block_start(tychunk *c, char *p) {
   if (i < c->cap / TY_ALIGN) c->starts[i >> 3] |= (uint8_t)(1u << (i & 7));
 }
 
-/* Rebuilds the block-start map by walking every chunk's size words. The walk
-   uses the same rule as the sweep, so the two passes agree on where blocks
-   begin. */
+/* Rebuilds the block-start map by walking every slab's size words. The walk uses
+   the same rule as the sweep, so the two passes agree on where blocks begin. */
 static void build_block_starts(void) {
-  for (tychunk *c = chunks; c; c = c->next) {
+  for (size_t i = 0; i < gc_nslabs; i++) {
+    tychunk *c = gc_slabs[i];
     memset(c->starts, 0, TY_START_BYTES(c->cap));
     for (char *p = c->mem; p < c->mem + c->used;) {
       int64_t sz = (int64_t)(*(uint64_t *)p & TY_SIZE_MASK);
@@ -248,30 +314,90 @@ static void trace_object(void *obj) {
   }
 }
 
-void ty_gc(void) {
+/* Builds the list of slabs this collection walks: the shared ones, then the
+   private slab of every registered thread. Called once the world is stopped, so
+   no thread can take a slab, hand one back, or allocate into one while this
+   runs. */
+static void collect_slabs(void) {
+  gc_nslabs = 0;
+  for (tychunk *c = chunks; c; c = c->next) {
+    if (gc_nslabs == gc_capslabs) {
+      gc_capslabs = gc_capslabs ? gc_capslabs * 2 : 16;
+      gc_slabs = (tychunk **)realloc(gc_slabs, gc_capslabs * sizeof(tychunk *));
+    }
+    gc_slabs[gc_nslabs++] = c;
+  }
+  gc_nshared = gc_nslabs;
+  for (tythread *t = ty_thread_list(); t; t = t->next) {
+    if (!t->chunk) continue;
+    if (gc_nslabs == gc_capslabs) {
+      gc_capslabs = gc_capslabs ? gc_capslabs * 2 : 16;
+      gc_slabs = (tychunk **)realloc(gc_slabs, gc_capslabs * sizeof(tychunk *));
+    }
+    gc_slabs[gc_nslabs++] = (tychunk *)t->chunk;
+  }
+}
+
+/* Scans one thread's stack conservatively, from where that thread stopped (or
+   from this frame, for the thread that is collecting) up to the top of its
+   stack. `lo` is a lower bound on where the thread's live frames begin, and
+   everything between the two is read as if it were a pointer: a word that names
+   an object keeps it, a word that names anything else is ignored. That is the
+   conservative half of a conservative collector, and it is why an object stays
+   alive for as long as any word of any stopped thread's stack happens to look
+   like its address. */
+static void scan_stack(char *lo, char *hi) {
+  /* The scan steps a pointer at a time, so it has to start on a pointer
+     boundary: a word read from a misaligned address is a value shifted by a few
+     bits, which is not a pointer to anything, and a scan that starts at an
+     unaligned stack address finds none of the references it is looking for.
+     park_sp in particular is the address of a `char`, so it is unaligned by
+     construction. Rounding down covers a byte or two more, which costs
+     nothing. */
+  lo = (char *)((uintptr_t)lo & ~(uintptr_t)(sizeof(void *) - 1));
+  if (hi > lo) {
+#ifdef TY_ASAN
+    __asan_unpoison_memory_region(lo, (size_t)(hi - lo));
+#endif
+  }
+  for (char *q = lo; q + sizeof(void *) <= hi; q += sizeof(void *)) {
+    mark_value(*(void **)q);
+  }
+}
+
+void ty_gc_locked(void) {
   if (gc_disabled) return;
-  sync_head_used();
+  /* This thread's own slab, before anything reads a watermark. */
+  ty_heap_sync();
+  /* Everything else stops here. A thread that is mid-allocation cannot be: it
+     would be holding the heap lock, which is held right now by this thread. */
+  ty_gc_stop_world();
+  collect_slabs();
   build_block_starts();
   mark_sp = 0;
-  /* roots: shadow stack */
-  for (int64_t i = 0; i < ty_sp; i++) mark_value(ty_roots[i]);
+  /* roots: every thread's shadow stack, and its stack and registers */
+  for (tythread *t = ty_thread_list(); t; t = t->next) {
+    if (t->state == TY_TH_DONE) continue; /* its stack is going away with it */
+    for (int64_t i = 0; i < t->sp; i++) mark_value(t->roots[i]);
+    if (t == ty_self) continue;
+    if (!t->park_sp) continue; /* it has not stopped yet: ty_gc_stop_world would not have returned */
+    char *hi = t->stack_top ? t->stack_top : t->park_sp + 0x10000;
+    char *lo = t->park_sp - TY_PARK_MARGIN;
+    if (t->stack_base && lo < t->stack_base) lo = t->stack_base;
+    scan_stack(lo, hi);
+  }
   /* roots: registered globals */
   for (size_t i = 0; i < nroots_static; i++) {
     if (roots_static[i]) mark_value(*(void **)roots_static[i]);
   }
-  /* roots: native stack and registers (conservative) */
+  /* roots: this thread's native stack and registers (conservative). The
+     registers are the ones setjmp saves; on another thread they were spilled by
+     __builtin_unwind_init at the point it stopped. */
   jmp_buf regs;
   setjmp(regs);
   char *sp = (char *)&regs;
-  char *hi = stack_top ? stack_top : sp + 0x10000;
-  char *lo = sp;
-#ifdef TY_ASAN
-  if (hi > lo) __asan_unpoison_memory_region(lo, (size_t)(hi - lo));
-#endif
-  for (char *q = lo; q + sizeof(void *) <= hi; q += sizeof(void *)) {
-    void *v = *(void **)q;
-    mark_value(v);
-  }
+  char *hi = ty_self->stack_top ? ty_self->stack_top : sp + 0x10000;
+  scan_stack(sp, hi);
   /* trace */
   while (mark_sp) {
     void *o = mark_stack[--mark_sp];
@@ -281,13 +407,17 @@ void ty_gc(void) {
      reclaimed chunk can never be handed out again. A chunk with no live object
      is returned to the system instead of being walked on every later cycle;
      this keeps the cost of a collection proportional to live data rather than
-     to everything ever allocated. */
+     to everything ever allocated.
+     A thread's private slab is walked like any other, but never released: the
+     thread is still bumping through it, and it will hand it back itself once it
+     has filled it. */
   for (int i = 0; i < TY_NCLASS; i++) freelist[i] = NULL;
   bigfree = NULL;
   live_bytes = 0;
-  tychunk **pp = &chunks;
-  while (*pp) {
-    tychunk *c = *pp;
+  for (size_t si = 0; si < gc_nslabs; si++) {
+    tychunk *c = gc_slabs[si];
+    /* the first gc_nshared entries are the shared list (collect_slabs) */
+    int32_t shared = si < gc_nshared;
     int64_t live = 0;
     for (char *p = c->mem; p < c->mem + c->used;) {
       uint64_t raw = *(uint64_t *)p;
@@ -296,8 +426,13 @@ void ty_gc(void) {
       if (!(raw & TY_FREE_BIT) && (*(uint64_t *)(p + 8) & TY_MARK_BIT)) live += sz;
       p += sz;
     }
-    if (live == 0 && c != chunks) {
-      *pp = c->next;
+    if (shared && live == 0 && c->used > 0) {
+      for (tychunk **pp = &chunks; *pp; pp = &(*pp)->next) {
+        if (*pp == c) {
+          *pp = c->next;
+          break;
+        }
+      }
       free(c->mem);
       free(c->starts);
       free(c);
@@ -324,18 +459,21 @@ void ty_gc(void) {
       p += sz;
     }
     live_bytes += live;
-    pp = &c->next;
   }
   valid_obj_forget();
-  if (chunks) {
-    ty_bump = chunks->mem + chunks->used;
-    ty_bump_end = chunks->mem + chunks->cap;
-  } else {
-    ty_bump = ty_bump_end = NULL;
-  }
-  ty_alloc_since = 0;
+  /* Every thread's budget starts again: nothing allocated before this point is
+     due to be collected again until the new threshold is reached. The threads
+     are stopped, so their counters are this thread's to reset. */
+  for (tythread *t = ty_thread_list(); t; t = t->next) t->alloc_since = 0;
   ty_gc_threshold = live_bytes * 2;
   if (ty_gc_threshold < (4 << 20)) ty_gc_threshold = 4 << 20;
+  ty_gc_resume_world();
+}
+
+void ty_gc(void) {
+  ty_heap_lock();
+  ty_gc_locked();
+  ty_heap_unlock();
 }
 
 /* ------------------------------------------------------------------ allocation */
@@ -360,7 +498,9 @@ void ty_free_block(void *payload, size_t total) {
   }
 }
 
-static void *alloc_slow(size_t total) {
+/* A block of `total` bytes from the free lists, or NULL when they hold none
+   that fits. */
+static void *take_free(size_t total) {
   int k = size_class(total);
   if (k >= 0) {
     if (freelist[k]) {
@@ -390,71 +530,76 @@ static void *alloc_slow(size_t total) {
   return NULL;
 }
 
-void *ty_alloc_slow(size_t total) {
-  sync_head_used();
-  if (ty_alloc_since > ty_gc_threshold) ty_gc();
-  void *p = alloc_slow(total);
-  if (p) {
-    ty_alloc_since += (int64_t)total;
-    *(uint64_t *)p = (uint64_t)total;
-    *(uint64_t *)((char *)p + 8) = 0;
-    void *obj = (char *)p + TY_HDR;
-    memset(obj, 0, total - TY_HDR);
-    return obj;
-  }
-  tychunk *c = chunks;
-  if (!c || c->used + total > c->cap) {
-    /* A full chunk is not a reason to collect. ty_gc_threshold is the adaptive
-       budget for this heap (twice the live set after the last collection, with
-       a 4MB floor) and the free lists were already consulted above, so a
-       collection here would only re-trace a live set that the threshold has not
-       asked for yet: a workload with a large live set collected once per 256KB
-       of allocation, hundreds of full traces where a handful were due. Collect
-       only when the threshold says so; otherwise grow the heap, which the next
-       threshold crossing pays for. */
-    if (ty_alloc_since > ty_gc_threshold) {
-      ty_gc();
-      p = alloc_slow(total);
-      if (p) {
-        ty_alloc_since += (int64_t)total;
-        *(uint64_t *)p = (uint64_t)total;
-        *(uint64_t *)((char *)p + 8) = 0;
-        void *obj = (char *)p + TY_HDR;
-        memset(obj, 0, total - TY_HDR);
-        return obj;
-      }
-    }
+/* A fresh slab of at least `total` usable bytes, owned by the calling thread. */
+static tychunk *chunk_new(size_t total) {
     size_t cap = total > TY_CHUNK ? ((total + TY_CHUNK - 1) & ~(size_t)(TY_CHUNK - 1)) : TY_CHUNK;
-    c = (tychunk *)malloc(sizeof(tychunk));
+  tychunk *c = (tychunk *)malloc(sizeof(tychunk));
     c->mem = (char *)malloc(cap);
     c->starts = (uint8_t *)calloc(TY_START_BYTES(cap), 1);
     c->cap = cap;
     c->used = 0;
-    c->next = chunks;
-    chunks = c;
-  }
-  p = c->mem + c->used;
-  c->used += total;
-  ty_bump = c->mem + c->used;
-  ty_bump_end = c->mem + c->cap;
-  ty_alloc_since += (int64_t)total;
+  c->next = NULL;
+  if (!c->mem || !c->starts) abort();
+  return c;
+}
+
+/* The block at p handed to the caller: its size word, the cleared mark word, and
+   the zeroed payload every Teyru object is promised. */
+static void *block_object(char *p, size_t total) {
   *(uint64_t *)p = (uint64_t)total;
   *(uint64_t *)((char *)p + 8) = 0;
-  void *obj = (char *)p + TY_HDR;
+  void *obj = p + TY_HDR;
   memset(obj, 0, total - TY_HDR);
   return obj;
 }
 
-void ty_gc_init(void) {
-  pthread_attr_t attr;
-  if (pthread_getattr_np(pthread_self(), &attr) == 0) {
-    void *base = NULL;
-    size_t size = 0;
-    if (pthread_attr_getstack(&attr, &base, &size) == 0) {
-      stack_top = (char *)base + size;
-    }
-    pthread_attr_destroy(&attr);
+void *ty_alloc_slow(size_t total) {
+  /* Stop first: a collection may be asked for while this runs, and a thread must
+     not be holding the heap lock while it waits for one to end. */
+  ty_safepoint();
+  ty_heap_lock();
+  /* The budget may be what sent us here rather than the slab running out -- the
+     fast path tests both -- so a collection comes first, and then the thread's
+     own slab is tried again: it is still this thread's memory, and a collection
+     neither moves it nor takes it away. */
+  if (ty_self->alloc_since > ty_gc_threshold) ty_gc_locked();
+  char *p = ty_self->bump;
+  if (!(p + total > ty_self->bump_end)) {
+    ty_self->bump = p + total;
+    ty_self->alloc_since += (int64_t)total;
+    ty_heap_unlock();
+    return block_object(p, total);
   }
+  p = take_free(total);
+  if (!p) {
+    /* Refill: a slab of this thread's own. The old one goes back to the shared
+       heap, where the collector can reclaim it and where its free blocks are
+       available to everybody. What is left of it -- the tail this block did not
+       fit in -- stays beyond the watermark, so no walk ever reads it as a block
+       header. A full slab is not a reason to collect: ty_gc_threshold is the
+       adaptive budget (twice the live set after the last collection, 4MB floor)
+       and the free lists were consulted above, so collecting here would re-trace
+       a live set the threshold has not asked for yet. Grow instead; the next
+       threshold crossing pays for it. */
+    if (ty_self->chunk) {
+      ty_heap_sync();
+      tychunk *old = (tychunk *)ty_self->chunk;
+      old->next = chunks;
+      chunks = old;
+    }
+    tychunk *c = chunk_new(total);
+    ty_self->chunk = c;
+    ty_self->bump = c->mem + total;
+    ty_self->bump_end = c->mem + c->cap;
+    c->used = total;
+    p = c->mem;
+  }
+  ty_self->alloc_since += (int64_t)total;
+  ty_heap_unlock();
+  return block_object(p, total);
+}
+
+void ty_gc_init(void) {
   for (int i = 0; i < TY_NCLASS; i++) freelist[i] = NULL;
 }
 
@@ -481,12 +626,25 @@ void *ty_alloc_arr(int64_t len, size_t elemsize) {
    ThreadGroup.uncaughtException does -- and nothing else. Composing the class
    name here as well would double it, and would print the class in front of a
    toString a program had overridden. */
-void ty_uncaught(void *p) {
-  tyobj *e = (tyobj*)p;
+static void print_uncaught(void *p, const char *where, int wherelen) {
+  tyobj *e = (tyobj *)p;
   tystr *s = ((tystr *(*)(void *))e->cls->vtable[0])(e);
   char *msg = s ? s->data : (char *)"?";
-  fprintf(stderr, "Exception in thread \"main\" %.*s\n", (int)(s ? s->len : 1), msg);
+  fprintf(stderr, "Exception in thread \"%.*s\" %.*s\n", wherelen, where,
+          (int)(s ? s->len : 1), msg);
+}
+
+void ty_uncaught(void *p) {
+  print_uncaught(p, "main", 4);
   exit(1);
+}
+
+/* A spawned thread's handler differs in one thing: it lets the process run on.
+   Java's is the same -- the line is printed, the thread ends, and the program
+   does not -- and the thread's name is what says which thread it was. */
+void ty_uncaught_thread(void *e, tythread *t) {
+  tystr *name = t ? t->name : NULL;
+  print_uncaught(e, name ? name->data : "main", name ? (int)name->len : 4);
 }
 
 void ty_throw(void *e) {
@@ -1051,10 +1209,8 @@ void ty_print_obj(void *o) { ty_print_str(ty_str_of_obj(o)); }
 void ty_println_obj(void *o) { ty_print_obj(o); putchar('\n'); }
 void ty_println_void(void) { putchar('\n'); }
 
-/* ------------------------------------------------------------------ sync */
-
-void ty_sync_enter(void *lock) { (void)lock; }
-void ty_sync_exit(void *lock) { (void)lock; }
+/* The monitors `synchronized` and Object.wait are built on live in
+   tyrt_thread.c, next to the stop-the-world protocol they interact with. */
 
 /* ==================================================================== java.lang
  *
@@ -3090,4 +3246,11 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
   }
 }
 
-void ty_init(void) { ty_gc_init(); }
+void ty_init(void) {
+  ty_gc_init();
+  /* The main thread takes its place in the registry here, with the stack bounds
+     the collector scans it by. Nothing has allocated yet: the first allocation
+     is what takes the main thread's slab, exactly as it takes every other
+     thread's. */
+  ty_thread_init();
+}

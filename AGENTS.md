@@ -217,7 +217,23 @@ source → lexer → parser → ast → sema → codegen
   `setLenient`／`setFieldNamingPolicy`／`excludeFields*`）、`@Expose`／
   `@Since`／`@Until` 的過濾、`JsonSerializer`／`JsonDeserializer` 轉接器，以及
   Gson 的串流 `JsonReader`／`JsonWriter`。
-- 沒有執行緒（`java.util` 集合、`java.io`、`java.net` 都有）。
+- 執行緒只有一部分：`Thread`（`Runnable`、`start`／`join`／`sleep`／`yield`／
+  `currentThread`／`getId`／`getName`／`isAlive`）、真的 `synchronized`（含
+  `synchronized` 方法修飾子，方法會持有監視器整段）與 `Object.wait`／`notify`／
+  `notifyAll`。執行期在 `internal/runtime/src/tyrt_thread.c`，端到端測試是
+  `tests/programs/t159_threads.teyru`。**沒有的**：`interrupt`、daemon、優先權、
+  `ThreadGroup`、`ThreadLocal`、堆疊大小與逾時的 `join(long)`，以及未處理例外的
+  handler（執行期印出 Java 預設處理常式那一行，然後結束那個執行緒、行程繼續）。
+  GC 是**合作式**停止世界：安全點在每個迴圈回邊（產生器會放）、配置慢路徑、等
+  heap 鎖，以及每個會阻塞的呼叫。因此一個既不迴圈、不配置也不阻塞的執行緒
+  （例如卡在原生 `read()` 裡）會讓收集等它，直到它回來；這是已知限制，不是未
+  驗證的不確定性。每個執行緒有自己的配置區（slab），單執行緒程式的配置速度不變。
+- **執行緒帶來的收集器退化（已量到，根因未定）**：400 萬個逃逸物件的配置
+  （`Object[]` 內含 `Cell`，96 MB 存活，兩次收集），改動前 0.170 秒、改動後
+  0.303 秒。在執行期內量兩次收集本身：30 ms → 約 155 ms（約 5 倍）；收集次數、
+  存活位元組與 mmap 次數都相同，所以在收集器裡，但原因未找到。其餘量到的都在
+  誤差內：配置快速路徑 2000 萬次 `ty_alloc(16)` 是 11.5 ns 對 11.5 ns，`bench_loop`
+  慢約 10%（迴圈回邊的安全點檢查），`bench_alloc` 約 +2%（噪音內）。
 - 與 Java 生態不相容（沒有 JAR、沒有 JDK 類別庫、沒有 JNI）。
 - GC 為保守式標記清除，非分代；大量短命物件的情境仍落後 HotSpot 的逃逸分析。
 - 型別推論比 javac 弱一層，界線見文件站〈語言參考〉§12 第 11 條。
