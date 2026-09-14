@@ -273,7 +273,7 @@ func (c *Checker) responseBody(r routeSpec, call ast.Expr) []ast.Stmt {
 	// at the first request.
 	cl := ct2(rt)
 	pair := c.jsonAdapterFor(cl, r.method.Pos)
-	if cl == nil || pair == nil {
+	if cl == nil || pair == nil || pair.writer == nil {
 		c.errf(r.method.Pos, "TY-TYP-0111",
 			"%s answers with %s, which has no JSON mapping; return a String or HttpResponse, or a class the binding can walk",
 			r.method.Name, r.returns)
@@ -331,7 +331,7 @@ func (c *Checker) jsonBodyExpr(raw ast.Expr, want ast.Type, pos source.Pos) ast.
 		return nil
 	}
 	pair := c.jsonAdapterFor(ct.Class, pos)
-	if pair == nil {
+	if pair == nil || pair.reader == nil {
 		return nil
 	}
 	return callNamed(id(ct.Class.Full), pair.reader.Name,
@@ -350,7 +350,9 @@ func (c *Checker) paramExpr(p paramSpec, pos source.Pos) ast.Expr {
 			return e
 		}
 	case "header":
-		raw = callNamed(id("req"), "header", strLit(p.name))
+		// the two-argument header answers with the declared default when the
+		// request carries no such header, which is what defaultValue means
+		raw = callNamed(id("req"), "header", strLit(p.name), strLit(p.def))
 	default:
 		if p.def != "" {
 			raw = callNamed(id("req"), "param", strLit(p.name), strLit(p.def))
@@ -361,41 +363,91 @@ func (c *Checker) paramExpr(p paramSpec, pos source.Pos) ast.Expr {
 	return c.convertParam(raw, p)
 }
 
+// webConvertName is the WebConvert method that turns request text into a kind's
+// value, or "" for a kind a request cannot carry.
+//
+// The conversions live in the library rather than in the generated call so that
+// a value that does not fit is Spring's 400 instead of an uncaught
+// NumberFormatException: WebConvert relabels the parse failure as a type
+// mismatch, and the server answers that with 400.
+func webConvertName(k ast.PrimKind) string {
+	switch k {
+	case ast.Int:
+		return "toInt"
+	case ast.Long:
+		return "toLong"
+	case ast.Double:
+		return "toDouble"
+	case ast.Float:
+		return "toFloat"
+	case ast.Short:
+		return "toShort"
+	case ast.Byte:
+		return "toByte"
+	}
+	return ""
+}
+
 // convertParam turns the string a request carries into the parameter's type.
+//
 // A path variable or a query parameter arrives as text, so a numeric parameter
 // has to be parsed and a reference parameter has to be cast back -- the
 // alternative, letting the generated call receive a String where an int is
-// declared, does not compile.
+// declared, does not compile. A parameter whose text does not fit is the
+// client's mistake, which TypeMismatchException turns into a 400.
 func (c *Checker) convertParam(raw ast.Expr, p paramSpec) ast.Expr {
-	pt, ok := c.erasure(p.want).(*ast.PrimType)
-	if !ok {
-		if ct, isClass := c.erasure(p.want).(*ast.ClassType); isClass && ct.Class != nil && ct.Class.Special != "String" {
-			return castTo(raw, ct.Class)
+	rt := c.erasure(p.want)
+	if pt, ok := rt.(*ast.PrimType); ok {
+		if conv := webConvertName(pt.Kind); conv != "" {
+			return callNamed(id("WebConvert"), conv, raw, strLit(p.name))
+		}
+		if pt.Kind == ast.Boolean {
+			// Boolean.parseBoolean answers false for anything that is not
+			// "true", as Java's does, so there is no failure to report
+			return callNamed(id("Boolean"), "parseBoolean", raw)
 		}
 		return raw
 	}
-	var parse string
-	switch pt.Kind {
-	case ast.Int:
-		parse = "parseInt"
-	case ast.Long:
-		parse = "parseLong"
-	case ast.Double:
-		parse = "parseDouble"
-	case ast.Float:
-		parse = "parseFloat"
-	case ast.Short:
-		parse = "parseShort"
-	case ast.Byte:
-		parse = "parseByte"
-	case ast.Boolean:
-		parse = "parseBoolean"
-	default:
+	ct, ok := rt.(*ast.ClassType)
+	if !ok || ct.Class == nil || ct.Class.Special == "String" {
 		return raw
 	}
-	box := c.b.Boxes[pt.Kind]
-	if box == nil {
+	if ct.Class.Kind == ast.KindEnum {
+		// the constants are known here, so the name is matched against them
+		// rather than cast: `(Color) "RED"` would be a ClassCastException
+		return callNamed(id(ct.Class.Full), c.webEnumValue(ct.Class).Name, raw, strLit(p.name))
+	}
+	if k, boxed := c.b.Unbox[ct.Class]; boxed {
+		if conv := webConvertName(k); conv != "" {
+			return callNamed(id(ct.Class.Name), "valueOf",
+				callNamed(id("WebConvert"), conv, raw, strLit(p.name)))
+		}
+		if k == ast.Boolean {
+			return callNamed(id(ct.Class.Name), "valueOf",
+				callNamed(id("Boolean"), "parseBoolean", raw))
+		}
 		return raw
 	}
-	return callNamed(id(box.Name), parse, raw)
+	return castTo(raw, ct.Class)
+}
+
+// webEnumValue answers with the method that turns request text into a constant
+// of an enum, generating it on first use.
+//
+// Spring converts a path variable or a query parameter into an enum by name.
+// The constants are known where the request is read, so the lookup is a chain
+// of comparisons rather than a reflective valueOf: a name the enum does not
+// have is the client's mistake, and fails the same way a bad number does.
+func (c *Checker) webEnumValue(cl *ast.Class) *ast.Method {
+	const name = "__teyruWebValue"
+	if ms := cl.Methods[name]; len(ms) > 0 {
+		return ms[0]
+	}
+	stmts := enumLookupChain(cl, id("s"))
+	stmts = append(stmts, throwOf(newObjNamed("TypeMismatchException",
+		callNamed(id("WebConvert"), "mismatch", id("s"), id("param"), strLit(cl.Name)))))
+	m := c.newSynthMethod(cl, name, ast.ModPublic|ast.ModStatic, &ast.ClassType{Class: cl},
+		[]ast.Type{c.strType, c.strType}, []string{"s", "param"}, blockOf(stmts...), "")
+	c.addSynthMethod(cl, m)
+	return m
 }

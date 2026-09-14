@@ -103,6 +103,13 @@ class HttpRequest {
     return header(name).isEmpty() == false
   }
 
+  // header answers with the default when the request carries no such header,
+  // which is what @RequestHeader's defaultValue asks for. A header that is
+  // present but empty is present: the caller sent it and meant nothing by it.
+  public String header(String name, String fallback) {
+    return hasHeader(name) ? header(name) : fallback
+  }
+
   // param returns one query parameter, or the fallback when it is absent.
   public String param(String name, String fallback) {
     String v = paramOrNull(name)
@@ -341,6 +348,80 @@ class WebUtil {
       }
     }
     return out
+  }
+}
+
+// TypeMismatchException is what a request's text fails to become when it is
+// converted into a handler parameter. Spring answers a path variable or a query
+// parameter that does not fit the parameter's declared type with 400, not 500:
+// the client named the wrong thing, the server did not break.
+class TypeMismatchException extends RuntimeException {
+  public TypeMismatchException(String message) {
+    super(message)
+  }
+}
+
+// WebConvert turns the text a request carries into a handler parameter.
+//
+// The compiler generates the call, so the parameter's type is known where the
+// value is read and a client that sends "@@" where an int was declared gets a
+// 400 from the server rather than a NumberFormatException nothing catches.
+// Java's own parseXxx is what does the work: its NumberFormatException says
+// what was wrong, and this only relabels it for the client.
+class WebConvert {
+  public static int toInt(String raw, String param) {
+    try {
+      return Integer.parseInt(raw)
+    } catch (NumberFormatException e) {
+      throw new TypeMismatchException(mismatch(raw, param, "int"))
+    }
+  }
+
+  public static long toLong(String raw, String param) {
+    try {
+      return Long.parseLong(raw)
+    } catch (NumberFormatException e) {
+      throw new TypeMismatchException(mismatch(raw, param, "long"))
+    }
+  }
+
+  public static double toDouble(String raw, String param) {
+    try {
+      return Double.parseDouble(raw)
+    } catch (NumberFormatException e) {
+      throw new TypeMismatchException(mismatch(raw, param, "double"))
+    }
+  }
+
+  public static float toFloat(String raw, String param) {
+    try {
+      return Float.parseFloat(raw)
+    } catch (NumberFormatException e) {
+      throw new TypeMismatchException(mismatch(raw, param, "float"))
+    }
+  }
+
+  public static short toShort(String raw, String param) {
+    try {
+      return Short.parseShort(raw)
+    } catch (NumberFormatException e) {
+      throw new TypeMismatchException(mismatch(raw, param, "short"))
+    }
+  }
+
+  public static byte toByte(String raw, String param) {
+    try {
+      return Byte.parseByte(raw)
+    } catch (NumberFormatException e) {
+      throw new TypeMismatchException(mismatch(raw, param, "byte"))
+    }
+  }
+
+  // mismatch builds the message a failed conversion carries, so the generated
+  // conversions the compiler writes for an enum read the same as these.
+  public static String mismatch(String raw, String param, String type) {
+    return "failed to convert " + (raw == null ? "null" : "\"" + raw + "\"") +
+      " to " + type + " for parameter \"" + param + "\""
   }
 }
 
@@ -702,6 +783,12 @@ class HttpServer {
         res.body = out.toString()
       }
       served++
+      return res
+    } catch (TypeMismatchException e) {
+      // the request named a value the parameter cannot hold: the client's
+      // mistake, so it is a 400 rather than the 500 below
+      res.status = 400
+      res.body = "bad request: " + e.getMessage()
       return res
     } catch (Throwable e) {
       res.status = 500

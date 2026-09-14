@@ -237,3 +237,21 @@ func (c *Checker) addSynthField(cl *ast.Class, f *ast.Field) {
 	cl.FieldMap[f.Name] = f
 	cl.Fields = append(cl.Fields, f)
 }
+
+// enumLookupChain builds the `if ("RED".equals(s)) { return Cl.RED }` chain that
+// finds an enum constant by name.
+//
+// The constants are known here, so a name is matched against them rather than
+// looked up reflectively -- which is what turns the text of a web parameter or
+// a JSON member into a constant. The caller appends what happens when no branch
+// matches, since that differs: a bad request parameter and a bad JSON member
+// are not the same failure.
+func enumLookupChain(cl *ast.Class, s ast.Expr) []ast.Stmt {
+	stmts := make([]ast.Stmt, 0, len(cl.EnumConsts))
+	for _, ec := range cl.EnumConsts {
+		stmts = append(stmts, ifOf(
+			callNamed(strLit(ec.Name), "equals", s),
+			blockOf(returnOf(sel(id(cl.Full), ec.Name))), nil))
+	}
+	return stmts
+}

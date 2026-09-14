@@ -19,7 +19,9 @@ class Dog extends Animal {
   private String breed
 }
 
-@Builder
+// @Builder.ObtainVia is read by toBuilder, which is where Lombok reads it:
+// build() takes what the builder was given, and toBuilder copies an instance.
+@Builder(toBuilder = true)
 @Getter
 class Order {
   private String id
@@ -52,6 +54,11 @@ class Main {
     System.out.println(o.getCounts().size())
     System.out.println(o.getTags())
     System.out.println(o.getId() + " " + o.getLabel() + " " + o.getTotal())
+
+    // toBuilder copies an instance, and takes label from id because that is
+    // what @Builder.ObtainVia(field = "id") says
+    Order copy = o.toBuilder().build()
+    System.out.println(copy.getId() + " " + copy.getLabel() + " " + copy.getTotal())
 
     // an untouched builder still builds a collection, never null
     Order empty = Order.builder().build()

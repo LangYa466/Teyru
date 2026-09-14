@@ -480,6 +480,17 @@ func (e *Emitter) signature(m *ast.Method) string {
 	for i, p := range m.Params {
 		params = append(params, fmt.Sprintf("%s a%d", e.ctype(p), i))
 	}
+	// A constructor of a class that captures the enclosing method's variables
+	// takes them after the ones it declares, because the object has to hold
+	// them before any initializer of its own runs. They are the compiler's
+	// parameters rather than the program's -- the checker's view of the
+	// signature is the declared one, which is what a `new` has to match -- so
+	// only the C declaration and the calls carry them.
+	if m.IsCtor {
+		for i, v := range e.prog.CapturedVars(m.Owner) {
+			params = append(params, fmt.Sprintf("%s a%d", e.ctype(v.Type), len(m.Params)+i))
+		}
+	}
 	if len(params) == 0 {
 		params = append(params, "void")
 	}
@@ -503,6 +514,14 @@ func (e *Emitter) emitMethod(cl *ast.Class, m *ast.Method, idx int) {
 		return
 	}
 	if body == nil && !m.IsCtor && m.Decl != nil {
+		e.emitSynthetic(cl, m)
+		return
+	}
+	// A default accessor -- `get` with no body -- is exactly the method that
+	// has no syntax to emit: its body is the backing field, which emitSynthetic
+	// writes. Without this it fell through to the unimplemented trap and the
+	// program stopped the first time the property was used.
+	if body == nil && !m.IsCtor && m.Accessor != nil {
 		e.emitSynthetic(cl, m)
 		return
 	}
@@ -592,15 +611,11 @@ func (e *Emitter) emitCtorBody(cl *ast.Class, m *ast.Method) {
 			e.line("%s(%s);\n", e.cfunc(sup), e.args("this", nil, sup))
 		}
 	}
-	// captured locals arrive as parameters trailing the forwarded ones
-	if m.SynthKind == "anon-ctor" {
-		base := 0
-		if m.Forward != nil {
-			base = len(m.Forward.Params)
-		}
-		for i, cv := range e.prog.CapturedVars(cl) {
-			e.line("this->cap_%s = a%d;\n", mangle(cv.Name), base+i)
-		}
+	// captured locals arrive as parameters trailing the declared ones, which is
+	// what the signature added; a local class captures them the same way an
+	// anonymous one does
+	for i, cv := range e.prog.CapturedVars(cl) {
+		e.line("this->cap_%s = a%d;\n", mangle(cv.Name), len(m.Params)+i)
 	}
 	// 3. instance field initializers run after the superclass constructor
 	e.emitFieldInits(cl, m)

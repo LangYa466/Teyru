@@ -462,7 +462,11 @@ try {
 `Optional`、`StringJoiner`。
 
 契約照 JDK：`LinkedHashMap` 是插入序、`TreeMap` 是鍵序、`TreeSet` 的
-`headSet`／`subSet` 是活的視圖、`computeIfAbsent`／`merge`／`forEach` 都在。
+`headSet`／`tailSet`／`subSet` 是**活的視圖**（在範圍內 `add` 會寫進原集合，
+範圍外是 `IllegalArgumentException: key out of range`；`TreeMap.keySet()` 的視圖
+則照 JDK 一樣拒絕新增）、`computeIfAbsent`／`merge`／`forEach` 都在。
+`Stream.of(array)` 會把陣列攤成元素（與 javac 相同的多載：`of(T...)` 比 `of(T)`
+更特定）。
 `java.util.function`（`lib/09`）提供 `Function`／`BiFunction`／`Consumer`／
 `Supplier`／`Predicate`／`Runnable`／`Comparator`。
 
@@ -494,6 +498,13 @@ for (String n : names) {
 簡單名稱照 JLS 6.5.5：先看單一型別匯入（它蓋過同名的套件成員），再看檔案自己的
 套件，再看 on-demand 匯入，最後才看程式整體的名字（預設套件與前綴）。兩個
 `import p.*` 都提供同一個名字時是 `TY-TYP-0099`，不會照宣告順序挑一個。
+
+**匯入本身會被檢查**（`TY-TYP-0115`）：一條 `import` 必須指向標準程式庫回答的套件
+（`java.util`、`com.google.gson`、`lombok`…，見上一節的套件表）、這次建置裡某個
+檔案宣告的套件，或是完整名稱就是那條路徑的型別。名字在 Teyru 是照**簡單名稱**
+找的，前面寫什麼套件都一樣，所以 `import java.utli.List` 曾經是安靜地被忽略、
+然後照樣拿到 `List`；現在它是錯誤。模組匯入（`example.com/dep/pkg`）由建置解析，
+不在此檢查範圍。
 
 前綴的名字是全域的——這正是 `List`、`String` 不加 import 就能用的原因——但
 **具名套件看不到預設套件**（JLS 7.4.2）。所以使用者在預設套件宣告 `class Node`

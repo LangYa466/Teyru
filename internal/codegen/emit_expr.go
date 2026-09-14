@@ -371,11 +371,26 @@ func (e *Emitter) ident(v *ast.Ident) string {
 			return "0"
 		}
 		if r.Field != nil {
-			return "this->f_" + mangle(r.Field.Name)
+			// the `field` of a property accessor: a static property's storage
+			// is a global, and its accessor is a static method with no `this`
+			// to reach it through
+			return e.storageOf(r.Field)
 		}
 		return e.localName(r)
 	}
 	return "0"
+}
+
+// storageOf is the C expression naming a field's storage where it is directly
+// reachable: through `this` for an instance field, by its global for a static
+// one. The static case is what a static property's accessor needs, since it has
+// no `this` -- and the class's own initializer has already run by then, so the
+// global needs no ty_clinit call of its own.
+func (e *Emitter) storageOf(f *ast.Field) string {
+	if f.Mods.Has(ast.ModStatic) {
+		return staticName(f.Owner, f)
+	}
+	return "this->f_" + mangle(f.Name)
 }
 
 // thisExpr is the C expression for the instance the code being emitted runs
@@ -1511,14 +1526,12 @@ func (e *Emitter) newExpr(v *ast.New) string {
 	return b.String()
 }
 
-// argsWithCaptures builds the argument list of a constructor call. An
-// anonymous class captures the locals its body uses, and receives them as
-// trailing parameters after the ones forwarded to the superclass constructor.
+// argsWithCaptures builds the argument list of a constructor call. A class
+// declared inside a method captures the locals of it that its body uses -- an
+// anonymous class and a local class both -- and receives them as trailing
+// parameters after the ones it declares.
 func (e *Emitter) argsWithCaptures(n string, v *ast.New, cl *ast.Class) string {
 	a := e.args(n, v.Args, v.Ctor)
-	if !cl.Anon {
-		return a
-	}
 	for _, cv := range e.prog.CapturedVars(cl) {
 		if a != "" {
 			a += ", "

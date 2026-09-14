@@ -63,7 +63,7 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 | TY-TYP-0004 | `type %s expects %d type arguments, found %d` | 泛型引數數量不符。 |
 | TY-TYP-0005 | `primitive type %s cannot be a type argument` | 泛型不能用原生型別，請用包裝類別。 |
 | TY-TYP-0006 | `class cannot extend interface %s` | 類別要用 `implements` 介面。 |
-| TY-TYP-0007 | `cannot extend final class %s` | 被 `final` 的類別不能被繼承。 |
+| TY-TYP-0007 | `cannot extend final class %s` | 被 `final` 的類別不能被繼承。`final` 由 `@Value`／`@UtilityClass` 標上去時，這一條在標註展開之後才報（「擋下繼承」的檢查原本跑在展開之前，所以那兩個標註沒有作用）。 |
 | TY-TYP-0008 | `cyclic inheritance involving %s` | 繼承關係成環。 |
 | TY-TYP-0009 | `%s is not an interface` | `implements` 後面只能是介面。 |
 | TY-TYP-0010 | `duplicate field %s in %s` | 同一個類別重複宣告欄位。 |
@@ -112,7 +112,7 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 | 代碼 | 訊息 | 說明與修法 |
 |---|---|---|
 | TY-TYP-0045 | `cannot access instance field %s from a static context` | 靜態方法內不能直接讀實例欄位。 |
-| TY-TYP-0046 | `%s has private access in %s` | 私有成員只能在自己的類別內存取。 |
+| TY-TYP-0046 | `%s has private access in %s` | 私有成員只能在自己的類別內存取。property 看的是 **accessor 的修飾符**（底層儲存一律 private，所以儲存欄位的修飾符不能拿來判斷）；`x.p = v` 看 setter，`p.x` 與 `p.x += 1` 看 getter。同一個 nest（同一個最外層類別）內互通。 |
 | TY-TYP-0048 | `cannot find symbol %s` | 名稱找不到：檢查拼字、作用域、import，或是否忘了宣告。 |
 
 ### 型別轉換與運算子（0049–0067）
@@ -190,6 +190,7 @@ hello.teyru:4:11: error[TY-TYP-0051]: incompatible types: String cannot be conve
 | TY-TYP-0110 | `%s has no JSON mapping for its type %s` | 欄位型別沒有 JSON 映射。Gson 在執行期才拋，這裡在綁定的那一行就報。 |
 | TY-TYP-0114 | `not a statement: %s has no effect` | 沒有副作用的運算式陳述式（JLS 14.8）。這個語言在換行結束運算式，所以 `long x = a` 換行 `+ b` 是兩個陳述式，第二個是安靜的一元加號——`x` 少一項而沒有任何訊息。現在會報出來。 |
 | TY-TYP-0113 | `resource type %s is not a subtype of AutoCloseable` | try-with-resources 的資源型別必須是 `AutoCloseable` 的子型別。隱含的 `close()` 是一次介面呼叫，所以「剛好有 `close()` 方法」的類別會編成物件沒有項目的 itable 呼叫，執行期才爆。 |
+| TY-TYP-0115 | `cannot resolve import %s` | 匯入路徑指不到任何東西。名字在 Teyru 裡是照**簡單名稱**找的，前面寫什麼套件都一樣，所以 `import java.utli.List` 這種拼錯的套件以前是安靜地被忽略、然後照樣拿到 `List`。現在匯入必須指向：標準程式庫回答的套件（`java.util`、`com.google.gson`、`lombok`…，見 docs/language.md §11）、本次建置某個檔案宣告的套件、或是一個完整名稱就是這條路徑的型別。 |
 | TY-TYP-0100 | `two beans are named %s: %s and %s` | 兩個 bean 取了同一個名字（`@Component("x")` 或 `@Bean("x")`）。 |
 | TY-TYP-0101 | `%s is declared by the framework and cannot be redefined` | `__TeyruFramework` 是容器註冊用的合成類別，名字被保留。 |
 | TY-TYP-0102 | `@Bean method %s ...` | `@Bean` 方法必須不是 static、且回傳型別是一個類別（基本型別會裝箱）。 |

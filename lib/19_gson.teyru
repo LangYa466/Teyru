@@ -106,6 +106,12 @@ class JsonBinding {
     if (v == null) {
       return JsonNull.INSTANCE
     }
+    // a value that is already a tree is written as it stands: an Object field
+    // holds whatever arrived, and a JsonObject read out of one has to survive
+    // being written back rather than being looked up as a class
+    if (v instanceof JsonElement) {
+      return (JsonElement) v
+    }
     JsonWriter2 w = writer(v.getClass())
     if (w == null) {
       throw new JsonParseException("no JSON binding for " + v.getClass().getName())

@@ -94,13 +94,20 @@ type TypeExpr struct {
 
 // File is a compilation unit.
 type File struct {
-	Src           *source.File
-	Package       string
-	Imports       []*Import
-	Types         []*ClassDecl
-	StaticImports []*Field
-	StaticMethods map[string][]*Method
-	StarImports   []string
+	Src *source.File
+	// Package is the file's package identity. For a file of a module it is the
+	// import path of the directory rather than the name the file declares, so
+	// that two modules may each declare `package util` and stay apart.
+	Package string
+	// DeclaredPackage is the name the file writes in its `package` clause, kept
+	// because the identity above is not always it: an import names a package by
+	// the name its author wrote.
+	DeclaredPackage string
+	Imports         []*Import
+	Types           []*ClassDecl
+	StaticImports   []*Field
+	StaticMethods   map[string][]*Method
+	StarImports     []string
 }
 
 // Import declaration.
@@ -269,6 +276,11 @@ type (
 	}
 	LocalClass struct {
 		Decl *ClassDecl
+		// Instance and InstanceInit are the instance an @Helper local class is
+		// used through: Lombok declares one right below the class and lets the
+		// statements after it call the class's methods unqualified.
+		Instance     *Var
+		InstanceInit *New
 	}
 	ExprStmt struct {
 		Pos source.Pos
@@ -644,7 +656,12 @@ type Field struct {
 	// to read the value from somewhere other than the field itself.
 	ObtainViaField  string
 	ObtainViaMethod string
+	// ObtainViaStatic marks `@Builder.ObtainVia(isStatic = true, method = ...)`:
+	// the method is a static one of the type being built, called with the
+	// instance to read the value from.
+	ObtainViaStatic bool
 	Include         bool // @ToString.Include / @EqualsAndHashCode.Include
+	Exclude         bool // @ToString.Exclude / @EqualsAndHashCode.Exclude
 	DefaultExpr     Expr // @Builder.Default initializer
 	InitExpr        Expr // synthesized static initializer run from <clinit>
 	Anno            string

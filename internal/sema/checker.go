@@ -63,15 +63,26 @@ type Checker struct {
 	// jsonAdapters holds the JSON binding generated for each class that a Gson
 	// call binds, keyed by class so it is generated once.
 	jsonAdapters map[*ast.Class]*jsonAdapterPair
-	selector     int
-	todo         []func()
-	Props        map[ast.Expr]ast.Expr
-	Direct       map[ast.Expr]bool // varargs calls that pass the array itself
-	program      *Program
-	objType      *ast.ClassType
-	strType      *ast.ClassType
-	arrCls       *ast.Class
-	extensions   map[*ast.Class][]*ast.Class
+	// jsonSpeculative is set while a binding is generated for a class the call
+	// site did not name -- every class in the program, because an Object-typed
+	// toJson can carry any of them. A class that cannot be bound is skipped
+	// rather than reported there, so the diagnostics stay about the code the
+	// program actually wrote.
+	jsonSpeculative bool
+	// jsonProgramBound remembers that the program-wide binding has run, so that
+	// a second Object-typed call does not walk the classes again; jsonProgramQueued
+	// remembers that it is waiting for the check to finish.
+	jsonProgramBound  bool
+	jsonProgramQueued bool
+	selector          int
+	todo              []func()
+	Props             map[ast.Expr]ast.Expr
+	Direct            map[ast.Expr]bool // varargs calls that pass the array itself
+	program           *Program
+	objType           *ast.ClassType
+	strType           *ast.ClassType
+	arrCls            *ast.Class
+	extensions        map[*ast.Class][]*ast.Class
 }
 
 // Check analyses the prelude plus user files.
@@ -137,6 +148,7 @@ func Check(files []*ast.File, diags *source.Diagnostics) *Program {
 func (c *Checker) resolveImports(env *typeEnv, f *ast.File) {
 	for _, imp := range f.Imports {
 		if !imp.Static {
+			c.checkImport(env, imp)
 			if imp.Star {
 				f.StarImports = append(f.StarImports, imp.Path)
 			}
@@ -182,6 +194,71 @@ func (c *Checker) resolveImports(env *typeEnv, f *ast.File) {
 
 func (c *Checker) errf(pos source.Pos, code, format string, args ...any) {
 	c.diags.Errorf(pos, code, format, args...)
+}
+
+// libImportPackage is the set of package names the standard library is imported
+// under. The library is one Teyru package whose classes carry Java's names, so
+// `import java.util.List` is how a program names one of them; these are the
+// names docs/language.md §11 publishes, and the import check reads them.
+var libImportPackage = map[string]bool{
+	"java.lang":             true,
+	"java.util":             true,
+	"java.util.function":    true,
+	"java.util.stream":      true,
+	"java.util.regex":       true,
+	"java.math":             true,
+	"java.text":             true,
+	"java.time":             true,
+	"java.time.format":      true,
+	"java.io":               true,
+	"java.nio.file":         true,
+	"java.net":              true,
+	"com.google.gson":       true,
+	"lombok":                true,
+	"lombok.experimental":   true,
+	"lombok.extern.java":    true,
+	"lombok.extern.slf4j":   true,
+	"lombok.extern.jackson": true,
+}
+
+// checkImport rejects an import that names nothing this build can see.
+//
+// Nothing else asks whether an import is right: a name resolves by its simple
+// name whatever package is written in front of it, so `import java.utli.List`
+// was accepted and the `List` it really meant was picked anyway. An import has
+// to name a package the library answers for, a package some file of this build
+// declares, or a type declared exactly at that path -- and a misspelled package
+// is none of the three.
+func (c *Checker) checkImport(env *typeEnv, imp *ast.Import) {
+	path := imp.Path
+	pkg := path
+	if !imp.Star {
+		i := strings.LastIndexByte(path, '.')
+		if i < 0 {
+			c.errf(imp.Pos, "TY-TYP-0115", "cannot resolve import %s", path)
+			return
+		}
+		pkg = path[:i]
+	}
+	if libImportPackage[pkg] || c.declaredPackage(pkg) {
+		return
+	}
+	if cl := c.lookupClassName(env, path); cl != nil && cl.Full == path {
+		return
+	}
+	c.errf(imp.Pos, "TY-TYP-0115", "cannot resolve import %s", path)
+}
+
+// declaredPackage reports whether a file of this build declares the package,
+// which is what an import of the program's own tree -- or of a package a
+// module of the build provides -- names.
+func (c *Checker) declaredPackage(name string) bool {
+	for _, f := range c.files {
+		if f.Package == name || f.DeclaredPackage == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Checker) orderedClasses() []*ast.Class {

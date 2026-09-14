@@ -79,7 +79,10 @@ class Required {
 }
 
 // --- @Builder with @Builder.Default and @Builder.ObtainVia
-@Builder
+// @Builder.ObtainVia says how toBuilder obtains a value "given an instance"
+// (Lombok's javadoc): build() reads what the builder was given, and only
+// toBuilder reads the object being copied.
+@Builder(toBuilder = true)
 @Getter
 class Request {
   private String url
@@ -229,6 +232,8 @@ class Main {
 
     Request r = Request.builder().url("u").build()
     System.out.println(r.getUrl() + " " + r.getRetries() + " " + r.getTag())
+    Request copied = r.toBuilder().build()
+    System.out.println(copied.getUrl() + " " + copied.getRetries() + " " + copied.getTag())
 
     Leaf leaf = Leaf.builder().name("n").addValues("a").addValues("b").build()
     System.out.println(leaf + " " + leaf.getName() + " " + leaf.getValues())

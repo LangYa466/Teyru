@@ -177,6 +177,7 @@ func (p *parser) parseFile() *ast.File {
 	if p.is("package") {
 		p.next()
 		file.Package = p.qualifiedName()
+		file.DeclaredPackage = file.Package
 		p.terminator()
 	}
 	for p.is("import") {
@@ -985,6 +986,13 @@ func (p *parser) parseStatement() ast.Stmt {
 	case p.isTypeDeclStart() || ((p.is("abstract") || p.is("final") || p.is("static")) && p.isLocalClassAhead()):
 		mods := p.parseModifiers()
 		return &ast.LocalClass{Decl: p.parseTypeDecl(mods, nil)}
+	case p.is("@"):
+		// An annotation may introduce a local class declaration -- @Helper is
+		// the one that matters -- and if it does not, it belongs to a local
+		// variable or to something else, which the paths below read.
+		if lc := p.tryLocalClass(); lc != nil {
+			return lc
+		}
 	}
 	if lv := p.tryLocalVar(true); lv != nil {
 		p.terminator()
@@ -1004,6 +1012,25 @@ func (p *parser) pathSegment() string {
 		s += "-" + p.ident()
 	}
 	return s
+}
+
+// tryLocalClass reads an annotated local class declaration, or answers nil and
+// leaves the tokens where they were.
+func (p *parser) tryLocalClass() *ast.LocalClass {
+	pos := p.pos()
+	ok := p.speculate(func() bool {
+		p.parseAnnotations()
+		p.parseModifiers()
+		return p.is("class") || p.is("interface") || p.is("enum") || p.is("record")
+	})
+	if !ok {
+		return nil
+	}
+	// re-parse for real so positions and nested errors are reported
+	p.restoreTo(pos)
+	annos := p.parseAnnotations()
+	mods := p.parseModifiers()
+	return &ast.LocalClass{Decl: p.parseTypeDecl(mods, annos)}
 }
 
 func (p *parser) isLocalClassAhead() bool {

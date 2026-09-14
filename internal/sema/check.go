@@ -31,6 +31,21 @@ type methodCtx struct {
 	staticMethods   map[string][]*ast.Method
 	props           map[ast.Expr]ast.Expr
 	pendingTypeArgs []ast.Type
+	// assignTarget is the expression an assignment is writing to, so that a
+	// property resolved on it is judged by its setter: reading the target to
+	// find the symbol is not a read of the property.
+	assignTarget ast.Expr
+	// helpers holds the @Helper local classes in scope, innermost last. An
+	// unqualified call to one of their methods goes through the instance
+	// Lombok declares for the class, which is what @Helper is for.
+	helpers [][]helperRef
+}
+
+// helperRef is one @Helper local class in scope and the instance it is used
+// through.
+type helperRef struct {
+	cl   *ast.Class
+	inst *ast.Var
 }
 
 func (c *Checker) checkBodies(cl *ast.Class) {
@@ -300,6 +315,7 @@ func (c *Checker) newCtx(cl *ast.Class, m *ast.Method) *methodCtx {
 
 func (ctx *methodCtx) push() {
 	ctx.scopes = append(ctx.scopes, map[string]*ast.Var{})
+	ctx.helpers = append(ctx.helpers, nil)
 	ctx.envs = append(ctx.envs, ctx.env)
 	if ctx.env != nil {
 		// a block gets its own type environment so that a local class declared
@@ -310,6 +326,9 @@ func (ctx *methodCtx) push() {
 }
 func (ctx *methodCtx) pop() {
 	ctx.scopes = ctx.scopes[:len(ctx.scopes)-1]
+	if n := len(ctx.helpers); n > 0 {
+		ctx.helpers = ctx.helpers[:n-1]
+	}
 	if n := len(ctx.envs); n > 0 {
 		ctx.env = ctx.envs[n-1]
 		ctx.envs = ctx.envs[:n-1]
@@ -526,6 +545,12 @@ func (ctx *methodCtx) checkStmt(s ast.Stmt) {
 		if cd.Sym == nil {
 			cl := c.declareClass(ctx.cl.File, cd, ctx.cl)
 			cl.LocalOwner = ctx.m
+			// The body sees the variables that are in scope where the class is
+			// declared (JLS 6.3). Without this the scopes are empty, so a
+			// reference to a local of the enclosing method found nothing and
+			// was reported as a missing symbol -- an anonymous class got them
+			// and a local class did not.
+			cl.LocalScopes = ctx.scopes
 			// A local class declared in a static context has no enclosing
 			// instance to point at (JLS 8.1.3): `class Local {...}` inside a
 			// static method is instantiated with `new Local()`, exactly like a
@@ -551,6 +576,17 @@ func (ctx *methodCtx) checkStmt(s ast.Stmt) {
 			c.resolveMembers(cl)
 			c.layout(cl)
 			c.checkBodies(cl)
+			// @Helper: Lombok declares the instance right here and lets the
+			// statements below call the class's methods unqualified
+			if hasAnno(cd.Annos, "Helper") != nil {
+				inst := ctx.declare("$"+cd.Name, &ast.ClassType{Class: cl}, cd.Pos)
+				init := newObj(cl)
+				ctx.checkExpr(init, nil)
+				v.Instance, v.InstanceInit = inst, init
+				if n := len(ctx.helpers); n > 0 {
+					ctx.helpers[n-1] = append(ctx.helpers[n-1], helperRef{cl: cl, inst: inst})
+				}
+			}
 		}
 	case *ast.ExprStmt:
 		ctx.checkExpr(v.X, nil)
@@ -1405,9 +1441,17 @@ func (ctx *methodCtx) checkIdent(v *ast.Ident, want ast.Type) {
 		if cl.LocalOwner == nil {
 			continue
 		}
-		oc := c.newCtx(cl.Outer, cl.LocalOwner)
-		oc.scopes = append(append([]map[string]*ast.Var{}, cl.LocalScopes...), oc.scopes...)
-		if lv := oc.lookupLocal(v.Name); lv != nil {
+		// The scopes captured where the class was declared are the enclosing
+		// method's own, so looking in them finds the variable itself. Building
+		// a fresh context for the enclosing method instead declared a second
+		// copy of each of its parameters: the copy was what the body referred
+		// to, and it was appended to the method's parameter list a second time,
+		// so the C parameter it was given was one past the real ones.
+		for i := len(cl.LocalScopes) - 1; i >= 0; i-- {
+			lv := cl.LocalScopes[i][v.Name]
+			if lv == nil {
+				continue
+			}
 			v.Ref = lv
 			v.SetType(lv.Type)
 			ctx.captureOuter(cl, lv)
@@ -1472,6 +1516,22 @@ func (ctx *methodCtx) rewriteProp(v ast.Expr, f *ast.Field) {
 	ctx.props[v] = &ast.Call{ExprBase: ast.ExprBase{Pos: v.GetPos(), T: f.Type}, Recv: recv, Name: f.Getter.Name, Args: []ast.Expr{}, Method: f.Getter}
 }
 
+// checkPropAccess rejects a property whose accessor is private somewhere else.
+//
+// The storage field behind a property is private whatever the property is, so
+// the accessor's own modifiers are the ones that say who may use it -- the
+// declaration's visibility is the default the accessor takes when it declares
+// none of its own.
+func (ctx *methodCtx) checkPropAccess(pos source.Pos, f *ast.Field, m *ast.Method) {
+	if m == nil || !m.Mods.Has(ast.ModPrivate) {
+		return
+	}
+	if sameNest(m.Owner, ctx.cl) {
+		return
+	}
+	ctx.errf(pos, "TY-TYP-0046", "%s has private access in %s", f.Name, m.Owner.Name)
+}
+
 func (ctx *methodCtx) lookupStaticField(name string) *ast.Field {
 	for _, f := range ctx.staticImports {
 		if f.Name == name {
@@ -1481,18 +1541,8 @@ func (ctx *methodCtx) lookupStaticField(name string) *ast.Field {
 	return nil
 }
 
-// addCaptureParams appends one constructor parameter per variable captured by
-// an anonymous class body. The parameters come after the forwarded ones so the
-// superclass call keeps its argument positions.
-func (c *Checker) addCaptureParams(sub *ast.Class, ctor *ast.Method) {
-	for _, v := range capturedVars(sub) {
-		ctor.Params = append(ctor.Params, v.Type)
-		ctor.ParamNames = append(ctor.ParamNames, v.Name)
-	}
-}
-
-// CapturedVars lists the variables an anonymous class captures, in a stable
-// order shared by the checker and code generation.
+// capturedVars lists the variables a class declared inside a method captures,
+// in a stable order shared by the checker and code generation.
 func capturedVars(cl *ast.Class) []*ast.Var {
 	var out []*ast.Var
 	for v := range cl.CapFields {
@@ -1960,7 +2010,13 @@ func isRefType(t ast.Type) bool { return ast.IsRef(t) }
 
 func (ctx *methodCtx) checkAssign(v *ast.Assign) {
 	c := ctx.c
+	// The left-hand side is a write wherever it lands, so a property on it is
+	// judged by its setter rather than its getter: the read of the target that
+	// resolves the name must not report an access the assignment does not make.
+	prevTarget := ctx.assignTarget
+	ctx.assignTarget = v.X
 	ctx.checkExpr(v.X, nil)
+	ctx.assignTarget = prevTarget
 	if f := ctx.propertyOf(v.X); f != nil {
 		ctx.lowerPropAssign(v, f)
 		return
@@ -2101,6 +2157,11 @@ func (ctx *methodCtx) lowerPropAssign(v *ast.Assign, f *ast.Field) {
 		ctx.errf(v.Pos, "TY-PROP-0007", "property %s has no setter", f.Name)
 		v.SetType(f.Type)
 		return
+	}
+	ctx.checkPropAccess(v.Pos, f, f.Setter)
+	if v.Op != "=" {
+		// a compound assignment reads the property as well as writing it
+		ctx.checkPropAccess(v.Pos, f, f.Getter)
 	}
 	ctx.checkExpr(v.Y, f.Type)
 	if v.Op != "=" {
@@ -2354,9 +2415,6 @@ func (ctx *methodCtx) checkNew(v *ast.New, want ast.Type) {
 		c.addCtor(sub, anonCtor)
 		c.layout(sub)
 		c.checkBodies(sub)
-		// captured locals become extra constructor parameters, passed by the
-		// `new` expression that created the class
-		c.addCaptureParams(sub, anonCtor)
 		t = &ast.ClassType{Class: sub}
 		v.Body = body
 		v.Ctor = anonCtor
@@ -2527,7 +2585,15 @@ func (ctx *methodCtx) pickOverload(recv *ast.ClassType, cands []*ast.Method, arg
 			if !ok || s.phase != phase {
 				continue
 			}
-			if best.method == nil || s.total < best.total {
+			// Two candidates can fit an argument list equally well and only
+			// their parameter types tell them apart, which is the question
+			// Java's most-specific rule answers (JLS 15.12.2.5). Declaration
+			// order decided it instead, and the answer it gave was wrong
+			// wherever the more general method came first: `Stream.of(array)`
+			// took of(T) -- one element, the array itself -- because of(T) is
+			// declared above of(T...).
+			if best.method == nil || s.total < best.total ||
+				(s.total == best.total && ctx.c.moreSpecific(s.method, best.method)) {
 				best = s
 			}
 		}
@@ -2537,6 +2603,34 @@ func (ctx *methodCtx) pickOverload(recv *ast.ClassType, cands []*ast.Method, arg
 		}
 	}
 	return nil, best
+}
+
+// moreSpecific reports whether m1's parameters are strictly more specific than
+// m2's, which is what decides between two candidates that fit an argument list
+// equally well.
+//
+// The comparison is over the declared parameter types rather than over what
+// they were inferred to be, and that is the whole of it: `of(T...)` and `of(T)`
+// both end up taking the argument as a String[], and only their declarations --
+// an array of the element type, a single element -- say which of them Java
+// picks. A variable-arity method is compared as the array it declares, since
+// that is the parameter the array argument binds to.
+func (c *Checker) moreSpecific(m1, m2 *ast.Method) bool {
+	if len(m1.Params) != len(m2.Params) {
+		return false
+	}
+	strict := false
+	for i := range m1.Params {
+		a := c.erasure(m1.Params[i])
+		b := c.erasure(m2.Params[i])
+		if !c.isSubtype(a, b) {
+			return false
+		}
+		if !sameType(a, b) {
+			strict = true
+		}
+	}
+	return strict
 }
 
 // checkInferred rejects a call whose method type arguments stayed unknown: the
@@ -3162,6 +3256,17 @@ func (ctx *methodCtx) checkCall(v *ast.Call, want ast.Type) {
 	ctx.checkMethodCall(v, rt, want)
 }
 
+// helperHasMethod reports whether a helper class declares a method of that
+// name, which is what decides that an unqualified call belongs to it.
+func helperHasMethod(ctx *methodCtx, cl *ast.Class, name string) bool {
+	for _, m := range ctx.methodsOf(cl, name) {
+		if !m.Mods.Has(ast.ModPrivate) {
+			return true
+		}
+	}
+	return false
+}
+
 func (ctx *methodCtx) checkArrayCall(v *ast.Call, rt ast.Type) bool {
 	switch v.Name {
 	case "clone":
@@ -3300,6 +3405,22 @@ func thisCtorTarget(m *ast.Method) *ast.Method {
 }
 
 func (ctx *methodCtx) checkUnqualifiedCall(v *ast.Call, want ast.Type) {
+	// @Helper local classes come first: Lombok's rule is that *any* unqualified
+	// call below the declaration whose name matches one of the helper's methods
+	// is a call to the helper, and an argument list that does not fit is an
+	// error rather than a fall back to some other method of that name.
+	for i := len(ctx.helpers) - 1; i >= 0; i-- {
+		for _, h := range ctx.helpers[i] {
+			if !helperHasMethod(ctx, h.cl, v.Name) {
+				continue
+			}
+			ct := &ast.ClassType{Class: h.cl, Args: typeVarArgs(h.cl)}
+			v.Recv = &ast.Ident{ExprBase: ast.ExprBase{Pos: v.Pos, T: ct}, Name: h.inst.Name, Ref: h.inst}
+			v.RecvType = ct
+			ctx.checkMethodCall(v, ct, want)
+			return
+		}
+	}
 	// methods of the enclosing class chain
 	recv := &ast.ClassType{Class: ctx.cl, Args: typeVarArgs(ctx.cl)}
 	if m, s := ctx.pickOverload(recv, ctx.methodsOf(ctx.cl, v.Name), v.Args, want); m != nil {
@@ -3737,7 +3858,18 @@ func (ctx *methodCtx) checkSelect(v *ast.Select, want ast.Type) {
 		v.SetType(ast.ErrorType{})
 		return
 	}
-	if f.Mods.Has(ast.ModPrivate) && !sameNest(f.Owner, ctx.cl) && !f.IsProp {
+	switch {
+	case f.IsProp:
+		// A property's storage field is private for every property, so the
+		// accessor's own modifiers are what says who may use it. Skipping the
+		// check for properties left a private one readable from anywhere: the
+		// only modifier on it was the storage's, and that one was exempted. A
+		// property on the left of an assignment is checked against its setter
+		// instead, where the assignment is lowered.
+		if ctx.assignTarget != v {
+			ctx.checkPropAccess(v.Pos, f, f.Getter)
+		}
+	case f.Mods.Has(ast.ModPrivate) && !sameNest(f.Owner, ctx.cl):
 		ctx.errf(v.Pos, "TY-TYP-0046", "%s has private access in %s", f.Name, f.Owner.Name)
 	}
 	if !f.Mods.Has(ast.ModStatic) && ctx.inStatic() && ctx.m != nil && !isTypeReceiver(v.X) {
