@@ -158,7 +158,7 @@ func TestHashDir(t *testing.T) {
 // the module it covers. Editing the fixture without re-running this leaves the
 // build failing on TY-IO-0103, so the failure prints the lines to paste.
 func TestTeyruSumMatchesFixture(t *testing.T) {
-	dir := filepath.Join("..", "..", "tests", "modules", "fixtures", "example.com", "greeting@v0.1.0")
+	dir := testsDir(t, "modules", "fixtures", "example.com", "greeting@v0.1.0")
 	tree, modFile, err := TreeHash(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -166,7 +166,7 @@ func TestTeyruSumMatchesFixture(t *testing.T) {
 	if modFile == "" {
 		t.Fatalf("%s ships no %s", dir, ModuleFileName)
 	}
-	sums, err := LoadSum(filepath.Join("..", "..", "tests", "modules", "app", SumFileName))
+	sums, err := LoadSum(filepath.Join(testsDir(t, "modules", "app"), SumFileName))
 	if err != nil {
 		t.Fatal(err)
 	}

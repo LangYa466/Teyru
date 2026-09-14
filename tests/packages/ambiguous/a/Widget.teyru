@@ -1,8 +1,0 @@
-package a
-
-public class Widget {
-  String name
-  public Widget(String name) { this.name = name }
-  public String describe() { return "a.Widget(" + name + ")" }
-  public static Widget of(String n) { return new Widget(n) }
-}

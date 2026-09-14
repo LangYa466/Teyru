@@ -1,8 +1,0 @@
-routes=4
-200 [application/json; charset=utf-8] {"name":"pet7","age":70}
-200 [text/plain; charset=utf-8] store #7
-200 [text/plain; charset=utf-8] q=cat limit=3
-200 [text/plain; charset=utf-8] q=all limit=10
-200 [application/json; charset=utf-8] {"name":"xyz[t9]","age":1}
-404 [text/plain; charset=utf-8] not found: /nope
-405 [text/plain; charset=utf-8] method not allowed: POST

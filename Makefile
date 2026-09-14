@@ -8,7 +8,7 @@ BIN     ?= teyru
 OPT     ?= -O2
 PREFIX  ?= /usr/local
 
-.PHONY: all build test test-go test-programs bench fmt vet lint check hooks clean install examples
+.PHONY: all build test test-go test-programs submodule bench fmt vet lint check hooks clean install examples
 
 all: build
 
@@ -17,15 +17,21 @@ build:
 	$(GO) build -trimpath -o $(BIN) ./cmd/teyru
 
 ## test: everything (unit + end-to-end + diagnostics)
-test:
+test: submodule
 	$(GO) test ./... -count=1
+
+## submodule: the end-to-end suite lives in teyru-lang/tests, mounted at tests/
+submodule:
+	@ls tests/programs/*.teyru >/dev/null 2>&1 || { \
+	  echo "tests/ is empty -- the suite is the teyru-lang/tests repository."; \
+	  echo "run: git submodule update --init"; exit 1; }
 
 ## test-go: compiler unit tests only
 test-go:
 	$(GO) test ./internal/... -count=1
 
 ## test-programs: compile and run every program under tests/programs
-test-programs: build
+test-programs: build submodule
 	@fail=0; total=0; \
 	for f in tests/programs/*.teyru; do \
 	  b=$$(basename $$f .teyru); \

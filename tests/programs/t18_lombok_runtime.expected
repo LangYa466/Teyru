@@ -1,9 +1,0 @@
-Derived(d=2; super=Base(1))
-true
-true
-using Res(first)
-closed first
-42
-locked
-HI!
-10
