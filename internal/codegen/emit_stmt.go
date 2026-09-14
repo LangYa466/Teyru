@@ -7,6 +7,15 @@ import (
 	"github.com/LangYa466/Teyru/internal/ast"
 )
 
+// localClass emits the instance Lombok makes for an @Helper local class. An
+// ordinary local class declares nothing at run time.
+func (e *Emitter) localClass(v *ast.LocalClass) {
+	if v.Instance == nil || v.InstanceInit == nil {
+		return
+	}
+	e.line("%s %s = %s;\n", e.ctype(v.Instance.Type), e.localName(v.Instance), e.expr(v.InstanceInit))
+}
+
 // localName returns the stable C name of a local variable or parameter.
 func (e *Emitter) localName(v *ast.Var) string {
 	if v.ID < 0 {
@@ -38,6 +47,7 @@ func (e *Emitter) stmt(s ast.Stmt) {
 	case *ast.LocalVar:
 		e.localVar(v)
 	case *ast.LocalClass:
+		e.localClass(v)
 	case *ast.ExprStmt:
 		e.exprStmt(v.X)
 	case *ast.If:

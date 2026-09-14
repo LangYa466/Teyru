@@ -1,0 +1,67 @@
+// The edges of the JSON binding: a char, an Object field, a class the call
+// site never names, and an enum.
+//
+// Each of these is a case where Gson's reflection has an answer and a compiler
+// that generates the binding instead has to be told what the answer is. What
+// the binding writes has to be what it can read: a char goes out as the string
+// Gson writes and comes back from one, and an Object field carries whatever
+// arrived -- a tree -- rather than being looked up as a class on the way back.
+
+class Chars {
+  char letter = 'z'
+  Character boxed = 'q'
+}
+
+class Box {
+  Object v
+}
+
+class Point {
+  int x = 1
+  int y = 2
+}
+
+enum Color { RED, GREEN, BLUE }
+
+class Paint {
+  Color color = Color.GREEN
+  Color spare
+}
+
+class Main {
+  public static void main(String[] args) {
+    Gson gson = new Gson()
+
+    // a char is written as a one-character string, so reading it back the same
+    // way is the only thing that round-trips
+    Chars c = new Chars()
+    String cs = gson.toJson(c)
+    System.out.println(cs)
+    Chars cBack = gson.fromJson(cs, Chars.class)
+    System.out.println(cBack.letter + "/" + cBack.boxed)
+
+    // an Object field holds the tree that arrived, and the writer has to carry
+    // it rather than ask for a binding for JsonObject
+    Box b = gson.fromJson("{\"v\":{\"a\":1,\"b\":[2,3]}}", Box.class)
+    System.out.println(b.v.getClass().getName())
+    System.out.println(gson.toJson(b))
+
+    // a class only ever passed as an Object still has a binding, because every
+    // class in the program was bound for the call the compiler could not see
+    Object o = new Point()
+    System.out.println(gson.toJson(o))
+
+    // an enum is written as its constant's name and read back by matching it,
+    // which is what Gson gives and what an empty object never could
+    Paint p = new Paint()
+    System.out.println(gson.toJson(p))
+    Paint pBack = gson.fromJson("{\"color\":\"BLUE\"}", Paint.class)
+    System.out.println(pBack.color + "/" + pBack.spare)
+
+    try {
+      gson.fromJson("{\"color\":\"PURPLE\"}", Paint.class)
+    } catch (JsonParseException e) {
+      System.out.println("rejected: " + e.getMessage())
+    }
+  }
+}

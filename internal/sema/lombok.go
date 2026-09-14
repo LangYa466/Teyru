@@ -227,6 +227,9 @@ func (c *Checker) applyLombok(cl *ast.Class) {
 	classAnnos := cd.Annos
 	accessors := c.accessorsOf(classAnnos)
 
+	// ---- what the member annotations mean, before anything reads them
+	c.lombokMemberFlags(cl)
+
 	// ---- class-level structural annotations
 	if a := hasAnno(classAnnos, "UtilityClass"); a != nil {
 		c.lombokUtilityClass(cl)
@@ -419,6 +422,60 @@ func delegateAnnoOf(cl *ast.Class, field string) *ast.Annotation {
 	return nil
 }
 
+// lombokMemberFlags records what the member annotations mean.
+//
+// They are read by the generators -- a setter checks @NonNull, a constructor
+// collects @NonNull fields, a builder reads @Singular and @ObtainVia, a
+// generator steps aside for a @Tolerate name -- so they have to be set before
+// any of them runs. They used to be set in the middle of the same pass that
+// generates the accessors, which meant `@Setter @NonNull String label` produced
+// a setter with no null check, and @Data's required-args constructor had no
+// @NonNull field to collect.
+func (c *Checker) lombokMemberFlags(cl *ast.Class) {
+	if cl.Decl == nil {
+		return
+	}
+	for _, mem := range cl.Decl.Members {
+		if md, ok := mem.(*ast.MethodDecl); ok {
+			if md.Sym != nil && hasAnno(md.Annos, "Tolerate") != nil {
+				md.Sym.Tolerate = true
+			}
+			continue
+		}
+		d, ok := mem.(*ast.FieldDecl)
+		if !ok {
+			continue
+		}
+		for _, vd := range d.Vars {
+			f := vd.Fld
+			if f == nil {
+				continue
+			}
+			if hasAnno(d.Annos, "NonNull") != nil {
+				f.NonNull = true
+			}
+			if a := hasAnno(d.Annos, "ObtainVia"); a != nil {
+				f.ObtainViaField = annoString(a, "field")
+				f.ObtainViaMethod = annoString(a, "method")
+				f.ObtainViaStatic = annoBool(a, "isStatic", false)
+			}
+			if a := hasAnno(d.Annos, "Singular"); a != nil {
+				f.Singular = true
+				f.SingularName = annoValueString(a)
+				if f.SingularName == "" {
+					f.SingularName = annoString(a, "value")
+				}
+			}
+			if hasAnno(d.Annos, "Include") != nil {
+				f.Include = true
+			}
+			if hasAnno(d.Annos, "Exclude") != nil {
+				f.Exclude = true
+			}
+		}
+	}
+}
+
 // lombokMembers handles annotations placed on individual members.
 func (c *Checker) lombokMembers(cl *ast.Class, accessors accessorsOptions, classAnnos []*ast.Annotation) {
 	cd := cl.Decl
@@ -436,20 +493,6 @@ func (c *Checker) lombokMembers(cl *ast.Class, accessors accessorsOptions, class
 				if a := hasAnno(d.Annos, "Setter"); a != nil {
 					c.lombokSetter(cl, []*ast.Field{f}, onSiteOf(a, d.Annos), accessors)
 				}
-				if hasAnno(d.Annos, "NonNull") != nil {
-					f.NonNull = true
-				}
-				if a := hasAnno(d.Annos, "ObtainVia"); a != nil {
-					f.ObtainViaField = annoString(a, "field")
-					f.ObtainViaMethod = annoString(a, "method")
-				}
-				if a := hasAnno(d.Annos, "Singular"); a != nil {
-					f.Singular = true
-					f.SingularName = annoValueString(a)
-					if f.SingularName == "" {
-						f.SingularName = annoString(a, "value")
-					}
-				}
 				if a := hasAnno(d.Annos, "With"); a != nil {
 					c.lombokWith(cl, f, onSiteOf(a, d.Annos))
 				}
@@ -462,6 +505,11 @@ func (c *Checker) lombokMembers(cl *ast.Class, accessors accessorsOptions, class
 			if d.Sym == nil {
 				continue
 			}
+			// @NonNull on a parameter of a method or constructor is a check at
+			// the top of the body. It was looked for on the method instead, so
+			// the annotation only worked on a method that also carried it --
+			// which is not how it is written, and not what it means.
+			c.lombokNonNullParams(d)
 			if hasAnno(d.Annos, "SneakyThrows") != nil {
 				c.lombokSneakyThrows(d)
 			}
@@ -471,25 +519,9 @@ func (c *Checker) lombokMembers(cl *ast.Class, accessors accessorsOptions, class
 			if a := hasAnno(d.Annos, "Locked"); a != nil {
 				c.lombokLocked(cl, d, a)
 			}
-			if hasAnno(d.Annos, "NonNull") != nil {
-				c.lombokNonNullParams(d)
-			}
 			if a := hasAnno(d.Annos, "Builder"); a != nil {
 				c.lombokMethodBuilder(cl, d, a)
 			}
-			if hasAnno(d.Annos, "Tolerate") != nil {
-				d.Sym.Tolerate = true
-			}
-		}
-	}
-	// @NonNull on parameters
-	for _, mem := range cd.Members {
-		md, ok := mem.(*ast.MethodDecl)
-		if !ok {
-			continue
-		}
-		if hasAnno(md.Annos, "NonNull") != nil {
-			c.lombokNonNullParams(md)
 		}
 	}
 }
@@ -517,6 +549,12 @@ func (c *Checker) lombokGetter(cl *ast.Class, fields []*ast.Field, s onSite, o a
 			fmods |= ast.ModStatic
 		}
 		name := getterName(f, o)
+		// Lombok does not generate an accessor whose name is already taken,
+		// whatever the parameter types are -- which is why @Tolerate exists:
+		// it makes lombok treat that member as if it were not there.
+		if hasMethodDecl(cl.Decl, name, 0) && !toleratedMember(cl, name) {
+			continue
+		}
 		if lazy {
 			c.lombokLazyGetter(cl, f, fmods, name, s)
 			continue
@@ -579,6 +617,9 @@ func (c *Checker) lombokSetter(cl *ast.Class, fields []*ast.Field, s onSite, o a
 		if f.Mods.Has(ast.ModFinal) {
 			continue
 		}
+		if hasMethodDecl(cl.Decl, setterName(f, o), 1) && !toleratedMember(cl, setterName(f, o)) {
+			continue
+		}
 		mmods := mods
 		if f.Mods.Has(ast.ModStatic) {
 			mmods |= ast.ModStatic
@@ -605,8 +646,11 @@ func (c *Checker) lombokSetter(cl *ast.Class, fields []*ast.Field, s onSite, o a
 // lombokLazyGetter implements @Getter(lazy = true): the value is computed once
 // and cached in a synthesized holder field.
 func (c *Checker) lombokLazyGetter(cl *ast.Class, f *ast.Field, mods ast.Mods, name string, s onSite) {
+	// The holder is the field's boxed type, because "not computed yet" is told
+	// apart from "computed" by null: an int holder has no null to test, and the
+	// getter for one did not compile at all.
 	holder := &ast.Field{
-		Name: "__lazy$" + f.Name, Type: f.Type,
+		Name: "__lazy$" + f.Name, Type: c.boxed(f.Type),
 		Mods: ast.ModPrivate | ast.ModVolatile, Pos: f.Pos, Storage: true,
 		Anno: "@Getter(lazy)",
 	}
@@ -614,6 +658,10 @@ func (c *Checker) lombokLazyGetter(cl *ast.Class, f *ast.Field, mods ast.Mods, n
 	var init ast.Expr = nullLit()
 	if f.Decl != nil && f.Decl.Init != nil {
 		init = f.Decl.Init
+		// Lombok moves the initializer into the getter: the field keeps no
+		// initializer of its own, or the constructor would evaluate it as well
+		// and the lazy value would be computed twice.
+		f.Decl.Init = nil
 	}
 	body := blockOf(
 		ifOf(isNull(thisField(holder)),
@@ -686,7 +734,7 @@ func (c *Checker) toStringFields(cl *ast.Class, a *ast.Annotation) []*ast.Field 
 			}
 			continue
 		}
-		if exclude[f.Name] {
+		if exclude[f.Name] || f.Exclude {
 			continue
 		}
 		if only && !f.Include {
@@ -711,6 +759,7 @@ func (c *Checker) lombokEqualsHashCode(cl *ast.Class, s onSite) {
 		ofSet[n] = true
 	}
 	callSuper := annoBool(a, "callSuper", false)
+	only := annoBool(a, "onlyExplicitlyIncluded", false)
 	var fields []*ast.Field
 	for _, f := range c.instanceAndStaticFields(cl) {
 		if f.Mods.Has(ast.ModStatic) {
@@ -722,9 +771,15 @@ func (c *Checker) lombokEqualsHashCode(cl *ast.Class, s onSite) {
 			}
 			continue
 		}
-		if !exclude[f.Name] {
-			fields = append(fields, f)
+		if exclude[f.Name] || f.Exclude {
+			continue
 		}
+		// onlyExplicitlyIncluded: the fields marked @EqualsAndHashCode.Include
+		// (or @ToString.Include) are the ones that count
+		if only && !f.Include {
+			continue
+		}
+		fields = append(fields, f)
 	}
 	if !hasMethodDecl(cl.Decl, "equals", 1) {
 		c.lombokEquals(cl, fields, callSuper, s)
@@ -916,7 +971,9 @@ func (c *Checker) lombokData(cl *ast.Class, o accessorsOptions) {
 }
 
 func (c *Checker) lombokValue(cl *ast.Class, o accessorsOptions, a *ast.Annotation) {
+	wasFinal := cl.Mods.Has(ast.ModFinal)
 	cl.Mods |= ast.ModFinal
+	c.checkLombokFinal(cl, wasFinal)
 	for _, f := range c.instanceAndStaticFields(cl) {
 		f.Mods |= ast.ModPrivate | ast.ModFinal
 	}
@@ -941,7 +998,9 @@ func (c *Checker) lombokEqualsHashCodeNoAnno(cl *ast.Class) {
 }
 
 func (c *Checker) lombokUtilityClass(cl *ast.Class) {
+	wasFinal := cl.Mods.Has(ast.ModFinal)
 	cl.Mods |= ast.ModFinal
+	c.checkLombokFinal(cl, wasFinal)
 	for _, f := range cl.Fields {
 		f.Mods |= ast.ModStatic
 	}
@@ -968,6 +1027,27 @@ func (c *Checker) lombokFieldDefaults(cl *ast.Class, a *ast.Annotation) {
 		if makeFinal {
 			f.Mods |= ast.ModFinal
 		}
+	}
+}
+
+// checkLombokFinal reports the classes that have just been made final by an
+// annotation, which the check in resolveHeader cannot see: that one runs before
+// Lombok, so `class Ext extends V` compiled for a @Value or @UtilityClass class
+// where Lombok says `cannot inherit from final V`.
+func (c *Checker) checkLombokFinal(cl *ast.Class, wasFinal bool) {
+	if wasFinal {
+		// the modifier was written by hand and resolveHeader already read it
+		return
+	}
+	for _, sub := range cl.Subclasses {
+		if sub.Decl == nil {
+			continue
+		}
+		pos := sub.Decl.Pos
+		if sub.Kind == ast.KindClass && len(sub.Decl.Extends) > 0 {
+			pos = sub.Decl.Extends[0].Pos
+		}
+		c.errf(pos, "TY-TYP-0007", "cannot extend final class %s", cl.Name)
 	}
 }
 
@@ -1036,7 +1116,7 @@ func (c *Checker) lombokBuilderFor(cl *ast.Class, a *ast.Annotation, classAnnos 
 			exprStmtOf(assignTo(sel(&ast.This{ExprBase: ast.ExprBase{Pos: pos()}}, f.Name), id("value"))),
 			returnOf(&ast.This{ExprBase: ast.ExprBase{Pos: pos(), T: builderType}}),
 		)
-		bm := c.newSynthMethod(b, setterPrefix+f.Name, ast.ModPublic, builderType, []ast.Type{f.Type}, []string{"value"}, body, "")
+		bm := c.newSynthMethod(b, builderSetterName(f.Name, setterPrefix), ast.ModPublic, builderType, []ast.Type{f.Type}, []string{"value"}, body, "")
 		bm.Anno = "@Builder"
 		c.addSynthMethod(b, bm)
 	}
@@ -1080,7 +1160,7 @@ func (c *Checker) lombokBuilderFor(cl *ast.Class, a *ast.Annotation, classAnnos 
 					exprStmtOf(callNamed(id(local), singularAllName(f, setterPrefix), src)), nil))
 				continue
 			}
-			stmts = append(stmts, exprStmtOf(callNamed(id(local), setterPrefix+f.Name, src)))
+			stmts = append(stmts, exprStmtOf(callNamed(id(local), builderSetterName(f.Name, setterPrefix), src)))
 		}
 		stmts = append(stmts, returnOf(id(local)))
 		tb := c.newSynthMethod(cl, "toBuilder", ast.ModPublic, builderType, nil, nil,
@@ -1107,18 +1187,17 @@ func (c *Checker) lombokBuilderFor(cl *ast.Class, a *ast.Annotation, classAnnos 
 	c.layout(b)
 }
 
-// obtainExpr is how the builder reads a field for the object it builds:
-// normally the builder's own field, but @Builder.ObtainVia can redirect it to
-// another field or to a method.
+// obtainExpr is how the builder reads a value for the object it builds: its
+// own field, which the builder's setter method wrote.
+//
+// @Builder.ObtainVia is deliberately not consulted here. It says how a value is
+// obtained "given an instance" (Lombok's javadoc), which is the toBuilder()
+// direction -- build() reads what the builder was given, and only toBuilder
+// reads an existing object. Reading it here made
+// `@Builder.ObtainVia(method = "doubled")` compile against the builder class,
+// which has no such method.
 func (c *Checker) obtainExpr(f *ast.Field) ast.Expr {
-	this := &ast.This{ExprBase: ast.ExprBase{Pos: pos()}}
-	switch {
-	case f.ObtainViaMethod != "":
-		return callNamed(this, f.ObtainViaMethod)
-	case f.ObtainViaField != "":
-		return sel(this, f.ObtainViaField)
-	}
-	return sel(this, f.Name)
+	return sel(&ast.This{ExprBase: ast.ExprBase{Pos: pos()}}, f.Name)
 }
 
 // obtainSourceExpr is how toBuilder reads a field of the instance it copies:
@@ -1128,6 +1207,14 @@ func (c *Checker) obtainExpr(f *ast.Field) ast.Expr {
 func (c *Checker) obtainSourceExpr(f *ast.Field) ast.Expr {
 	src := &ast.This{ExprBase: ast.ExprBase{Pos: pos()}}
 	switch {
+	case f.ObtainViaMethod != "" && f.ObtainViaStatic:
+		// `SelfType.method(this)`: a static method of the type being built,
+		// handed the instance to read the value from
+		var recv ast.Expr
+		if f.Owner != nil {
+			recv = id(f.Owner.Full)
+		}
+		return callNamed(recv, f.ObtainViaMethod, src)
 	case f.ObtainViaMethod != "":
 		return callNamed(src, f.ObtainViaMethod)
 	case f.ObtainViaField != "":
@@ -1157,6 +1244,37 @@ func singularKind(t ast.Type) (elem []ast.Type, kind string) {
 	return nil, ""
 }
 
+// toleratedMember reports whether a method or constructor of that name carries
+// @Tolerate.
+//
+// @Tolerate makes Lombok "act as if it does not exist" (its own words), so a
+// generator that would otherwise step aside for the name generates its own
+// member after all: `@Setter private Date date` plus `@Tolerate public void
+// setDate(String)` ends up as two overloads, which is the case Lombok documents
+// the annotation with.
+func toleratedMember(cl *ast.Class, name string) bool {
+	if cl.Decl == nil {
+		return false
+	}
+	for _, mem := range cl.Decl.Members {
+		md, ok := mem.(*ast.MethodDecl)
+		if ok && md.Name == name && hasAnno(md.Annos, "Tolerate") != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// builderSetterName is the name of a builder's setter for one field: the field
+// name itself, or the prefix and the name with its first letter raised, which
+// is what Lombok's setterPrefix asks for (`with` and `name` make `withName`).
+func builderSetterName(name, setterPrefix string) string {
+	if setterPrefix == "" {
+		return name
+	}
+	return setterPrefix + util.Capitalize(name)
+}
+
 // singularAdderName is the name of the builder method that accumulates a
 // @Singular field one element at a time: addXs by default, the name given to
 // @Singular("name"), or the field name itself for a Map.
@@ -1168,7 +1286,12 @@ func singularAdderName(f *ast.Field, setterPrefix string) string {
 	if _, kind := singularKind(f.Type); kind == "map" {
 		adder = f.Name
 	}
-	return setterPrefix + adder
+	if setterPrefix != "" {
+		// Lombok's setterPrefix is a prefix on a *setter* name: with "with",
+		// `name` becomes `withName`, not `withname`.
+		return setterPrefix + util.Capitalize(adder)
+	}
+	return adder
 }
 
 // singularAllName is the builder method that takes a whole collection of a
@@ -1436,6 +1559,11 @@ func (c *Checker) newBuilderClass(owner *ast.Class, name string) *ast.Class {
 	b.Decl = cd
 	b.File = owner.File
 	b.Owner = owner
+	// The builder is a nested class of the annotated one, and Java grants a
+	// nested class access to its nest's private members: a builder for a class
+	// with a private constructor has to be able to call it, which is what the
+	// nest test reads. It has no enclosing instance, so Inner stays false.
+	b.Outer = owner
 	b.Mods = cd.Mods
 	b.Builtin = owner.Builtin
 	cd.Sym = b
@@ -1450,7 +1578,19 @@ func (c *Checker) newBuilderClass(owner *ast.Class, name string) *ast.Class {
 func (c *Checker) lombokMethodBuilder(cl *ast.Class, d *ast.MethodDecl, a *ast.Annotation) {
 	builderName := annoString(a, "builderClassName")
 	if builderName == "" {
+		// Lombok names the builder after the *return type* of the target, so
+		// `Box of(...)` in another class gets BoxBuilder, not ThatClassBuilder.
 		builderName = cl.Name + "Builder"
+		if d.Sym != nil {
+			switch rt := d.Sym.Result.(type) {
+			case *ast.ClassType:
+				builderName = rt.Class.Name + "Builder"
+			case *ast.PrimType:
+				if rt.Kind == ast.Void {
+					builderName = "VoidBuilder"
+				}
+			}
+		}
 	}
 	buildName := annoString(a, "buildMethodName")
 	if buildName == "" {
@@ -1487,8 +1627,16 @@ func (c *Checker) lombokMethodBuilder(cl *ast.Class, d *ast.MethodDecl, a *ast.A
 	var buildExpr ast.Expr
 	if d.IsCtor {
 		buildExpr = newObj(cl, args...)
+	} else if d.Sym != nil && d.Sym.IsStatic() {
+		// `Cl.method(args)`: the builder is a nested class, and an unqualified
+		// call resolves inside it against the class it is nested in, which is
+		// where the annotated method lives.
+		buildExpr = callNew(id(cl.Full), d.Name, args...)
 	} else {
-		buildExpr = callNew(nil, d.Name, args...)
+		// An instance method is called on a fresh instance of the class that
+		// declares it, which is what Lombok does: the builder has no enclosing
+		// instance to call it on (it is created by a static factory).
+		buildExpr = callNew(newObj(cl), d.Name, args...)
 	}
 	result := d.Sym.Result
 	if d.IsCtor {
@@ -1661,8 +1809,16 @@ func (c *Checker) lombokStandardException(cl *ast.Class) {
 		Result: ast.TVoid, Params: []ast.Type{strT, thr}, ParamNames: []string{"message", "cause"},
 		Body: blockOf(exprStmtOf(superCall("<init>", id("message"), id("cause")))), Pos: pos()})
 	c.addSynthCtor(cl, &ast.Method{Name: "<init>", Owner: cl, IsCtor: true, Mods: ast.ModPublic,
-		Result: ast.TVoid, Params: []ast.Type{thr}, ParamNames: []string{"cause"},
-		Body: blockOf(exprStmtOf(superCall("<init>", id("cause")))), Pos: pos()})
+		Result: ast.TVoid, Params: []ast.Type{thr}, ParamNames: []string{"cause"}, Pos: pos(),
+		Body: blockOf(exprStmtOf(superCall("<init>",
+			// Lombok's cause-only constructor copies the message out of the
+			// cause: `super(cause)` leaves getMessage() null, which is what a
+			// catch block printing the message then shows.
+			&ast.Cond{ExprBase: ast.ExprBase{Pos: pos()},
+				C: binop("!=", id("cause"), nullLit()),
+				X: callNamed(id("cause"), "getMessage"),
+				Y: nullLit()},
+			id("cause"))))})
 }
 
 func (c *Checker) lombokFieldNameConstants(cl *ast.Class, a *ast.Annotation) {

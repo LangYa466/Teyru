@@ -33,22 +33,22 @@ System.out.println(p)                  // Person(name=ada, age=36)
 
 | 註解 | 狀態 | 說明 |
 |---|---|---|
-| `@Getter` | ⚠️ 部分 | 含 `AccessLevel`（只讀位置形式）、`@Accessors` 影響命名；`lazy = true` 的行為與 Lombok 不同，且原生型別不支援（見 §2） |
-| `@Setter` | ✅ 完整 | 含 `AccessLevel`（只讀位置形式）、`@Accessors(chain)`；**不會**像 Lombok 那樣為 `@NonNull` 欄位補上檢查（見 §3） |
-| `@ToString` | ⚠️ 部分 | `of`／`exclude`／`callSuper`／`includeFieldNames`；`onlyExplicitlyIncluded` 無效，`callSuper` 的格式也與 Lombok 不同（見 §2） |
-| `@EqualsAndHashCode` | ⚠️ 部分 | `of`／`exclude`／`callSuper`；`onlyExplicitlyIncluded` 無效，`hashCode` 的常數與 `canEqual` 也與 Lombok 不同（見 §2） |
+| `@Getter` | ⚠️ 部分 | 含 `AccessLevel`（只讀位置形式）、`@Accessors` 影響命名；`lazy = true` 在第一次讀取時算一次並快取（原生型別也支援），但沒有 Lombok 的執行緒安全 |
+| `@Setter` | ✅ 完整 | 含 `AccessLevel`（只讀位置形式）、`@Accessors(chain)`、`@NonNull` 欄位的檢查；名稱已經被佔用時不產生（Lombok 同） |
+| `@ToString` | ⚠️ 部分 | `of`／`exclude`／`callSuper`／`includeFieldNames`／`onlyExplicitlyIncluded`（搭配欄位上的 `@ToString.Include`／`@ToString.Exclude`）；`callSuper` 的格式與 Lombok 不同（見 §2） |
+| `@EqualsAndHashCode` | ⚠️ 部分 | `of`／`exclude`／`callSuper`／`onlyExplicitlyIncluded`（`@EqualsAndHashCode.Include`／`@EqualsAndHashCode.Exclude`）；`hashCode` 的常數與 `canEqual` 與 Lombok 不同（見 §2） |
 | `@NoArgsConstructor` | ⚠️ 部分 | `staticName` 會產生靜態工廠；`access` 只讀位置形式，而且類別沒有手寫建構子時產生的那一個會被隱含的無參數建構子擋掉，等於沒作用（見 §3） |
 | `@RequiredArgsConstructor` | ✅ 完整 | final（無初始值）與 `@NonNull` 欄位 |
 | `@AllArgsConstructor` | ✅ 完整 | 略過已有初始值的 final 欄位 |
-| `@Data` | ⚠️ 部分 | getter + setter + `@RequiredArgsConstructor` + `@ToString` + `@EqualsAndHashCode`；它的隱含建構子不收 `@NonNull` 欄位（Lombok 會，見 §2） |
-| `@Value` | ⚠️ 部分 | private final 欄位、getter、全參數建構子、`staticConstructor`；**類別攔不住繼承**（見 §3） |
-| `@Builder` | ⚠️ 部分 | 類別與建構子；`builderMethodName`／`buildMethodName`／`builderClassName`／`toBuilder`／`@Builder.Default`／`@Builder.ObtainVia(field=…)`。`setterPrefix` 不會把首字母大寫，方法上的 `@Builder` 與 `ObtainVia(method=…)` 編譯不過（見 §3） |
-| `@NonNull` | ⚠️ 部分 | 對欄位有效：標了 `@NonNull` 又被 `@RequiredArgsConstructor`／`@AllArgsConstructor` 收進建構子時會插檢查。手寫的參數要**方法本身**也標 `@NonNull` 才檢查（只標在參數上不算），手寫的建構子與 `@Setter` 產生的 setter 都不檢查 |
+| `@Data` | ⚠️ 部分 | getter + setter + `@RequiredArgsConstructor` + `@ToString` + `@EqualsAndHashCode`；隱含建構子收 `@NonNull` 欄位並在裡面插檢查 |
+| `@Value` | ⚠️ 部分 | private final 欄位、getter、全參數建構子、`staticConstructor`；繼承會被 `TY-TYP-0007` 擋下 |
+| `@Builder` | ⚠️ 部分 | 類別、建構子與方法；`builderMethodName`／`buildMethodName`／`builderClassName`／`toBuilder`／`@Builder.Default`／`@Builder.ObtainVia`／`setterPrefix`（首字母會大寫：`with` 加 `name` 是 `withName`） |
+| `@NonNull` | ⚠️ 部分 | 欄位與參數都檢查：欄位被收進產生的建構子時插檢查，`@Setter` 產生的 setter 也檢查，手寫方法與建構子的參數（只標在參數上即可）同樣檢查。Teyru 沒有欄位寫入攔截，所以直接指派欄位不檢查（見 §3） |
 | `@With` | ⚠️ 部分 | 欄位上的 `@With` 產生 `withX(T)`，以全參數建構子複製；寫在類別上不會替所有欄位產生（Lombok 會） |
 | `@Accessors` | ⚠️ 部分 | `chain`／`fluent`／`prefix`；`fluent = true` 不會像 Lombok 那樣連帶把 setter 變成可鏈式（要另外寫 `chain = true`，見 §3） |
 | `@FieldDefaults` | ✅ 完整 | `level`／`makeFinal` |
-| `@UtilityClass` | ⚠️ 部分 | 建構子 private、成員 static；`extends` 這個類別仍然編得過（見 §3 第 7 點） |
-| `@StandardException` | ⚠️ 部分 | 產生 4 個標準例外界建構子；`E(Throwable)` 沒有像 Lombok 那樣把 `cause.getMessage()` 當成自己的訊息（見 §2） |
+| `@UtilityClass` | ⚠️ 部分 | 建構子 private、成員 static；繼承會被 `TY-TYP-0007` 擋下 |
+| `@StandardException` | ⚠️ 部分 | 產生 4 個標準例外界建構子；`E(Throwable)` 用 `cause.getMessage()` 當訊息。差異：全參數建構子是 `super(message, cause)`，Lombok 是 `super(message)` 加 `initCause(cause)` |
 | `@Cleanup` | ✅ 完整 | 展開為 try-with-resources，任何離開路徑都會 close |
 | `@SneakyThrows` | ✅ 完整 | 展開為 try/catch(Throwable) 後重拋 |
 | `@Synchronized` | ✅ 完整 | 方法本體包進 synchronized；靜態方法用產生的 `__lock$<類別名>` 欄位 |
@@ -56,8 +56,8 @@ System.out.println(p)                  // Person(name=ada, age=36)
 | `@ExtensionMethod` | ✅ 完整 | 找不到方法時改寫為 `Ext.method(receiver, ...)` |
 | `@FieldNameConstants` | ⚠️ 部分 | 產生巢狀 `Fields` 類別；`prefix` 是加在常數的**值**上，不是加在名稱上，與 Lombok（1.18.4 以前）相反 |
 | `@Delegate` | ✅ 完整 | 為欄位型別的公開方法產生委派方法 |
-| `@Helper` | ⚠️ 部分 | 只是把類別標成 static，加與不加的行為完全相同；Lombok 真正要解的「方法內的區域類別」Teyru 剖析不了（見 §3） |
-| `@Tolerate` | ⚠️ 部分 | 註解收得下，但沒有任何作用（見 §3） |
+| `@Helper` | ✅ 完整 | 方法內的區域類別：產生實例，宣告之後同名的未限定呼叫都走它（實例必須有無參數建構子） |
+| `@Tolerate` | ✅ 完整 | 被標的成員對產生器「不存在」：`@Setter private Date date` 加上 `@Tolerate public void setDate(String)` 會同時有兩個多載 |
 | `@Locked` | ✅ 完整 | 以具名鎖欄位包住方法本體 |
 | `@NonFinal` | ✅ 完整 | 移除 final |
 | `@PackagePrivate` | ✅ 完整 | 移除存取修飾符 |
@@ -65,21 +65,24 @@ System.out.println(p)                  // Person(name=ada, age=36)
 | `@SuperBuilder` | ✅ 完整 | 建構子鏈上的所有欄位都在同一個 builder；見 §4 |
 | `@Singular` | ✅ 完整 | 逐項加入、整批加入、清除、`build()` 取得副本；`@Singular("name")` 可改名；見 §4 |
 | `@Jacksonized` | ❌ 不適用 | 沒有 Jackson，註解被接受但不產生任何東西 |
-| `@Builder.ObtainVia` | ⚠️ 部分 | `field` 形式可用；`method` 形式編譯不過（見 §3） |
+| `@Builder.ObtainVia` | ✅ 完整 | `field`／`method`／`isStatic`，由 `toBuilder` 讀取——與 Lombok 相同，`build()` 讀的是 builder 自己的欄位 |
 | `@onMethod_`／`@onParam_`／`@onConstructor_` | ✅ 完整 | 註解被複製到產生的 getter／setter 參數／建構子上（見 §3.5） |
 | `@CustomLog` | ✅ 完整 | 讀 `lombok.config` 的 `lombok.log.custom.declaration`（見 §3.5） |
 
 「完整」的定義：`tests/programs/t16`–`t19`、`t54` 有對應的測試，`go test ./...` 會驗證輸出；
 `t55_lombok_every.teyru` 在一支程式裡把上表每一個 ✅ 的註解各用一次，輸出逐行比對；
-`t91_lombok_log.teyru` 涵蓋 `@Log`、`@CustomLog`（含 `lombok.config`）與 `@onX` 家族。
-標 ⚠️ 的是「收得下註解、但行為與 Lombok 有落差」的列。`@Helper` 與 `@Tolerate` 在 `t55`
-裡各寫了一次卻都沒有作用——`t55` 的用法剛好不觸發差異，所以那兩列的 ✅ 是假的。
-（寫 `t55` 時才發現 `@Builder.Default`、`@StandardException`、回傳值的 `@Synchronized`
-三個「文件說完成、實際沒測過」的 bug，已修。）
+`t91_lombok_log.teyru` 涵蓋 `@Log`、`@CustomLog`（含 `lombok.config`）與 `@onX` 家族；
+`t144_lombok_parity.teyru` 涵蓋 `@NonNull` 的各條路徑、`@Tolerate`、
+`onlyExplicitlyIncluded`、`setterPrefix`、方法上的 `@Builder`、`@Builder.ObtainVia`、
+`@Helper`、`@Getter(lazy = true)` 與 `@StandardException`。
+標 ⚠️ 的是「收得下註解、但行為與 Lombok 有落差」的列。
 
-同樣的理由，⚠️ 這幾列是逐條寫程式、和真的 Lombok 對跑之後才標上的：`t55` 的
-`@Data` 範例剛好沒有 `@NonNull` 欄位，`@NoArgsConstructor` 也剛好是公開的形式，
-所以舊表把它們列成 ✅。
+這張表是逐條寫程式、拿 Lombok 的說明與原始碼對過之後才標的：`@Builder.ObtainVia`
+以前在 `build()` 裡被讀取（Lombok 只在 `toBuilder` 讀它），`@Helper` 與 `@Tolerate`
+以前只是收下註解，`@Getter(lazy = true)` 的初始值會被算兩次且原生型別編譯不過，
+`@Data` 的建構子不收 `@NonNull` 欄位，`@Setter` 產生的 setter 不插檢查，
+`@Value`／`@UtilityClass` 的 `final` 攔不住繼承，`@StandardException` 的
+`E(Throwable)` 不帶訊息——這些都已照 Lombok 的行為修掉，並且各有測試。
 
 ---
 
@@ -144,36 +147,33 @@ class Person {
 
 - `@Getter`／`@Setter` 必須與 `@Data`、`@Value` 或類別層級註解搭配才會涵蓋所有欄位；
   寫在單一欄位上只影響該欄位。
-- `@Data` 產生的建構子是 `@RequiredArgsConstructor`（final 且無初始值的欄位）。若類別
-  沒有這類欄位，就是無參數建構子；要全參數建構子請同時加 `@AllArgsConstructor`。
-  `@Data` **不會**把 `@NonNull` 欄位收進這個建構子（Lombok 會，並在裡面插檢查）：
-  `@Data class C { @NonNull String s }` 只剩無參數建構子，`new C("x")` 是
-  `TY-TYP-0072`。要那條檢查就自己加 `@RequiredArgsConstructor` 或
-  `@AllArgsConstructor`——這兩個標註收 `@NonNull` 欄位是正常的。
+- `@Data` 產生的建構子是 `@RequiredArgsConstructor`（final 且無初始值的欄位，加上
+  標了 `@NonNull` 的欄位，與 Lombok 相同）。若類別沒有這類欄位，就是無參數建構子；
+  要全參數建構子請同時加 `@AllArgsConstructor`。
 - `@Builder` **不會**產生 getter，與 Lombok 相同。
-- `@Getter(lazy = true)` 的初始值會被算**兩次**：建構子裡先算一次，第一次讀取時再算
-  一次，之後才快取。Lombok 只在第一次讀取時算一次。持有欄位的型別必須是可為 null 的
-  參考型別，`int` 之類的原生型別編譯不過。
+- `@Getter(lazy = true)` 把欄位的初始值搬進 getter：建構子不再算它，第一次讀取算一次
+  之後快取（與 Lombok 相同）。持有值是 boxed 的，所以原生型別也可以。差別是沒有
+  加鎖：這個語言沒有執行緒。
 - `@EqualsAndHashCode` 的 `hashCode` 用 31 與 0（Lombok 用 59 與 43），欄位順序照宣告
   順序（Lombok 會排序），而且不產生 `canEqual`——所以父類別與子類別只要欄位相同就相等，
   Lombok 會說不相等。
 - `@ToString(callSuper = true)` 產生的字串是 `Child(c=2; super=Base(b=1))`，
   Lombok 是 `Child(super=Base(b=1), c=2)`：自己的欄位先寫，super 那一段在最後。
-- `@StandardException` 的 `E(Throwable)` 直接 `super(cause)`，訊息留成 `null`；
-  Lombok 是 `super(cause == null ? null : cause.getMessage(), cause)`，所以
-  `new E(new RuntimeException("c")).getMessage()` 在 Lombok 是 `c`，在這裡是 `null`。
+- `@StandardException` 的 `E(Throwable)` 是
+  `super(cause == null ? null : cause.getMessage(), cause)`，所以
+  `new E(new RuntimeException("c")).getMessage()` 是 `c`（與 Lombok 相同）。全參數
+  建構子走 `super(message, cause)`；Lombok 是 `super(message)` 之後
+  `initCause(cause)`，差別只在「先明確表示沒有 cause、之後還能 initCause」這個細節。
 
 ---
 
 ## 3. 與 Lombok 的差異（重要）
 
 1. **沒有 annotation processor。** 展開發生在編譯器內部，`javac` 完全不參與。
-2. **`@NonNull` 主要作用在欄位上。** 欄位標了 `@NonNull`、又被明寫的
-   `@RequiredArgsConstructor`／`@AllArgsConstructor` 收進建構子時才插入檢查
-   （`@Data` 隱含的那一個不算，見 §2）。手寫的參數是另一條路：`@NonNull` 要標在
-   **方法**上才會去看參數，只標在參數上（Lombok 的正規寫法）不會有任何檢查。
-   `@Setter` 產生的 setter 與手寫的建構子也都不檢查。
-   Teyru 沒有欄位寫入攔截，Lombok 對「直接指派欄位」與 setter 的檢查在此都不適用。
+2. **`@NonNull` 沒有欄位寫入攔截。** 欄位標了 `@NonNull`、又被收進產生的建構子時會
+   插檢查，`@Setter` 產生的 setter、手寫方法與建構子的參數（只標在參數上即可）也都
+   會插檢查；Lombok 對「直接指派欄位」也檢查，但 Teyru 的欄位讀寫不經過方法，
+   攔不到。這條限制在 Lombok 也無法用 setter 表達。
 3. **`@Singular` 傳的是可變副本**，不是 `Collections.unmodifiableList` 包裝（見 §4）。
 4. **`@SuperBuilder` 產生一個攤平的 builder**，不是 builder 繼承鏈（見 §4）。
 5. **`@onX` 註解只會被複製，不會被執行。** 註解字面上會掛到產生出來的成員上，
@@ -183,14 +183,18 @@ class Person {
    （`@CustomLog` 用）會被讀取；其餘鍵與 `config.stopBubbling` 都不讀，搜尋一律
    走到檔案系統根目錄。
 7. **`@Value` 的欄位一定是 private final**；若欄位已經有初始值，建構子不會再收它。
-   但 `class Ext extends V` 編得過（Lombok 會說 `cannot inherit from final V`）：
-   `final` 是在檢查繼承之後才標上去的，所以攔不住。`@UtilityClass` 的 `final` 同理。
-8. **`@Builder(setterPrefix = "with")` 產生的是 `withname`**，不會把首字母大寫
-   （Lombok 是 `withName`）；掛在方法上的 `@Builder` 與 `@Builder.ObtainVia(method = …)`
-   都編譯不過。
-9. **`@Tolerate` 沒有作用。** 撞名時的行為與它無關：建構子會直接跳過，方法則是
-   `TY-TYP-0011` 重複定義的錯誤。`@Helper` 也只是把類別標成 static，行為不變，
-   而 Lombok 真正要解的「方法內的區域類別」Teyru 剖析不了。
+   `final` 是在檢查繼承之後才由標註標上去的，所以 `class Ext extends V` 由一個
+   補做的檢查擋下（`TY-TYP-0007`，訊息與 Lombok 的 `cannot inherit from final V`
+   同義）。`@UtilityClass` 的 `final` 走同一條路。
+8. **`@Builder` 的 `setterPrefix` 會把名字的首字母大寫**：`setterPrefix = "with"`
+   加欄位 `name` 產生 `withName`（Lombok 相同）；沒有 prefix 時名字就是欄位名本身。
+   掛在方法上的 `@Builder` 會把目標方法的參數當成欄位，`build()` 呼叫該方法
+   （static 的用 `類別.方法(...)`，實例方法用一個新實例）；`@Builder.ObtainVia` 由
+   `toBuilder` 讀取，`method`／`isStatic` 兩種形式都支援。
+9. **`@Helper` 只認方法內的區域類別。** 那里會產生一個實例，宣告之後同名的未限定
+   呼叫都走它；寫在成員類別上（Lombok 也一樣）沒有作用，只是把類別標成 static。
+   `@Tolerate` 則是讓產生器「看不到」被標的成員：`@Setter private Date date` 加上
+   `@Tolerate public void setDate(String)` 之後兩個多載都在，與 Lombok 相同。
 10. **`@Accessors(fluent = true)` 不會順便開啟鏈式。** Lombok 的 `fluent` 會連帶把
     setter 的回傳值改成自身，所以 `new F().n(5).n()` 在 Lombok 成立；這裡的 setter
     仍是 `void`，要鏈式得自己加 `chain = true`。
@@ -341,4 +345,7 @@ class Logger {
 4. 產生的成員在 vtable 配置**之前**加入，因此它們和手寫成員一樣參與覆寫與多型。
 
 若同一個簽章已經存在（手寫或產生），**建構子**會被跳過，**方法**則是
-`TY-TYP-0011` 重複定義的編譯錯誤；`@Tolerate` 不會改變這件事，它只是被接受而已。
+`TY-TYP-0011` 重複定義的編譯錯誤；標了 `@Tolerate` 的成員例外——產生器把它當成
+不存在，於是照樣產生自己的那一份（Lombok 的行為：兩個多載，或是真正的重複定義
+錯誤）。`@Setter`／`@Getter` 產生的存取子另外會先看名字有沒有被佔用，佔用了就不
+產生，這也是 Lombok 的規則。

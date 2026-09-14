@@ -69,10 +69,11 @@ func (e *Emitter) emitSynthetic(cl *ast.Class, m *ast.Method) {
 		e.emitCtorBody(cl, m)
 	case "":
 		if m.Accessor != nil {
+			store := e.storageOf(m.Prop)
 			if m.Accessor.IsSet {
-				e.line("this->f_%s = a0;\n", mangle(m.Accessor.Prop.Name))
+				e.line("%s = a0;\n", store)
 			} else {
-				e.line("return this->f_%s;\n", mangle(m.Accessor.Prop.Name))
+				e.line("return %s;\n", store)
 			}
 		} else if m.Mods.Has(ast.ModNative) {
 			// A native method of a built-in class has no entry in the native

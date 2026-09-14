@@ -190,6 +190,21 @@ func TestDiagnostics(t *testing.T) {
 		// A final local with no initializer does get its one assignment, which
 		// is Java's rule, so the second is the one to reject.
 		{"finalLocalTwice", "class Main {\n  public static void main(String[] args) {\n    final int x\n    x = 3\n    x = 4\n    System.out.println(x)\n  }\n}\n", "TY-TYP-0057"},
+		// A property's storage field is private for every property, so the
+		// accessor's modifiers are what decides who may use it -- and the check
+		// was skipped for properties, which left a private one readable and
+		// writable from anywhere.
+		{"privateProperty", "class C {\n  private int v {\n    get { return field + 7 }\n    set { field = value }\n  }\n}\nclass Main {\n  public static void main(String[] args) {\n    C c = new C()\n    c.v = 3\n    System.out.println(c.v)\n  }\n}\n", "TY-TYP-0046"},
+		// A name resolves by its simple name whatever package is written in
+		// front of it, so this import used to be accepted and the List it
+		// really meant was picked anyway.
+		{"misspelledImport", "import java.utli.List\n\nclass Main {\n  public static void main(String[] args) {\n    List<String> l = new ArrayList<String>()\n    System.out.println(l.size())\n  }\n}\n", "TY-TYP-0115"},
+		{"unknownImport", "import com.example.Nothing\n\nclass Main {\n  public static void main(String[] args) {\n  }\n}\n", "TY-TYP-0115"},
+		// The `extends` check runs before Lombok, so @Value's `final` arrived
+		// too late to stop a subclass: `class Ext extends V` compiled where
+		// Lombok says "cannot inherit from final".
+		{"extendsLombokValue", "import lombok.Value\n\n@Value\nclass V {\n  int x\n}\nclass Ext extends V {\n  Ext() {\n    super(1)\n  }\n}\nclass Main {\n  public static void main(String[] args) {\n    System.out.println(new Ext().getX())\n  }\n}\n", "TY-TYP-0007"},
+		{"extendsLombokUtility", "import lombok.experimental.UtilityClass\n\n@UtilityClass\nclass U {\n  int f() { return 1 }\n}\nclass Ext extends U {\n}\nclass Main {\n  public static void main(String[] args) {\n    System.out.println(U.f())\n  }\n}\n", "TY-TYP-0007"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

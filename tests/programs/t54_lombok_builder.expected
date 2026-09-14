@@ -3,6 +3,7 @@ Animal(name=generic, legs=2)
 [apple, pear]
 1
 [urgent]
+A1 null 3
 A1 A1 3
 0 0 0
 [x, y]

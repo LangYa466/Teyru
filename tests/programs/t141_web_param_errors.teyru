@@ -1,0 +1,67 @@
+// What a request that does not fit its handler gets.
+//
+// Spring reads the parameter's type and converts the text of the request into
+// it; a value that does not fit is the client's mistake, so it is a 400 rather
+// than the 500 an uncaught parse failure would be. An enum parameter is matched
+// against the constants, and @RequestHeader's defaultValue is what the handler
+// sees when the request carries no such header.
+
+import teyru.RestController
+import teyru.RequestMapping
+import teyru.GetMapping
+import teyru.PathVariable
+import teyru.RequestParam
+import teyru.RequestHeader
+
+enum Color { RED, GREEN }
+
+@RestController
+@RequestMapping("/c")
+class Ctl {
+  @GetMapping("/color")
+  Color color() { return Color.RED }
+
+  @GetMapping("/bycolor/{c}")
+  String byColor(@PathVariable("c") Color c) { return "color=" + c }
+
+  @GetMapping("/{id}")
+  String byId(@PathVariable("id") int id) { return "id=" + id }
+
+  @GetMapping("/wide/{n}")
+  String wide(@PathVariable("n") Integer n) { return "n=" + (n + 1) }
+
+  @GetMapping("/hdr")
+  String hdr(@RequestHeader(value = "X-Trace", defaultValue = "none") String t) {
+    return "[" + t + "]"
+  }
+
+  @GetMapping("/q")
+  String q(@RequestParam(value = "limit", defaultValue = "10") int limit) {
+    return "limit=" + limit
+  }
+}
+
+class Main {
+  public static void main(String[] args) {
+    ApplicationContext ctx = Application.boot(args)
+    Router router = Application.routerFrom(ctx)
+    HttpServer server = new HttpServer(8080, router, ctx)
+
+    say(server, "GET /c/color HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "GET /c/bycolor/GREEN HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "GET /c/bycolor/PURPLE HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "GET /c/7 HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "GET /c/abc HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "GET /c/wide/4 HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "GET /c/wide/xx HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "GET /c/hdr HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "GET /c/hdr HTTP/1.1\r\nHost: x\r\nX-Trace: t9\r\n\r\n")
+    say(server, "GET /c/q HTTP/1.1\r\nHost: x\r\n\r\n")
+    say(server, "GET /c/q?limit=zz HTTP/1.1\r\nHost: x\r\n\r\n")
+  }
+
+  static void say(HttpServer server, String raw) {
+    HttpResponse res = server.handle(HttpParser.parse(raw))
+    System.out.println(res.status + " " + res.body)
+  }
+}

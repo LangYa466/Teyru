@@ -1,0 +1,11 @@
+200 "RED"
+200 color=GREEN
+400 bad request: failed to convert "PURPLE" to Color for parameter "c"
+200 id=7
+400 bad request: failed to convert "abc" to int for parameter "id"
+200 n=5
+400 bad request: failed to convert "xx" to int for parameter "n"
+200 [none]
+200 [t9]
+200 limit=10
+400 bad request: failed to convert "zz" to int for parameter "limit"

@@ -1,0 +1,17 @@
+Person(name=ada, age=3)
+ctor: name is marked non-null but is null
+setter: name is marked non-null but is null
+x
+field: label is marked non-null but is null
+param: x is marked non-null but is null
+hi
+n3
+Tagged(key=k)
+ada 3
+1 5
+1 10
+f2
+26
+1 1 calls=1
+v2 calls=2
+[boom] cause=true

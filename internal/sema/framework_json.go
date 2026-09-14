@@ -67,7 +67,7 @@ func (ctx *methodCtx) tryJsonCall(v *ast.Call, rt ast.Type, want ast.Type) bool 
 			return false
 		}
 		pair := c.jsonAdapterFor(target.Class, lit.Pos)
-		if pair == nil {
+		if pair == nil || pair.reader == nil {
 			return false
 		}
 		// gson.fromJson(s, Pet.class)  ->  Pet.__teyruJsonRead(JsonParser.parseString(s))
@@ -114,12 +114,13 @@ func (ctx *methodCtx) tryJsonCall(v *ast.Call, rt ast.Type, want ast.Type) bool 
 		if ac.Class.Builtin || ac.Class == c.b.Object {
 			// the one case reflection has no compile-time equivalent for: the
 			// runtime table answers by the object's own class
+			c.jsonBindProgramLater()
 			nc := callNamed(v.Recv, "toJson", callNamed(id("JsonBinding"), "writeTo", v.Args[0]))
 			ctx.adoptCall(v, nc, want)
 			return true
 		}
 		pair := c.jsonAdapterFor(ac.Class, v.Pos)
-		if pair == nil {
+		if pair == nil || pair.writer == nil {
 			return false
 		}
 		// gson.toJson(x)  ->  gson.toJson(Pet.__teyruJsonWrite(x))
@@ -167,7 +168,9 @@ func (c *Checker) jsonAdapterFor(cl *ast.Class, pos source.Pos) *jsonAdapterPair
 		return nil
 	}
 	if cl.Builtin {
-		c.errf(pos, "TY-TYP-0108", "%s is a prelude class; it has no generated JSON binding", cl.Name)
+		if !c.jsonSpeculative {
+			c.errf(pos, "TY-TYP-0108", "%s is a prelude class; it has no generated JSON binding", cl.Name)
+		}
 		return nil
 	}
 	// The pair is recorded before the bodies are built, so that a field of the
@@ -176,42 +179,74 @@ func (c *Checker) jsonAdapterFor(cl *ast.Class, pos source.Pos) *jsonAdapterPair
 	pair := &jsonAdapterPair{}
 	c.jsonAdapters[cl] = pair
 
+	if cl.Kind == ast.KindEnum {
+		// An enum has no fields to walk: the generic binding below would write
+		// `{}` and could not read a name back, where Gson writes the constant's
+		// name and reads one by matching it.
+		pair.reader = c.synthJsonEnumReader(cl)
+		pair.writer = c.synthJsonEnumWriter(cl)
+		c.addMethod(cl, pair.reader)
+		c.checkSynthBody(cl, pair.reader)
+		c.addMethod(cl, pair.writer)
+		c.checkSynthBody(cl, pair.writer)
+		c.synthJsonRegister(cl, pair.reader, pair.writer)
+		return pair
+	}
+
 	// Gson allocates without calling a constructor, through Unsafe. Teyru has
 	// no such thing, so a bound *class* needs a no-argument constructor to be
 	// read: the reader has to build the object before it can fill the fields.
 	// A record is the exception -- it is read through its canonical
 	// constructor, which is the only way to make one -- and it is also the type
 	// most worth binding, so it is handled below rather than refused.
-	if cl.Kind != ast.KindRecord && !c.hasNoArgCtor(cl) {
+	//
+	// The writer needs no constructor, so a class that cannot be read can still
+	// be written: only the reader is skipped, and the binding the runtime table
+	// gets has a null one.
+	fields := c.jsonFieldsOf(cl, pos)
+	var reader *ast.Method
+	if cl.Kind == ast.KindRecord || c.hasNoArgCtor(cl) {
+		reader = c.synthJsonReader(cl, fields)
+	} else if !c.jsonSpeculative {
 		c.errf(pos, "TY-TYP-0112",
 			"%s is bound from JSON but has no no-argument constructor; add one, or bind a class that has one", cl.Name)
-		delete(c.jsonAdapters, cl)
-		return nil
 	}
-	fields := c.jsonFieldsOf(cl, pos)
-	reader := c.synthJsonReader(cl, fields)
-	writer := c.synthJsonWriter(cl, fields)
+	// The writer is built only when the reader was: a field the reader could not
+	// map is one the writer cannot map either, and each of them would report the
+	// same field. A speculative binding is the exception -- a class with no
+	// no-argument constructor cannot be read but can still be written, and it is
+	// not reported either way.
+	var writer *ast.Method
+	if reader != nil || c.jsonSpeculative {
+		writer = c.synthJsonWriter(cl, fields)
+	}
 	pair.reader, pair.writer = reader, writer
-	if reader == nil {
+	if reader == nil && writer == nil {
 		delete(c.jsonAdapters, cl)
 		return nil
 	}
-	c.addMethod(cl, reader)
-	c.addMethod(cl, writer)
-	// The bodies are checked in the class's own context, and marked as checked:
-	// checkBodies would otherwise check them a second time, and the second pass
-	// leaves every identifier pointing at the variable the first pass declared
-	// while declaring a fresh one for the declaration -- two different symbols
-	// for one local, which the emitter then names differently at the
-	// declaration and at every use.
-	lctx := c.newCtx(cl, reader)
-	lctx.checkBlock(reader.Body, false)
-	reader.Checked = true
-	wctx := c.newCtx(cl, writer)
-	wctx.checkBlock(writer.Body, false)
-	writer.Checked = true
+	if reader != nil {
+		c.addMethod(cl, reader)
+		c.checkSynthBody(cl, reader)
+	}
+	if writer != nil {
+		c.addMethod(cl, writer)
+		c.checkSynthBody(cl, writer)
+	}
 	c.synthJsonRegister(cl, reader, writer)
 	return pair
+}
+
+// checkSynthBody type-checks one generated body in the class's own context and
+// marks it checked: checkBodies would otherwise check it a second time, and the
+// second pass leaves every identifier pointing at the variable the first pass
+// declared while declaring a fresh one for the declaration -- two different
+// symbols for one local, which the emitter then names differently at the
+// declaration and at every use.
+func (c *Checker) checkSynthBody(cl *ast.Class, m *ast.Method) {
+	ctx := c.newCtx(cl, m)
+	ctx.checkBlock(m.Body, false)
+	m.Checked = true
 }
 
 // synthJsonRegister adds the method that puts this binding in the runtime
@@ -237,26 +272,30 @@ func (c *Checker) synthJsonRegister(cl *ast.Class, reader, writer *ast.Method) {
 	m := &ast.Method{Name: name, Owner: cl, Mods: ast.ModPublic | ast.ModStatic,
 		Result: ast.TBoolean, Pos: pos(), SynthKind: "json-register"}
 	m.Decl = &ast.MethodDecl{Pos: pos(), Name: name, Mods: m.Mods}
-	anyType := c.objType
-	readLambda := &ast.Lambda{
-		ExprBase: ast.ExprBase{Pos: pos()},
-		Params:   []*ast.Param{{Pos: pos(), Name: "e"}},
-		Body:     callNamed(id(cl.Full), reader.Name, id("e")),
+	// A class that cannot be read -- one with no no-argument constructor -- is
+	// still worth writing, so one side may be missing. The entry keeps the null,
+	// and a call that needs it says there is no binding rather than crashing.
+	var readArg ast.Expr = nullLit()
+	if reader != nil {
+		readArg = &ast.Lambda{
+			ExprBase: ast.ExprBase{Pos: pos()},
+			Params:   []*ast.Param{{Pos: pos(), Name: "e"}},
+			Body:     callNamed(id(cl.Full), reader.Name, id("e")),
+		}
 	}
-	writeArg := castTo(id("v"), cl)
-	writeLambda := &ast.Lambda{
-		ExprBase: ast.ExprBase{Pos: pos()},
-		Params:   []*ast.Param{{Pos: pos(), Name: "v"}},
-		Body:     callNamed(id(cl.Full), writer.Name, writeArg),
+	var writeArg ast.Expr = nullLit()
+	if writer != nil {
+		writeArg = &ast.Lambda{
+			ExprBase: ast.ExprBase{Pos: pos()},
+			Params:   []*ast.Param{{Pos: pos(), Name: "v"}},
+			Body:     callNamed(id(cl.Full), writer.Name, castTo(id("v"), cl)),
+		}
 	}
 	m.Body = blockOf(
-		exprStmtOf(callNamed(id("JsonBinding"), "bind", strLit(cl.Full), readLambda, writeLambda)),
+		exprStmtOf(callNamed(id("JsonBinding"), "bind", strLit(cl.Full), readArg, writeArg)),
 		returnOf(boolLit(true)))
 	c.addMethod(cl, m)
-	rctx := c.newCtx(cl, m)
-	rctx.checkBlock(m.Body, false)
-	m.Checked = true
-	_ = anyType
+	c.checkSynthBody(cl, m)
 
 	// the static field is what makes the call run: a class's <clinit> is filled
 	// from its static fields' initializers, and the entry sequence initializes
@@ -273,6 +312,67 @@ func (c *Checker) synthJsonRegister(cl *ast.Class, reader, writer *ast.Method) {
 		cl.ClInit = &ast.Method{Name: "<clinit>", Owner: cl, Mods: ast.ModStatic,
 			Result: ast.TVoid, Pos: pos(), SynthKind: "clinit"}
 	}
+}
+
+// jsonBindProgram generates a binding for every class the program declares, so
+// that a binding call the compiler cannot see through still finds one.
+//
+// Gson binds by reflection at the call: `toJson(someObject)` writes whatever
+// the object turns out to be, and an Object-typed reference can carry any class
+// in the program. There is no type at that call site to generate for, so every
+// class is bound and the runtime table's getClass() lookup picks -- the same
+// answer reflection gives, arrived at earlier.
+//
+// What is generated here is speculative, because the call site did not name the
+// class: one that cannot be bound -- an interface, a class with no
+// no-argument constructor to read through, a field with no mapping -- is left
+// out rather than reported, and a program that asks for it at run time is told
+// there is no binding, which is what it already would have been told.
+func (c *Checker) jsonBindProgram() {
+	if c.jsonProgramBound {
+		return
+	}
+	c.jsonProgramBound = true
+	c.jsonProgramQueued = false
+	for _, cl := range append([]*ast.Class(nil), c.classes...) {
+		if !c.jsonBindCandidate(cl) {
+			continue
+		}
+		c.jsonSpeculative = true
+		c.jsonAdapterFor(cl, pos())
+		c.jsonSpeculative = false
+	}
+}
+
+// jsonBindProgramLater schedules the program-wide binding for after the bodies
+// have been checked.
+//
+// A class the program names at a binding call of its own has to be bound by
+// that call site, with its own diagnostics, before this sweep can decide it
+// cannot be bound and quietly skip it -- so the sweep waits, and by then every
+// class it should not touch is already in the table.
+func (c *Checker) jsonBindProgramLater() {
+	if c.jsonProgramBound || c.jsonProgramQueued {
+		return
+	}
+	c.jsonProgramQueued = true
+	c.todo = append(c.todo, c.jsonBindProgram)
+}
+
+// jsonBindCandidate reports whether the program-wide binding should try a
+// class at all. What is left out here could not be generated: an interface has
+// no fields to walk, an abstract or inner class cannot be built with `new Cl()`
+// from a static method, and a generic class's fields are type variables, which
+// have no mapping of their own.
+func (c *Checker) jsonBindCandidate(cl *ast.Class) bool {
+	if cl == nil || cl.Decl == nil || cl.Builtin || cl.Anon || cl.Inner || cl.LocalOwner != nil {
+		return false
+	}
+	if cl.IsInterface() || cl.Mods.Has(ast.ModAbstract) || len(cl.TypeParams) != 0 {
+		return false
+	}
+	_, bound := c.jsonAdapters[cl]
+	return !bound
 }
 
 // hasNoArgCtor reports whether a class can be built with no arguments. An
@@ -318,7 +418,9 @@ func (c *Checker) jsonFieldsOf(cl *ast.Class, pos source.Pos) []jsonField {
 			jf.alts = annoStringList(a, "alternate")
 		}
 		if seen[jf.name] {
-			c.errf(pos, "TY-TYP-0109", "two fields of %s both map to the JSON name %s", cl.Name, jf.name)
+			if !c.jsonSpeculative {
+				c.errf(pos, "TY-TYP-0109", "two fields of %s both map to the JSON name %s", cl.Name, jf.name)
+			}
 			continue
 		}
 		seen[jf.name] = true
@@ -411,10 +513,56 @@ func (c *Checker) synthJsonWriter(cl *ast.Class, fields []jsonField) *ast.Method
 	for _, jf := range fields {
 		if st := c.jsonWriteStmt(jf); st != nil {
 			stmts = append(stmts, st)
+		} else {
+			// A field the binding cannot write has to fail the writer rather
+			// than be left out of the object: a member silently missing from
+			// the JSON is worse than an error that says which field it is.
+			return nil
 		}
 	}
 	stmts = append(stmts, returnOf(id("o")))
 	m.Body = blockOf(stmts...)
+	return m
+}
+
+// synthJsonEnumReader builds `static Cl __teyruJsonRead(JsonElement e)` for an
+// enum: Gson writes a constant as its name, and reads one back by matching the
+// name against the constants.
+func (c *Checker) synthJsonEnumReader(cl *ast.Class) *ast.Method {
+	m := &ast.Method{Name: jsonReaderName, Owner: cl, Mods: ast.ModPublic | ast.ModStatic,
+		Result: &ast.ClassType{Class: cl}, Pos: pos(), SynthKind: "json-reader"}
+	pe := &ast.Param{Pos: pos(), Name: "e", Type: &ast.TypeExpr{Pos: pos(), Name: "JsonElement"}}
+	m.Decl = &ast.MethodDecl{Pos: pos(), Name: m.Name, Mods: m.Mods, Params: []*ast.Param{pe}}
+	m.Params = []ast.Type{c.classType("JsonElement")}
+	m.ParamNames = []string{"e"}
+
+	stmts := []ast.Stmt{
+		ifOf(orOf(isNull(id("e")), callNamed(id("e"), "isJsonNull")),
+			blockOf(returnOf(nullLit())), nil),
+		&ast.LocalVar{Pos: pos(),
+			Type: &ast.TypeExpr{Pos: pos(), Name: "String"},
+			Vars: []*ast.VarDeclarator{{Pos: pos(), Name: "s", Init: callNamed(id("e"), "getAsString")}}},
+	}
+	stmts = append(stmts, enumLookupChain(cl, id("s"))...)
+	stmts = append(stmts, throwOf(newObjNamed("JsonParseException",
+		concatStr(strLit("no "+cl.Name+" constant named "), id("s")))))
+	m.Body = blockOf(stmts...)
+	return m
+}
+
+// synthJsonEnumWriter builds `static JsonElement __teyruJsonWrite(Cl self)`:
+// the constant's name, which is the whole of what an enum has in JSON.
+func (c *Checker) synthJsonEnumWriter(cl *ast.Class) *ast.Method {
+	m := &ast.Method{Name: jsonWriterName, Owner: cl, Mods: ast.ModPublic | ast.ModStatic,
+		Result: c.classType("JsonElement"), Pos: pos(), SynthKind: "json-writer"}
+	ps := &ast.Param{Pos: pos(), Name: "self", Type: &ast.TypeExpr{Pos: pos(), Name: cl.Full, Resolved: &ast.ClassType{Class: cl}}}
+	m.Decl = &ast.MethodDecl{Pos: pos(), Name: m.Name, Mods: m.Mods, Params: []*ast.Param{ps}}
+	m.Params = []ast.Type{&ast.ClassType{Class: cl}}
+	m.ParamNames = []string{"self"}
+	m.Body = blockOf(
+		ifOf(isNull(id("self")),
+			blockOf(returnOf(sel(id("JsonNull"), "INSTANCE"))), nil),
+		returnOf(newObjNamed("JsonPrimitive", callNamed(id("self"), "name"))))
 	return m
 }
 
@@ -469,16 +617,19 @@ func (c *Checker) jsonReadValue0(jf jsonField, bare bool) ast.Expr {
 		case ast.Byte:
 			value = castPrim(get("getAsInt"), "byte")
 		case ast.Char:
-			value = castPrim(get("getAsInt"), "char")
+			// Gson's char adapter reads the member as text and takes its first
+			// character, which is what a char was written as: reading it as an
+			// int would reject this binding's own output, `"c":"z"`.
+			value = get("getAsCharacter")
 		default:
-			c.errf(jf.field.Pos, "TY-TYP-0110", "%s has no JSON mapping for its type %s", jf.field.Name, jf.field.Type)
+			c.jsonUnmapped(jf)
 			return nil
 		}
 		return guardOrBare(jf, value, bare)
 	}
 	ct, ok := c.erasure(jf.field.Type).(*ast.ClassType)
 	if !ok || ct.Class == nil {
-		c.errf(jf.field.Pos, "TY-TYP-0110", "%s has no JSON mapping for its type %s", jf.field.Name, jf.field.Type)
+		c.jsonUnmapped(jf)
 		return nil
 	}
 	switch {
@@ -490,13 +641,23 @@ func (c *Checker) jsonReadValue0(jf jsonField, bare bool) ast.Expr {
 		return guardOrBare(jf, callNamed(id("o"), "get", strLit(jf.name)), bare)
 	}
 	pair := c.jsonAdapterFor(ct.Class, jf.field.Pos)
-	if pair == nil {
+	if pair == nil || pair.reader == nil {
 		return nil
 	}
 	// the nested reader takes the element itself, so this one does not read a
 	// value out of it first
 	return guardOrBare(jf, callNamed(id(ct.Class.Full), pair.reader.Name,
 		callNamed(id("o"), "get", strLit(jf.name))), bare)
+}
+
+// jsonUnmapped reports a field the binding cannot walk, unless the binding is
+// speculative: a class the compiler bound on a guess is skipped rather than
+// reported, because the call site did not name it.
+func (c *Checker) jsonUnmapped(jf jsonField) {
+	if c.jsonSpeculative {
+		return
+	}
+	c.errf(jf.field.Pos, "TY-TYP-0110", "%s has no JSON mapping for its type %s", jf.field.Name, jf.field.Type)
 }
 
 // guardOrBare wraps a read in the question of whether the document carries the
@@ -555,11 +716,12 @@ func (c *Checker) jsonWriteStmt(jf jsonField) ast.Stmt {
 	}
 	if ct.Class == c.b.Object {
 		// whatever the object is, its own class answers at run time
+		c.jsonBindProgramLater()
 		return exprStmtOf(callNamed(id("o"), "add", strLit(jf.name),
 			callNamed(id("JsonBinding"), "writeTo", read)))
 	}
 	pair := c.jsonAdapterFor(ct.Class, jf.field.Pos)
-	if pair == nil {
+	if pair == nil || pair.writer == nil {
 		return nil
 	}
 	// a null reference is written as JSON null rather than left out, which is

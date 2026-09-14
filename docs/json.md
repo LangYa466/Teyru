@@ -62,19 +62,27 @@ String out = gson.toJson(p)
   產生的成員也在內）。
 
 支援的欄位型別：`String`、`boolean`/`byte`/`short`/`char`/`int`/`long`/`float`/
-`double` 與其裝箱類別、其他可綁定的類別（遞迴）、`Object`（保留原始樹）。
-`@SerializedName` 可以改名。**不支援**：`List`／`Map`／陣列欄位、`@Expose`／
-`@Since`／`@Until`／`@JsonAdapter`（已宣告但未實作，用了不會有作用）。
+`double` 與其裝箱類別、enum（寫成常數名稱，讀回來比對名稱，與 Gson 相同）、其他
+可綁定的類別（遞迴）、`Object`（保留原始樹：讀進來的 `JsonObject` 原樣寫回去）。
+`char` 和 Gson 一樣寫成單字元字串、也從字串讀回來。`@SerializedName` 可以改名。
+**不支援**：`List`／`Map`／陣列欄位、`@Expose`／`@Since`／`@Until`／`@JsonAdapter`
+（已宣告但未實作，用了不會有作用）。
 
 ### 執行期回退表
 
 靜態型別是 `Object` 的參考（`gson.toJson(someObject)`）編譯器看不穿，這時走
 `JsonBinding` 這張表：每個產生過綁定的類別在自己的靜態初始化裡註冊reader／
-writer，查表用物件自己的類別——這正是 Gson 反射給的答案。這是唯一沒有編譯期
-等價物的情況，其餘都在編譯期解決。
+writer，查表用物件自己的類別——這正是 Gson 反射給的答案。
+
+`Object` 可以裝著程式裡的任何類別，所以**這種呼叫點一出現，編譯器就替程式宣告的
+每個類別都產生一份綁定**（介面、抽象類別、沒有無參數建構子又無法從 JSON 讀的
+類別除外；那些產生不出來的就不登記，執行期問到會說沒有綁定）。沒有這個呼叫點的
+程式仍然只為真正用到的類別產生綁定。
 
 ## 相關測試
 
 - `tests/programs/t93_json.teyru` — 樹狀 API：逸出、數字、pretty print、往返。
 - `tests/programs/t101_gson.teyru` — 物件綁定：巢狀類別、`@SerializedName`、
   缺欄位、執行期回退表。
+- `tests/programs/t140_json_binding_edges.teyru` — 邊界：`char` 往返、`Object`
+  欄位裡的樹、只透過 `Object` 傳遞的類別、enum 與未知的常數名稱。

@@ -1965,8 +1965,19 @@ class TreeKeySet<K, V> implements NavigableSet<K>, SortedSet<K>, Set<K>, Collect
 
   private NavigableMap<K, V> map
 
+  // A key set is a view of a map's keys and has no value to store, so it cannot
+  // insert; a TreeSet is the same view over a map whose values are all the
+  // marker, so it can, and so can any range of one -- TreeSet's headSet is a
+  // live view that accepts an element within its range, exactly as Java's does.
+  private boolean holdsValues
+
   public TreeKeySet(NavigableMap<K, V> m) {
     map = m
+  }
+
+  public TreeKeySet(NavigableMap<K, V> m, boolean values) {
+    map = m
+    holdsValues = values
   }
 
   // TreeSet's insertion path: the value a set stores for its elements is this
@@ -2038,7 +2049,7 @@ class TreeKeySet<K, V> implements NavigableSet<K>, SortedSet<K>, Set<K>, Collect
   }
 
   public NavigableSet<K> descendingSet() {
-    return new TreeKeySet<K, V>(map.descendingMap())
+    return new TreeKeySet<K, V>(map.descendingMap(), holdsValues)
   }
 
   public SortedSet<K> subSet(K fromElement, K toElement) {
@@ -2046,7 +2057,7 @@ class TreeKeySet<K, V> implements NavigableSet<K>, SortedSet<K>, Set<K>, Collect
   }
 
   public NavigableSet<K> subSet(K fromElement, boolean fromInclusive, K toElement, boolean toInclusive) {
-    return new TreeKeySet<K, V>(map.subMap(fromElement, fromInclusive, toElement, toInclusive))
+    return new TreeKeySet<K, V>(map.subMap(fromElement, fromInclusive, toElement, toInclusive), holdsValues)
   }
 
   public SortedSet<K> headSet(K toElement) {
@@ -2054,7 +2065,7 @@ class TreeKeySet<K, V> implements NavigableSet<K>, SortedSet<K>, Set<K>, Collect
   }
 
   public NavigableSet<K> headSet(K toElement, boolean inclusive) {
-    return new TreeKeySet<K, V>(map.headMap(toElement, inclusive))
+    return new TreeKeySet<K, V>(map.headMap(toElement, inclusive), holdsValues)
   }
 
   public SortedSet<K> tailSet(K fromElement) {
@@ -2062,7 +2073,7 @@ class TreeKeySet<K, V> implements NavigableSet<K>, SortedSet<K>, Set<K>, Collect
   }
 
   public NavigableSet<K> tailSet(K fromElement, boolean inclusive) {
-    return new TreeKeySet<K, V>(map.tailMap(fromElement, inclusive))
+    return new TreeKeySet<K, V>(map.tailMap(fromElement, inclusive), holdsValues)
   }
 
   public Object[] toArray() {
@@ -2122,12 +2133,26 @@ class TreeKeySet<K, V> implements NavigableSet<K>, SortedSet<K>, Set<K>, Collect
     map.clear()
   }
 
+  /* A set inserts and a key set does not, and the map under a set's range view
+     refuses the element that is outside the range the way Java's does. */
   public boolean add(K e) {
-    throw new UnsupportedOperationException()
+    if (!holdsValues) {
+      throw new UnsupportedOperationException()
+    }
+    return insert(e)
   }
 
   public boolean addAll(Collection<? extends K> c) {
-    throw new UnsupportedOperationException()
+    if (!holdsValues) {
+      throw new UnsupportedOperationException()
+    }
+    boolean changed = false
+    for (K k : c) {
+      if (insert(k)) {
+        changed = true
+      }
+    }
+    return changed
   }
 
   public boolean equals(Object o) {

@@ -1,0 +1,62 @@
+// Declarations that capture, and the two ways a property accessor can be
+// written without a body in front of it.
+//
+// A class declared inside a method sees the variables of it (JLS 6.3), whether
+// it is anonymous or has a name, and what it captures is carried in the object
+// rather than left in a stack frame the class is not compiled into. The
+// accessors cover the other half: `field` is the property's own storage, which
+// for a static property is a global rather than something reached through
+// `this`, and `get` with no body is the storage read itself.
+
+interface Greeting {
+  String hello()
+}
+
+class Counter {
+  static int base = 3
+
+  public static int scaled {
+    get { return field * 2 }
+    set { field = value }
+  }
+
+  public int plain {
+    get
+    set
+  }
+
+  public int derived {
+    get { return plain + 1 }
+  }
+}
+
+class Main {
+  static String greet(String who) {
+    Greeting g = new Greeting() {
+      public String hello() { return "hello " + who }
+    }
+    return g.hello()
+  }
+
+  static int scaled(int n) {
+    int factor = n + 1
+    class Local {
+      int twice(int v) { return v * factor }
+    }
+    return new Local().twice(Counter.base)
+  }
+
+  public static void main(String[] args) {
+    System.out.println(greet("ann"))
+    System.out.println(scaled(2))
+
+    Counter c = new Counter()
+    c.plain = 7
+    System.out.println(c.plain)
+    System.out.println(c.derived)
+
+    Counter.scaled = 5
+    System.out.println(Counter.scaled)
+    System.out.println(Counter.getScaled())
+  }
+}

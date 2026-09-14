@@ -138,8 +138,9 @@ payload 就是這樣接），是類別或 record 時由**編譯器為該型別�
 錯誤，不是第一次請求時的例外。
 
 **回應**：回傳 `HttpResponse` 就完全自己決定；回傳 `String` 是 `text/plain`；回傳
-`void` 是空主體；其他類別（含 record）以 Gson 綁定序列化成 `application/json`（見
-`docs/json.md`）。基本型別沒有映射，跟陣列、`List` 一樣是 `TY-TYP-0111`。
+`void` 是空主體；其他類別（含 record 與 enum，enum 寫成常數名稱的字串）以 Gson
+綁定序列化成 `application/json`（見 `docs/json.md`）。基本型別沒有映射，跟陣列、
+`List` 一樣是 `TY-TYP-0111`。
 
 **路由**：`Router.match` 取最特定的符合——字面片段勝過變數片段，所以
 `/pets/mine` 不會被 `/pets/{id}` 吃掉，與註冊順序無關。路徑存在但動詞不對是 405，
@@ -154,7 +155,9 @@ HttpServer server = new HttpServer(port, router, ctx)
 ```
 
 `HttpServer.handle(HttpRequest)` 是請求進來後唯一的入口——它與 socket 迴圈分開，
-所以不需要連線就能測（`tests/programs/t102_web.teyru` 就是這樣測的）。
+所以不需要連線就能測：`tests/programs/t102_web.teyru` 與
+`tests/programs/t141_web_param_errors.teyru` 就是這樣測的，後者涵蓋轉型失敗的 400、
+enum 參數與回傳值、`defaultValue`。
 
 ## 已知限制
 
