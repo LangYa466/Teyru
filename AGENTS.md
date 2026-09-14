@@ -179,7 +179,25 @@ source → lexer → parser → ast → sema → codegen
 - checked exception 沒有編譯期檢查。
 - `sealed` 的 `permits` 子句沒有被驗證：沒有 `permits` 的 sealed 型別在 switch
   窮盡性上被視為不可判定而要求 `default`。
-- 沒有反射、沒有執行緒（`java.util` 集合、`java.io`、`java.net` 都有）。
+- 反射在 `lib/26_reflect.teyru`：`Class`、`Field`、`Method`、`Constructor`、
+  `Modifier`、`Array` 與 `java.lang.reflect` 的六個例外，讀的是編譯器為每個類別
+  產生的靜態表（欄位、方法、修飾子、列舉常數），所以查一次資料是走一次陣列，
+  執行期不建表。與 Java 的差異（都已實測，不是未驗證）：
+  - 類別名是 Teyru 的：`String.class.getName()` 是 `teyru.String`，
+    `Class.forName` 兩種寫法都收（`java.lang.String` 會找到同一類別）。
+  - 沒有註解反射：`@Retention` 收得下但沒有作用，執行期沒有註解物件。
+  - 所有陣列共用一個類別，因此沒有 `getComponentType`、沒有每個元素型別的陣列
+    類別，`forName("[I")` 也沒有東西可回答。
+  - 沒有泛型型別參數的反射（`getGenericType` 等不存在）。
+  - 原生型別的取值器只收完全相符的裝箱型別，Java 的拓寬（例如對 `byte` 欄位
+    呼叫 `getInt`）在這裡是 `IllegalArgumentException`。
+  - 存取控制不檢查，只有 final 攔（`setAccessible(true)` 之後可寫）。
+  - 內部類別與區域類別不能被反射建構（沒有外圍實例可用）。
+  - 成員表（欄位、方法與 invoker）只在使用者程式真的可能用到反射時才寫進執行檔
+    （`emit.go` 的 `reflectUsed`）：它們是唯一會指名別的類別的中繼資料，擺在檔案
+    層級會把整個標準程式庫釘進每一支程式（實測 hello world 從 445.9 KB 漲到
+    2.9 MB）。用到反射的程式仍要付出整份約 3 MB，這是這個設計尚未解決的成本。
+- 沒有執行緒（`java.util` 集合、`java.io`、`java.net` 都有）。
 - 與 Java 生態不相容（沒有 JAR、沒有 JDK 類別庫、沒有 JNI）。
 - GC 為保守式標記清除，非分代；大量短命物件的情境仍落後 HotSpot 的逃逸分析。
 - 型別推論比 javac 弱一層，界線見文件站〈語言參考〉§12 第 11 條。

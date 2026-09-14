@@ -76,11 +76,12 @@ static tyclassobj *ty_class_objs[TY_CLASS_BUCKETS];
    call, which is also what a class literal's raw handle looks like. */
 static tyclass *ty_class_cls;
 
-void *ty_class_of_cls(void *o, tyclass *clscls) {
+/* ty_class_make is the wrapper factory: one object per tyclass, reused, so
+   that two Class values that name the same class are the same object. */
+void *ty_class_make(int64_t h, tyclass *clscls) {
+  tyclass *k = (tyclass *)(intptr_t)h;
   if (clscls) ty_class_cls = clscls;
   if (!ty_class_cls) ty_class_cls = TY_OBJECT;
-  if (!o) ty_throw(ty_npe());
-  tyclass *k = ((tyobj *)o)->cls;
   if (!k) return NULL;
   int32_t b = (int32_t)((((uintptr_t)k) >> 4) & (TY_CLASS_BUCKETS - 1));
   for (tyclassobj *c = ty_class_objs[b]; c; c = c->next) {
@@ -93,6 +94,25 @@ void *ty_class_of_cls(void *o, tyclass *clscls) {
   c->next = ty_class_objs[b];
   ty_class_objs[b] = c;
   return c;
+}
+
+void *ty_class_of_cls(void *o, tyclass *clscls) {
+  if (!o) ty_throw(ty_npe());
+  return ty_class_make((int64_t)(intptr_t)((tyobj *)o)->cls, clscls);
+}
+
+/* ty_class_target answers with the class a Class value names. Both forms have
+   to be accepted -- the wrapper above, and the raw handle a class literal
+   produces (codegen renders `String.class` as `(tyobj*)&cls_teyru_String`) --
+   and the discriminator is the one ty_class_name uses below: the wrapper's own
+   class is the program's teyru.Class, and a raw tyclass's first word is its
+   name, which can never be the address of that struct. */
+tyclass *ty_class_target(void *c) {
+  if (!c) return NULL;
+  if (ty_class_cls && ((tyobj *)c)->cls == ty_class_cls) {
+    return ((tyclassobj *)c)->target;
+  }
+  return (tyclass *)c;
 }
 
 /* tyrt.h declares this one and nothing in a generated program calls it any
@@ -362,7 +382,10 @@ void *ty_illegal_state(const char *msg) { return ty_make_ex(TY_ILLSTATE, msg); }
 void *ty_make_ex(tyclass *c, const char *msg) {
   tyobj *o = (tyobj *)ty_alloc(sizeof(tyobj) + 2 * sizeof(void *));
   o->cls = c;
-  ((void **)((char *)o + sizeof(tyobj)))[0] = ty_str_new(msg, (int64_t)strlen(msg));
+  /* A null message is a message: java.lang.reflect's InvocationTargetException
+     carries the cause and no text of its own, and Java's getMessage answers
+     null for it. ty_str_new treats a null byte string as an empty one. */
+  ((void **)((char *)o + sizeof(tyobj)))[0] = ty_str_new(msg, msg ? (int64_t)strlen(msg) : 0);
   ((void **)((char *)o + sizeof(tyobj)))[1] = NULL;
   return o;
 }

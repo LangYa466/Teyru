@@ -13,13 +13,6 @@ class Object {
   public final native Class getClass()
 }
 
-class Class {
-  public native String getName()
-  public String toString() {
-    return getName()
-  }
-}
-
 interface Cloneable {
 }
 

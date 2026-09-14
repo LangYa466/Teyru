@@ -94,7 +94,7 @@ func (e *Emitter) emitEnumInit(cl *ast.Class) {
 	if cl.Kind != ast.KindEnum {
 		return
 	}
-	for _, ec := range cl.Decl.EnumConsts {
+	for i, ec := range cl.Decl.EnumConsts {
 		f := cl.FieldMap[ec.Name]
 		if f == nil {
 			continue
@@ -106,6 +106,7 @@ func (e *Emitter) emitEnumInit(cl *ast.Class) {
 			}
 		}
 		g := staticName(cl, f)
+		e.line("cts_%s[%d] = (void*)%s;\n", mangle(cl.Full), i, g)
 		e.line("%s = (%s)ty_alloc(sizeof(%s));\n", g, e.ctype(f.Type), cname(cls))
 		e.line("%s->obj.cls = &cls_%s;\n", g, mangle(cls.Full))
 		e.line("((tyEnumBase*)%s)->ordinal = %d;\n", g, f.EnumOrd)
@@ -135,6 +136,14 @@ func (e *Emitter) emitEnumInit(cl *ast.Class) {
 				args = append(args, e.coerce(e.expr(a), a.GetType(), want))
 			}
 			e.line("%s(%s);\n", e.cfunc(ctor), strings.Join(args, ", "))
+		}
+	}
+	// reflection's table, filled once every constant exists: the address of a
+	// constant is not known until it has been allocated, so a write beside the
+	// allocation would store the null the static started as.
+	for i, ec := range cl.Decl.EnumConsts {
+		if f := cl.FieldMap[ec.Name]; f != nil {
+			e.line("cts_%s[%d] = (void*)%s;\n", mangle(cl.Full), i, staticName(cl, f))
 		}
 	}
 }

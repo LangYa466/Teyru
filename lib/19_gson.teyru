@@ -3,11 +3,11 @@ package teyru
 // The annotations Gson's binding reads, and the runtime side of the binding.
 //
 // Gson binds an object to JSON by reflection, at the moment toJson/fromJson is
-// called. Teyru has no reflection, so the binding is resolved by the compiler
-// instead: when a program writes `gson.fromJson(s, Pet.class)` or
-// `gson.toJson(pet)`, the compiler knows the class and generates a reader and a
-// writer for it, then rewrites the call to use them. A Java file that binds a
-// class changes only in the cast it does not need -- see docs/json.md.
+// called. Here the binding is resolved by the compiler instead: when a program
+// writes `gson.fromJson(s, Pet.class)` or `gson.toJson(pet)`, the compiler knows
+// the class and generates a reader and a writer for it, then rewrites the call
+// to use them. A Java file that binds a class changes only in the cast it does
+// not need -- see docs/json.md.
 //
 // What that buys is the same as the container's: a field whose type has no
 // mapping is a compile error rather than a runtime IllegalArgumentException

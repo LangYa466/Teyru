@@ -2,7 +2,10 @@ package teyru
 
 // The annotations and the container behind the Spring-compatible framework.
 //
-// Spring resolves beans by reflection at startup. Teyru has no reflection: the
+// Spring resolves beans by reflection at startup. Teyru resolves them at
+// compile time instead -- a missing bean, a cycle or two candidates for one
+// type is an error at build time rather than a startup failure. Reflection
+// exists here (lib/26_reflect.teyru) and the container does not use it: the
 // set of classes is fixed when the program is compiled, so the compiler knows
 // every annotated class, every field to inject and every dependency edge. It
 // generates one registration per bean into BeanRegistry, and this file is what

@@ -1246,7 +1246,7 @@ func (e *Emitter) assign(v *ast.Assign) string {
 	// element class never promised. targetClinit never wraps an index target, so
 	// the check for one costs nothing here.
 	if ix, ok := v.X.(*ast.Index); ok && v.Op == "=" && pre == "" {
-		if selem := e.elemClass(ix.GetType()); selem != "" {
+		if selem := e.refElemClass(ix.GetType()); selem != "" {
 			return e.refElemStore(ix, selem, e.coerce(e.expr(v.Y), v.Y.GetType(), v.X.GetType()))
 		}
 	}
@@ -1341,6 +1341,14 @@ func (e *Emitter) refElemStore(ix *ast.Index, selem, val string) string {
 
 func (e *Emitter) callExpr(v *ast.Call) string {
 	m := v.Method
+	if e.reflectionCall(m) {
+		// The member tables -- the field and method tables, and the invokers
+		// beside them -- are the one part of a class's metadata that names other
+		// classes, so they are only put in the output when a call site can reach
+		// them. This is that call site: a program that asks a Class for its
+		// members, invokes through a Method, or loads one by name.
+		e.reflectUsed = true
+	}
 	if m == nil {
 		// arrays have Object-like methods but no method symbol
 		if arr, ok := v.Recv.GetType().(ast.Type); ok {
@@ -1562,11 +1570,28 @@ func (e *Emitter) outerArg(v *ast.New, outer *ast.Class) string {
 // array holds no references, and Teyru has one runtime class for every array
 // type, so an array of arrays cannot name the class its elements have either.
 func (e *Emitter) elemClass(elem ast.Type) string {
-	ct, ok := e.prog.Erased(elem).(*ast.ClassType)
-	if !ok {
+	switch t := e.prog.Erased(elem).(type) {
+	case *ast.ClassType:
+		return "&cls_" + mangle(t.Class.Full)
+	case *ast.PrimType:
+		// A primitive element records its class too, and not for the store
+		// check -- a primitive array is stored into directly (refElemClass is
+		// that one). It is what java.lang.reflect.Array reads to know which box
+		// to build: without it int[] and Object[] are indistinguishable at run
+		// time.
+		return "&cls_" + primClassName(t.Kind)
+	}
+	return ""
+}
+
+// refElemClass is elemClass for the store check, which only has anything to
+// compare for an array of references: a value stored into an int[] is not an
+// object and has no class to test against the promise.
+func (e *Emitter) refElemClass(elem ast.Type) string {
+	if _, prim := e.prog.Erased(elem).(*ast.PrimType); prim {
 		return ""
 	}
-	return "&cls_" + mangle(ct.Class.Full)
+	return e.elemClass(elem)
 }
 
 // elemPromise renders the statement that records what an array promises for its

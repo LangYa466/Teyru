@@ -40,8 +40,9 @@ package teyru
      variable does not compile at the C level, so Gson's signature could be
      written but never called; fromJson(String) returning JsonElement is the
      usable form of the same thing.
-   - Gson's reflective binding (fromJson into a user class) is absent: there is
-     no reflection. Numbers beyond long, getAsBigDecimal, getAsBigInteger and
+   - Gson's reflective binding (fromJson into a user class) is not this
+     class's: the compiler generates the reader for a class it can see. Numbers
+     beyond long, getAsBigDecimal, getAsBigInteger and
      the lenient reader are absent for the same kind of reason; each is called
      out where it would have lived.
 

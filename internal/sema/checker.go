@@ -27,8 +27,12 @@ type Builtins struct {
 	AutoCloseable, Cloneable, Comparable                                       *ast.Class
 	IllArg, IllState, NoSuchElem, Unsup, ArrayStore                            *ast.Class
 	NPE, AIOOBE, Arith, CCE, NegArr, Assertion                                 *ast.Class
-	Boxes                                                                      map[ast.PrimKind]*ast.Class
-	Unbox                                                                      map[*ast.Class]ast.PrimKind
+	// java.lang.reflect's checked exceptions. Teyru does not check them --
+	// nothing here is checked -- but they are the classes the runtime throws
+	// and a program catches, so they are named like the rest.
+	ClassNotFound, NoSuchField, NoSuchMethod, IllAccess, Invocation, Instantiation *ast.Class
+	Boxes                                                                          map[ast.PrimKind]*ast.Class
+	Unbox                                                                          map[*ast.Class]ast.PrimKind
 }
 
 // Checker holds global analysis state.
@@ -216,6 +220,7 @@ const libPackage = "teyru"
 // names docs/language.md §11 publishes, and the import check reads them.
 var libImportPackage = map[string]bool{
 	"java.lang":             true,
+	"java.lang.reflect":     true,
 	"java.util":             true,
 	"java.util.function":    true,
 	"java.util.stream":      true,
@@ -481,6 +486,9 @@ func (c *Checker) initBuiltins() {
 		NoSuchElem: get("NoSuchElementException"), Unsup: get("UnsupportedOperationException"),
 		ArrayStore: get("ArrayStoreException"),
 		NPE:        get("NullPointerException"), AIOOBE: get("ArrayIndexOutOfBoundsException"),
+		ClassNotFound: get("ClassNotFoundException"), NoSuchField: get("NoSuchFieldException"),
+		NoSuchMethod: get("NoSuchMethodException"), IllAccess: get("IllegalAccessException"),
+		Invocation: get("InvocationTargetException"), Instantiation: get("InstantiationException"),
 		Arith: get("ArithmeticException"), CCE: get("ClassCastException"),
 		NegArr: get("NegativeArraySizeException"), Assertion: get("AssertionError"),
 		Boxes: map[ast.PrimKind]*ast.Class{}, Unbox: map[*ast.Class]ast.PrimKind{},
@@ -943,7 +951,15 @@ func (c *Checker) resolveHeader(cl *ast.Class) {
 // arrayClass returns the synthetic Object subclass that represents arrays.
 func (c *Checker) arrayClass() *ast.Class {
 	if c.arrCls == nil {
-		c.arrCls = c.newClass("Array", "teyru.Array", ast.KindClass)
+		// java.lang.reflect.Array, declared in lib/26_reflect.teyru, is this
+		// class: one type, so that an array a program builds through
+		// Array.newInstance is an instance of the class it casts an array to.
+		// A build without the library synthesizes it instead.
+		cl := c.global[libPackage+".Array"]
+		if cl == nil {
+			cl = c.newClass("Array", libPackage+".Array", ast.KindClass)
+		}
+		c.arrCls = cl
 		c.arrCls.Builtin = true
 		c.arrCls.Resolved = true
 		c.arrCls.Special = "array"

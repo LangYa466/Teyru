@@ -535,10 +535,12 @@ func writeRuntime(dir string) string {
 	c1 := filepath.Join(dir, "tyrt.c")
 	c2 := filepath.Join(dir, "tyrt2.c")
 	c3 := filepath.Join(dir, "tyrt_net.c")
+	c4 := filepath.Join(dir, "tyrt_reflect.c")
 	must(os.WriteFile(c1, []byte(tyrt.Core), 0o644))
 	must(os.WriteFile(c2, []byte(tyrt.Extra), 0o644))
 	must(os.WriteFile(c3, []byte(tyrt.Net), 0o644))
-	return c1 + " " + c2 + " " + c3
+	must(os.WriteFile(c4, []byte(tyrt.Reflect), 0o644))
+	return c1 + " " + c2 + " " + c3 + " " + c4
 }
 
 func must(err error) {
