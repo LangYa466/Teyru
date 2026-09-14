@@ -187,6 +187,7 @@ class HttpRequest {
   // header answers with the default when the request carries no such header,
   // which is what @RequestHeader's defaultValue asks for. A header that is
   // present but empty is present: the caller sent it and meant nothing by it.
+
   public String header(String name, String fallback) {
     return hasHeader(name) ? header(name) : fallback
   }
@@ -292,6 +293,18 @@ class HttpStatus {
 }
 
 class HttpResponse {
+  // headerValueOf answers the value of a header this response carries, or "".
+  // The setter is header(name, value), which is what a handler uses; reading one
+  // back is a test's or a client's question, so it has a name of its own.
+  public String headerValueOf(String name) {
+    for (int i = 0 : i < headerNames.size() : i++) {
+      if (headerNames.get(i).toLowerCase().equals(name.toLowerCase())) {
+        return headerValues.get(i)
+      }
+    }
+    return ""
+  }
+
   public int status = 200
   public String contentType = "text/plain; charset=utf-8"
   public String body = ""

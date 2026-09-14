@@ -68,6 +68,20 @@ package teyru
 
 // @Value takes a property: @Value("${server.port}") or, with a default,
 // @Value("${server.port:8080}").
+/* @ConfigurationProperties binds a bean's fields from the configuration under a
+   prefix, which is what a settings class is for: @Value reads one property at a
+   time, this reads a group of them. */
+@interface ConfigurationProperties {
+  String value() default ""
+  String prefix() default ""
+}
+
+/* @Profile makes a bean exist only while a profile is active, so one program
+   can carry the beans of two deployments and build the one it was started in. */
+@interface Profile {
+  String value() default ""
+}
+
 @interface Value {
   String value()
 }
@@ -151,9 +165,43 @@ class ApplicationContext {
   public ApplicationContext() {
   }
 
+  // the server the program is serving on, which run() sets and close() stops
+  private HttpServer server = null
+
+  public ApplicationContext setServer(HttpServer server) {
+    this.server = server
+    return this
+  }
+
+  public HttpServer getServer() {
+    return server
+  }
+
+  // close is Spring's: the singletons are destroyed in the reverse order they
+  // were created, so a bean that depends on another is destroyed first, and a
+  // @PreDestroy method runs on the way out.
+  public void close() {
+    if (server != null) {
+      server.close()
+      server = null
+    }
+    for (int i = order.size() - 1 : i >= 0 : i--) {
+      BeanDefinition d = byName.get(order.get(i))
+      if (d == null || d.instance == null) {
+        continue
+      }
+      ReflectInjector.destroy(d.instance, d.type)
+      d.instance = null
+    }
+  }
+
   public ApplicationContext setProperty(String key, String value) {
     properties.put(key, value)
     return this
+  }
+
+  public boolean hasProperty(String key) {
+    return properties.containsKey(key)
   }
 
   public String getProperty(String key) {
@@ -179,7 +227,7 @@ class ApplicationContext {
     // Each registered class answers with the beans it declares: itself, and one
     // per @Bean method when it is a @Configuration class.
     for (Class c : BeanRegistry.registered()) {
-      BeanDefinition[] defs = BeanScanner.all(c)
+      BeanDefinition[] defs = BeanScanner.all(c, getProperty("spring.profiles.active", ""))
       for (int i = 0 : i < defs.length : i++) {
         BeanDefinition d = defs[i]
         BeanDefinition prev = byName.get(d.name)
