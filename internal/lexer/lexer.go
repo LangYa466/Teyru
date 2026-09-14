@@ -11,7 +11,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/LangYa466/Teyru/internal/source"
+	"github.com/teyru-lang/Teyru/internal/source"
 )
 
 // Kind is a token kind.

@@ -36,7 +36,7 @@ point it at this directory and build the parser:
 -- lazy.nvim / packer: inside the nvim-treesitter config
 require('nvim-treesitter.parsers').teyru = {
   install_info = {
-    url = 'https://github.com/LangYa466/Teyru',
+    url = 'https://github.com/teyru-lang/Teyru',
     location = 'editors/tree-sitter-teyru', -- the grammar is in a subdirectory
     files = { 'src/parser.c' },
   },

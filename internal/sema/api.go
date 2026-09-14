@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/LangYa466/Teyru/internal/ast"
-	"github.com/LangYa466/Teyru/internal/util"
+	"github.com/teyru-lang/Teyru/internal/ast"
+	"github.com/teyru-lang/Teyru/internal/util"
 )
 
 // Erased returns the runtime type of t (generics are erased at code generation).

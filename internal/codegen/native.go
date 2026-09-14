@@ -5,9 +5,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/LangYa466/Teyru/internal/ast"
-	"github.com/LangYa466/Teyru/internal/sema"
-	"github.com/LangYa466/Teyru/internal/util"
+	"github.com/teyru-lang/Teyru/internal/ast"
+	"github.com/teyru-lang/Teyru/internal/sema"
+	"github.com/teyru-lang/Teyru/internal/util"
 )
 
 // nativeFn maps a prelude native method onto a runtime helper.

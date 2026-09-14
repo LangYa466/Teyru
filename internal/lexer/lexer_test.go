@@ -3,7 +3,7 @@ package lexer
 import (
 	"testing"
 
-	"github.com/LangYa466/Teyru/internal/source"
+	"github.com/teyru-lang/Teyru/internal/source"
 )
 
 func lex(src string) ([]Token, string) {

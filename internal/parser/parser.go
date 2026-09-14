@@ -4,9 +4,9 @@ package parser
 import (
 	"strings"
 
-	"github.com/LangYa466/Teyru/internal/ast"
-	"github.com/LangYa466/Teyru/internal/lexer"
-	"github.com/LangYa466/Teyru/internal/source"
+	"github.com/teyru-lang/Teyru/internal/ast"
+	"github.com/teyru-lang/Teyru/internal/lexer"
+	"github.com/teyru-lang/Teyru/internal/source"
 )
 
 // Parse parses one source file.

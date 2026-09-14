@@ -5,7 +5,7 @@ import (
 	"os"
 	"reflect"
 
-	"github.com/LangYa466/Teyru/internal/ast"
+	"github.com/teyru-lang/Teyru/internal/ast"
 )
 
 // absent reports whether a node is missing, including a typed nil such as the

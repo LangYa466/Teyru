@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LangYa466/Teyru/internal/ast"
-	"github.com/LangYa466/Teyru/internal/source"
+	"github.com/teyru-lang/Teyru/internal/ast"
+	"github.com/teyru-lang/Teyru/internal/source"
 )
 
 func parse(t *testing.T, src string) (*ast.File, string) {

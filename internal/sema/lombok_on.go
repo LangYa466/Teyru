@@ -3,8 +3,8 @@ package sema
 import (
 	"strings"
 
-	"github.com/LangYa466/Teyru/internal/ast"
-	"github.com/LangYa466/Teyru/internal/util"
+	"github.com/teyru-lang/Teyru/internal/ast"
+	"github.com/teyru-lang/Teyru/internal/util"
 )
 
 // This file implements Lombok's onX family: the options that copy an annotation

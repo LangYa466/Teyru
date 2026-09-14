@@ -5,8 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/LangYa466/Teyru/internal/ast"
-	"github.com/LangYa466/Teyru/internal/util"
+	"github.com/teyru-lang/Teyru/internal/ast"
+	"github.com/teyru-lang/Teyru/internal/util"
 )
 
 // This file implements the Lombok compatibility layer. Annotation-driven

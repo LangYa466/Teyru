@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/LangYa466/Teyru/internal/ast"
+	"github.com/teyru-lang/Teyru/internal/ast"
 )
 
 // localClass emits the instance Lombok makes for an @Helper local class. An

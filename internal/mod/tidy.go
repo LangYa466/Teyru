@@ -9,8 +9,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/LangYa466/Teyru/internal/parser"
-	"github.com/LangYa466/Teyru/internal/source"
+	"github.com/teyru-lang/Teyru/internal/parser"
+	"github.com/teyru-lang/Teyru/internal/source"
 )
 
 // Tidy makes a module's requirements and checksums agree with what its sources

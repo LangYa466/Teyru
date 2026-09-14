@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LangYa466/Teyru/internal/driver"
+	"github.com/teyru-lang/Teyru/internal/driver"
 )
 
 // TestPrograms compiles and runs every program in tests/programs and compares

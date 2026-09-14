@@ -3,7 +3,7 @@ package sema
 import (
 	"sort"
 
-	"github.com/LangYa466/Teyru/internal/ast"
+	"github.com/teyru-lang/Teyru/internal/ast"
 )
 
 func sortStrings(s []string) { sort.Strings(s) }

@@ -24,7 +24,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/LangYa466/Teyru.git",
+    "url": "git+https://github.com/teyru-lang/Teyru.git",
     "directory": "editors/tree-sitter-teyru"
   },
   "tree-sitter": [

@@ -8,8 +8,9 @@
 
 ## 0. 產品契約（不可協商）
 
-1. **語言名稱固定 Teyru**：副檔名 `.teyru`、語言 ID `teyru`、CLI `teyru`、
-   Go module `github.com/LangYa466/Teyru`。不要重新命名。
+1. **語言名稱固定 Teyru**：副檔名 `.teyru`、語言 ID `teyru`、CLI `teyru`。
+   不要重新命名的是這些；程式庫的模組路徑跟著倉庫走，目前是
+   `github.com/teyru-lang/Teyru`（語言的家在 `teyru-lang` 組織）。
 2. **編譯器用 Go 撰寫，只用標準函式庫。** `go.mod` 目前沒有任何 `require`，
    必須維持。要引入第三方模組前，先證明標準函式庫做不到。
 3. **不依賴 JVM、javac、bytecode。** 產物是原生執行檔。任何「先產生 Java 再交給

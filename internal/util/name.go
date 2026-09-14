@@ -11,7 +11,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/LangYa466/Teyru/internal/ast"
+	"github.com/teyru-lang/Teyru/internal/ast"
 )
 
 // Mangle turns an arbitrary qualified name into a C identifier.

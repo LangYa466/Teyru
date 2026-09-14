@@ -5,8 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/LangYa466/Teyru/internal/ast"
-	"github.com/LangYa466/Teyru/internal/source"
+	"github.com/teyru-lang/Teyru/internal/ast"
+	"github.com/teyru-lang/Teyru/internal/source"
 )
 
 // The Spring-compatible container pass.

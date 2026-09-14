@@ -5,7 +5,7 @@ package ast
 import (
 	"strings"
 
-	"github.com/LangYa466/Teyru/internal/source"
+	"github.com/teyru-lang/Teyru/internal/source"
 )
 
 // Modifier flags.

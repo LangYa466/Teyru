@@ -1,6 +1,6 @@
 package util
 
-import "github.com/LangYa466/Teyru/internal/ast"
+import "github.com/teyru-lang/Teyru/internal/ast"
 
 // Primitive and reference sizes in the generated C, in bytes.
 const (
