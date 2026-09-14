@@ -29,6 +29,11 @@ const (
 // package it lives in, and the fixtures are where a reader expects them.
 func repo(t *testing.T, elems ...string) string {
 	t.Helper()
+	if len(elems) > 0 && elems[0] == "tests" {
+		if _, err := os.Stat(filepath.Join("..", "..", "tests", "programs")); err != nil {
+			t.Fatal("tests/ is not checked out: the suite is the teyru-lang/tests submodule, run `git submodule update --init`")
+		}
+	}
 	dir, err := filepath.Abs(filepath.Join(append([]string{"..", ".."}, elems...)...))
 	if err != nil {
 		t.Fatal(err)

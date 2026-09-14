@@ -1,8 +1,24 @@
 # AGENTS.md — Teyru 專案工作規範
 
 > 適用對象：本儲存庫內所有人類貢獻者與 Coding Agents。
-> 版本 3.0（2026-09-13）。v1.0 是 Java/JVM 時期的規範，已於 v2.0 作廢；本版補齊
-> util 分離、禁止佔位、文件與測試的完整規範。
+> 版本 3.1（2026-09-14）。v1.0 是 Java/JVM 時期的規範，已於 v2.0 作廢；本版補齊
+> util 分離、禁止佔位、文件與測試的完整規範，並記下拆分之後的倉庫佈局。
+
+---
+
+## 倉庫佈局
+
+| 倉庫 | 內容 |
+|---|---|
+| `teyru-lang/Teyru`（本倉庫） | 編譯器（Go）、執行期（C）、標準程式庫（`lib/*.teyru`）、範例（`examples/`） |
+| `teyru-lang/tests` | 端到端測試資料，以 **submodule** 掛在 `tests/`：第一次 clone 要 `git submodule update --init` |
+| `teyru-lang/docs` | 使用者文件（fumadocs），發佈在 <https://docs.teyru.dev> |
+| `teyru-lang/editors` | VS Code／Zed／JetBrains 擴充、tree-sitter 文法 |
+| `teyru-lang/website` | 官網原始碼，發佈在 <https://teyru.dev> |
+
+**產品的文件只有一份**，在 `teyru-lang/docs`：改了行為就改那裡，不要在程式庫裡再放
+一份。本倉庫只留 `README.md`（倉庫門面與安裝方式）、`AGENTS.md`（本檔）與範例自己的
+說明。
 
 ---
 
@@ -88,12 +104,12 @@ source → lexer → parser → ast → sema → codegen
 1. **禁止留下多行的 TODO、`/* unimplemented */`、或回傳未定義值的空殼。**
    若某條路徑真的無法實作，必須：
    - 讓它呼叫明確的失敗路徑（例如 `ty_unimplemented("Class.method")`，以狀態 70 結束），
-   - 並在 `docs/language.md` 的「尚未實作」列出。
+   - 並在文件站（`teyru-lang/docs`）的「尚未實作」列出。
 2. 禁止「編譯器接受了但執行期默默回傳垃圾」的組合。寧可拒絕編譯，也不要產生
    行為未定義的程式。
-3. 禁止用註解掉的程式碼當作待辦事項；要嘛刪掉，要嘛在 `docs/` 開一節說明。
-4. 文件與程式碼必須一致：改了行為就同步改 `README*`、`docs/language.md`、
-   `docs/diagnostics.md`。
+3. 禁止用註解掉的程式碼當作待辦事項；要嘛刪掉，要嘛在文件站開一節說明。
+4. 文件與程式碼必須一致：改了行為就同步改 `teyru-lang/docs` 的對應頁面
+   （語言參考、診斷碼、該主題那一頁），並在 §9 的表格裡找到它。
 
 ---
 
@@ -101,6 +117,9 @@ source → lexer → parser → ast → sema → codegen
 
 - **端到端**：在 `tests/programs/` 放 `xxx.teyru` 與 `xxx.expected`。
   需要命令列參數時另外放 `xxx.args`（每行一個）。`go test` 會自動編譯並比對輸出。
+  `tests/` 是 `teyru-lang/tests` 的 submodule：改測試要在**那個**倉庫提交，這裡只會
+  動到 gitlink。submodule 沒 checkout 時 `make test` 與 `go test` 都會直接說清楚，
+  不會安靜地零測試通過。
 - **診斷**：在 `driver_test.go` 的 `TestDiagnostics` 加入「應該被拒絕」的案例與期望
   錯誤碼。
 - **單元**：`internal/util` 等純函式要有 table-driven 測試。
@@ -120,7 +139,7 @@ source → lexer → parser → ast → sema → codegen
 - 格式 `TY-<階段>-<四位數字>`，階段為 `SYN`（詞法與語法）、`TYP`（語意）、
   `PROP`（property）、`INT`（編譯器內部）、`IO`（檔案）。
 - 代碼一旦發布就不再改變意義；新增要往後編號，不要重複使用已刪除的號碼。
-- 每個代碼都要在 `docs/diagnostics.md` 有一列說明（訊息、原因、修法）。
+- 每個代碼都要在文件站的〈診斷碼〉那一頁有一列說明（訊息、原因、修法）。
 - 訊息格式：小寫開頭、不超過一行、用 `%s` 帶入符號名稱，不要有大寫縮寫。
 
 ---
@@ -138,16 +157,20 @@ source → lexer → parser → ast → sema → codegen
 
 | 檔案 | 內容 | 什麼時候要改 |
 |---|---|---|
-| `README.md` | 繁中主文件（含語言切換列） | 使用者可見行為改變時 |
-| `README.zh-CN.md` / `README.en.md` / `README.ja.md` | 對應語言版本 | 與 `README.md` 同步 |
-| `docs/language.md` | 完整語言參考 | 語法或語意改變時 |
-| `docs/diagnostics.md` | 每個診斷碼的說明 | 新增／修改診斷碼時 |
-| `docs/lombok.md` | Lombok 相容層：支援狀態、產生的成員、與 Lombok 的差異 | 新增或調整標註支援時 |
-| `docs/native.md` | 原生互通：以 C 實作 native 方法、符號命名與型別對應 | native 介面或 CLI 旗標改變時 |
-| `docs/architecture.md` | 編譯流程與執行期模型 | 架構改變時 |
-| `AGENTS.md` | 本檔 | 流程改變時 |
+| `README.md`（本倉庫） | 倉庫門面：這是什麼、怎麼安裝、其他倉庫在哪 | 專案定位或安裝方式改變時 |
+| `examples/*/README.md`（本倉庫） | 範例自己的說明 | 範例改變時 |
+| `AGENTS.md`（本倉庫） | 本檔 | 流程改變時 |
+| `teyru-lang/docs` 的〈語言參考〉 | 完整語言參考 | 語法或語意改變時 |
+| `teyru-lang/docs` 的〈診斷碼〉 | 每個診斷碼的說明 | 新增／修改診斷碼時 |
+| `teyru-lang/docs` 的〈Lombok〉 | 支援狀態、產生的成員、與 Lombok 的差異 | 新增或調整標註支援時 |
+| `teyru-lang/docs` 的〈原生互通〉 | 以 C 實作 native 方法、符號命名與型別對應 | native 介面或 CLI 旗標改變時 |
+| `teyru-lang/docs` 的〈架構〉 | 編譯流程與執行期模型 | 架構改變時 |
+| `teyru-lang/docs` 的〈JSON〉／〈Web 框架〉／〈模組〉 | 各主題的完整說明 | 該主題行為改變時 |
+| `teyru-lang/tests` | 端到端測試資料 | 新增或修改測試時 |
+| `teyru-lang/editors` | 編輯器擴充與文法 | 語法或關鍵字改變時 |
 
-翻譯版本必須與 `README.md` 結構一致（章節、表格、範例），不能只寫摘要。
+文件站在 `teyru-lang/docs`，`README` 的英／日／簡中版本也在那裡（對應語言的頁面），
+四種語言的內容要一致：改了其中一份就要改其餘的結構。
 
 ---
 
@@ -159,16 +182,16 @@ source → lexer → parser → ast → sema → codegen
 - 沒有反射、沒有執行緒（`java.util` 集合、`java.io`、`java.net` 都有）。
 - 與 Java 生態不相容（沒有 JAR、沒有 JDK 類別庫、沒有 JNI）。
 - GC 為保守式標記清除，非分代；大量短命物件的情境仍落後 HotSpot 的逃逸分析。
-- 型別推論比 javac 弱一層，界線見 `docs/language.md` §12 第 11 條。
+- 型別推論比 javac 弱一層，界線見文件站〈語言參考〉§12 第 11 條。
 
 ---
 
 ## 11. 送出前檢查清單
 
-- [ ] `go build ./...`、`go vet ./...`、`go test ./... -count=1` 全綠
+- [ ] `go build ./...`、`go vet ./...`、`go test ./... -count=1` 全綠（`tests/` submodule 已 checkout）
 - [ ] 新功能有端到端測試；新診斷碼有拒絕測試
 - [ ] 沒有多行 TODO 或空殼實作；未實作路徑會明確失敗
 - [ ] 共用邏輯在 `internal/util`，沒有兩份實作
 - [ ] 執行期 C 在 `-Wall -Wextra` 下無警告
-- [ ] `README*` 與 `docs/` 已同步
+- [ ] 行為改變時，`teyru-lang/docs` 的對應頁面已同步（文件只有那一份）
 - [ ] commit 訊息符合 §8，且沒有 AI 署名

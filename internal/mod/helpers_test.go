@@ -13,15 +13,32 @@ const (
 	fixtureVersion = "v0.1.0"
 )
 
+// testsDir answers with a path under tests/, and says what to do when the
+// directory is empty: the suite is the teyru-lang/tests repository, mounted
+// here as a submodule, and a clone that skipped it fails on a missing fixture
+// file rather than on the submodule it never checked out.
+//
+// The external test package has its own copy of this -- a Go directory holds
+// two test packages and they cannot share -- so the message is the same in
+// both.
+func testsDir(t *testing.T, elems ...string) string {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join("..", "..", "tests", "programs")); err != nil {
+		t.Fatal("tests/ is not checked out: the suite is the teyru-lang/tests submodule, run `git submodule update --init`")
+	}
+	dir, err := filepath.Abs(filepath.Join(append([]string{"..", "..", "tests"}, elems...)...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // fixturesDir is the directory the local fetcher reads: the layout of a module
 // cache, kept in the repository so that no test of the module system needs a
 // network.
 func fixturesDir(t *testing.T) string {
 	t.Helper()
-	dir, err := filepath.Abs(filepath.Join("..", "..", "tests", "modules", "fixtures"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	dir := testsDir(t, "modules", "fixtures")
 	if !IsModuleDir(filepath.Join(dir, fixtureModule+"@"+fixtureVersion)) {
 		t.Fatalf("%s holds no %s@%s", dir, fixtureModule, fixtureVersion)
 	}
@@ -31,11 +48,7 @@ func fixturesDir(t *testing.T) string {
 // moduleFixture is appDir and friends: a directory of tests/modules.
 func moduleFixture(t *testing.T, name string) string {
 	t.Helper()
-	dir, err := filepath.Abs(filepath.Join("..", "..", "tests", "modules", name))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return dir
+	return testsDir(t, "modules", name)
 }
 
 // testCache points the module cache at a fresh directory and installs the

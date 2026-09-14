@@ -1,9 +1,0 @@
-timeout: true
-after timeout: true
-half close is eof: true
-still readable: answer
-closed peer is eof: true
-closed peer did not wait: true
-readLine at eof: true
-accept timeout: true
-refused: true

@@ -1,7 +1,0 @@
-package pkg2
-
-public class Other {
-  public static String hi() {
-    return "other"
-  }
-}

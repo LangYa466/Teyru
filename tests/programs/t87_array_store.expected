@@ -1,5 +1,0 @@
-caught ArrayStoreException
-o[0] = hello
-o[1] = world
-o[0] = null
-plain[0] = 5

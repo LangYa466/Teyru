@@ -30,6 +30,7 @@ func TestPrograms(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	requireSuite(t, dir, entries)
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), ".teyru") {
 			continue
@@ -305,4 +306,19 @@ func TestNative(t *testing.T) {
 			t.Errorf("the header declares %s but the C implementation does not define it", name)
 		}
 	}
+}
+
+// requireSuite refuses to pass on an empty tests/ directory.
+//
+// The suite is the teyru-lang/tests repository, mounted here as a submodule: a
+// clone that skipped `--recurse-submodules` has the directory and nothing in
+// it, and every test below would pass having run nothing at all.
+func requireSuite(t *testing.T, dir string, entries []os.DirEntry) {
+	t.Helper()
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".teyru") {
+			return
+		}
+	}
+	t.Fatalf("%s has no programs: the suite is the teyru-lang/tests submodule, run `git submodule update --init`", dir)
 }

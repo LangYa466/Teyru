@@ -1,8 +1,0 @@
-3,4
-Point[x=3, y=4]
-{"x":3,"y":4}
-a 1 true
-{"tag":"a","where":{"x":1,"y":2},"active":true}
-b null false
-{"tag":"a","where":{"x":1,"y":2},"active":true}
-true
