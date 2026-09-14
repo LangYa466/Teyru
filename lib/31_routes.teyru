@@ -41,6 +41,13 @@ class RouteHandler implements Handler {
     Object[] out = new Object[ps.length]
     for (int i = 0 : i < ps.length : i++) {
       Annotation[] annos = ps[i].getAnnotations()
+      // A parameter that is the request is the request, whatever it is called:
+      // Spring hands a handler the HttpServletRequest the same way, and a
+      // session is asked for from it.
+      if (types[i].getName().equals("teyru.HttpRequest")) {
+        out[i] = req
+        continue
+      }
       if (RouteParams.has(annos, "PathVariable") != null) {
         out[i] = RouteParams.convert(RouteParams.valueOf(vars, RouteParams.name(annos, "PathVariable", ps[i])),
             types[i], RouteParams.name(annos, "PathVariable", ps[i]))
