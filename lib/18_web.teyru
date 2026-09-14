@@ -1201,11 +1201,13 @@ class Application {
     return ctx
   }
 
-  // routerFrom builds the router from the mappings the generated registry holds.
+  // routerFrom builds the router by reading each controller's methods, which is
+  // what the compiler used to do while checking: the mapping annotations, the
+  // class's prefix, and one handler per mapping (lib/31_routes.teyru).
   public static Router routerFrom(ApplicationContext ctx) {
     Router r = new Router()
-    for (Route rt : BeanRegistry.routes()) {
-      r.addRoute(rt)
+    for (Class c : BeanRegistry.registered()) {
+      RouteScanner.register(r, c, "")
     }
     return r
   }

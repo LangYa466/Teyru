@@ -69,10 +69,7 @@ type Checker struct {
 	frameworkDone bool
 	// fwSpecs is the bean list the container pass found, for resolving an
 	// injection while the registry is being generated.
-	fwSpecs []*beanSpec
-	// fwRoutes is the mappings the controllers declare, registered by the same
-	// generated setup that registers the beans.
-	fwRoutes   []routeSpec
+	fwSpecs    []*beanSpec
 	selector   int
 	todo       []func()
 	Props      map[ast.Expr]ast.Expr

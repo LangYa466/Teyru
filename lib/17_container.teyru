@@ -125,7 +125,6 @@ class BeanDefinition {
 // which is what Spring does.
 class BeanRegistry {
   private static List<Class> classes = new ArrayList<Class>()
-  private static List<Route> routeDefs = new ArrayList<Route>()
 
   public static void register(Class type) {
     classes.add(type)
@@ -139,23 +138,6 @@ class BeanRegistry {
     return classes.size()
   }
 
-  // route records a controller mapping. The handler the compiler generates
-  // already knows which bean answers, so the name is not needed here.
-  public static void route(String method, String path, Handler handler) {
-    Route r = new Route()
-    r.method = method
-    r.pattern = path
-    r.handler = handler
-    routeDefs.add(r)
-  }
-
-  public static List<Route> routes() {
-    return routeDefs
-  }
-
-  public static int routeCount() {
-    return routeDefs.size()
-  }
 }
 
 // ---------------------------------------------------------------- context

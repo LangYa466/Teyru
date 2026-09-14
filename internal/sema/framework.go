@@ -68,7 +68,6 @@ func (c *Checker) applyFramework() {
 	}
 	// bean names must be unique before anything else can be checked: every
 	c.fwSpecs = specs
-	c.fwRoutes = c.applyWebRoutes(specs)
 	c.synthRegistry(specs)
 }
 
@@ -299,7 +298,6 @@ func (c *Checker) synthSetup(reg *ast.Class, env *typeEnv, specs []*beanSpec) *a
 		seen[s.cl.Full] = true
 		stmts = append(stmts, exprStmtOf(callNamed(id("BeanRegistry"), "register", c.classLitOf(s.cl))))
 	}
-	stmts = append(stmts, c.synthRoutes(reg, env, c.fwRoutes)...)
 	stmts = append(stmts, returnOf(boolLit(true)))
 	m.Body = blockOf(stmts...)
 	return m

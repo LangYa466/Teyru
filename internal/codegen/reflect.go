@@ -385,7 +385,15 @@ func (e *Emitter) emitMethodTable(cl *ast.Class) string {
 		anns, nannos := e.emitAnnoTable(suffix, methodAnnos(m))
 		// a parameter's own annotations, which is where @Value and @Autowired
 		// on a constructor or method parameter are written
-		pannos, pnannos := "NULL", "NULL"
+		pannos, pnannos, pnames := "NULL", "NULL", "NULL"
+		if len(m.ParamNames) > 0 {
+			var names []string
+			for _, n := range m.ParamNames {
+				names = append(names, e.cstr(n))
+			}
+			pnames = "pnames_" + suffix
+			fmt.Fprintf(&e.meta, "static const char *const %s[] = {%s};\n", pnames, strings.Join(names, ", "))
+		}
 		if len(m.ParamAnnos) > 0 {
 			var lists, counts []string
 			for i := range m.Params {
@@ -402,9 +410,9 @@ func (e *Emitter) emitMethodTable(cl *ast.Class) string {
 			fmt.Fprintf(&e.meta, "static const int32_t %s[] = {%s};\n", pnannos, strings.Join(counts, ", "))
 		}
 		entries = append(entries, fmt.Sprintf(
-			"  {.name = %q, .fn = (void*)%s, .owner = &cls_%s, .ret = %s, .params = %s, .nparams = %d, .mods = %d, .kind = %s, .primret = %d, .annos = %s, .nannos = %d, .pannos = %s, .pnannos = %s},\n",
+			"  {.name = %q, .fn = (void*)%s, .owner = &cls_%s, .ret = %s, .params = %s, .nparams = %d, .mods = %d, .kind = %s, .primret = %d, .annos = %s, .nannos = %d, .pannos = %s, .pnannos = %s, .pnames = %s},\n",
 			m.Name, e.invokerName(m), mangle(m.Owner.Full), ret, params, len(m.Params),
-			javaMods(m.Mods), kind, primKindOf(m.Result), anns, nannos, pannos, pnannos))
+			javaMods(m.Mods), kind, primKindOf(m.Result), anns, nannos, pannos, pnannos, pnames))
 	}
 	name := "mds_" + mangle(cl.Full)
 	fmt.Fprintf(&e.meta, "static const tymethod %s[] = {\n%s};\n", name, strings.Join(entries, ""))

@@ -1,0 +1,289 @@
+package teyru
+
+// The routes a controller declares, read from the class.
+//
+// The compiler used to walk the mapping annotations while checking and
+// generate one handler per route: it resolved the controller bean, converted
+// each parameter from the request, called the method and turned the result
+// into a response. That is what the handler does here -- the annotations are
+// read with java.lang.reflect instead -- so a controller binds the same whether
+// or not the compiler saw a route for it, and the compiler's part is the class
+// list the container already gets.
+//
+// What a parameter's name is comes from the metadata the emitter writes for
+// every method: Java needs -parameters for this, and a language whose compiler
+// is writing the table anyway does not.
+
+// RouteHandler answers one route: it asks the container for the controller --
+// which makes a controller a singleton shared by every request, as in Spring --
+// fills the method's arguments from the request, calls it, and turns the answer
+// into a response.
+class RouteHandler implements Handler {
+  private Class owner
+  private Method method
+
+  public RouteHandler(Class owner, Method method) {
+    this.owner = owner
+    this.method = method
+  }
+
+  public Object handle(ApplicationContext ctx, HttpRequest req, Map<String, String> vars) {
+    Object bean = ctx.getBean(owner)
+    return RouteResponse.of(method.invoke(bean, arguments(req, vars)))
+  }
+
+  // arguments fills one call's arguments: each parameter's own annotations say
+  // where its value comes from, and a parameter with none is a query parameter
+  // of the name it was written with, which is Spring's rule for a simple type.
+  public Object[] arguments(HttpRequest req, Map<String, String> vars) {
+    Parameter[] ps = method.getParameters()
+    Class[] types = method.getParameterTypes()
+    Object[] out = new Object[ps.length]
+    for (int i = 0 : i < ps.length : i++) {
+      Annotation[] annos = ps[i].getAnnotations()
+      if (RouteParams.has(annos, "PathVariable") != null) {
+        out[i] = RouteParams.convert(RouteParams.valueOf(vars, RouteParams.name(annos, "PathVariable", ps[i])),
+            types[i], RouteParams.name(annos, "PathVariable", ps[i]))
+        continue
+      }
+      if (RouteParams.has(annos, "RequestBody") != null) {
+        out[i] = RouteParams.body(req, types[i])
+        continue
+      }
+      if (RouteParams.has(annos, "RequestHeader") != null) {
+        Annotation a = RouteParams.has(annos, "RequestHeader")
+        String name = RouteParams.text(a, "value")
+        if (name.length() == 0) {
+          name = ps[i].getName()
+        }
+        out[i] = RouteParams.convert(req.header(name, RouteParams.text(a, "defaultValue")), types[i], name)
+        continue
+      }
+      if (RouteParams.has(annos, "RequestParam") != null) {
+        Annotation a = RouteParams.has(annos, "RequestParam")
+        String name = RouteParams.text(a, "value")
+        if (name.length() == 0) {
+          name = ps[i].getName()
+        }
+        out[i] = RouteParams.convert(req.param(name, RouteParams.text(a, "defaultValue")), types[i], name)
+        continue
+      }
+      String name = ps[i].getName()
+      out[i] = RouteParams.convert(req.param(name, ""), types[i], name)
+    }
+    return out
+  }
+}
+
+// RouteParams is where a parameter's text becomes the value the method wants,
+// and where the annotations that say which text are read.
+class RouteParams {
+  public static Annotation has(Annotation[] annos, String simple) {
+    return BeanScanner.has(annos, simple)
+  }
+
+  // text is an annotation element that may not be there: an annotation's
+  // defaults are carried by the metadata, so a missing one is the default and
+  // reading it is safe -- this is the one case where the caller wants "" for
+  // "not written".
+  public static String text(Annotation a, String element) {
+    if (a == null || a.has(element) == false) {
+      return ""
+    }
+    return a.stringValue(element)
+  }
+
+  public static String name(Annotation[] annos, String simple, Parameter p) {
+    Annotation a = has(annos, simple)
+    String n = text(a, "value")
+    return n.length() > 0 ? n : p.getName()
+  }
+
+  public static String valueOf(Map<String, String> vars, String name) {
+    if (vars == null) {
+      return ""
+    }
+    String v = vars.get(name)
+    return v == null ? "" : v
+  }
+
+  // body is a @RequestBody: a String parameter is the body as it arrived, and
+  // any other type is the body parsed into that class, which is the JSON
+  // binding reading the class as it does anywhere else.
+  public static Object body(HttpRequest req, Class type) {
+    if (type.equals(String.class)) {
+      return req.body
+    }
+    return JsonBinding.readFrom(req.body, type)
+  }
+
+  // convert is the text of a request as the type the method declares. A value
+  // that does not fit is the client's mistake, and TypeMismatchException is what
+  // the server turns into a 400.
+  public static Object convert(String raw, Class type, String param) {
+    if (type.equals(String.class)) {
+      return raw
+    }
+    if (type.equals(int.class) || type.equals(Integer.class)) {
+      return WebConvert.toInt(raw, param)
+    }
+    if (type.equals(long.class) || type.equals(Long.class)) {
+      return WebConvert.toLong(raw, param)
+    }
+    if (type.equals(double.class) || type.equals(Double.class)) {
+      return WebConvert.toDouble(raw, param)
+    }
+    if (type.equals(float.class) || type.equals(Float.class)) {
+      return WebConvert.toFloat(raw, param)
+    }
+    if (type.equals(short.class) || type.equals(Short.class)) {
+      return WebConvert.toShort(raw, param)
+    }
+    if (type.equals(byte.class) || type.equals(Byte.class)) {
+      return WebConvert.toByte(raw, param)
+    }
+    if (type.equals(boolean.class) || type.equals(Boolean.class)) {
+      return Boolean.parseBoolean(raw)
+    }
+    if (type.equals(char.class) || type.equals(Character.class)) {
+      if (raw.length() == 0) {
+        throw new TypeMismatchException(WebConvert.mismatch(raw, param, "char"))
+      }
+      return raw.charAt(0)
+    }
+    if (type.isEnum()) {
+      // an enum parameter is matched by name, and a name the enum does not have
+      // is the client's mistake rather than a 500
+      Object[] all = type.getEnumConstants()
+      if (all != null) {
+        for (int i = 0 : i < all.length : i++) {
+          if (((Enum) all[i]).name().equals(raw)) {
+            return all[i]
+          }
+        }
+      }
+      throw new TypeMismatchException(WebConvert.mismatch(raw, param, type.getSimpleName()))
+    }
+    // a handler parameter that is an object is bound from the body, which is
+    // what @RequestBody would have said
+    return JsonBinding.readFrom(raw, type)
+  }
+}
+
+// RouteResponse turns a handler's answer into the response: an HttpResponse is
+// taken as it stands, a String is the body as text, and anything else is
+// written as JSON -- which is what a @RestController answers with.
+class RouteResponse {
+  public static HttpResponse of(Object out) {
+    if (out instanceof HttpResponse) {
+      return (HttpResponse) out
+    }
+    HttpResponse res = new HttpResponse()
+    if (out == null) {
+      return res
+    }
+    if (out instanceof String) {
+      res.body = (String) out
+      return res
+    }
+    res.contentType = "application/json; charset=utf-8"
+    res.body = JsonBinding.writeTo(out).toString()
+    return res
+  }
+}
+
+// RouteScanner registers what a controller declares: for each method with a
+// mapping annotation, the path the class prefix and the mapping make, and a
+// handler that calls it.
+class RouteScanner {
+  public static void register(Router router, Class type, String beanName) {
+    Annotation[] classAnnos = type.getAnnotations()
+    if (BeanScanner.has(classAnnos, "Controller") == null &&
+        BeanScanner.has(classAnnos, "RestController") == null) {
+      return
+    }
+    String base = RouteParams.text(BeanScanner.has(classAnnos, "RequestMapping"), "value")
+    Method[] ms = type.getDeclaredMethods()
+    for (int i = 0 : i < ms.length : i++) {
+      if (Modifier.isStatic(ms[i].getModifiers())) {
+        continue
+      }
+      String verb = verbOf(ms[i])
+      if (verb.length() == 0) {
+        continue
+      }
+      String path = pathOf(ms[i])
+      router.add(verb, joinPath(base, path), beanName, new RouteHandler(type, ms[i]))
+    }
+  }
+
+  // verbOf is the verb a method answers, or "" when it has no mapping: the
+  // shortcut annotations name it, and @RequestMapping says so with its `method`
+  // element -- an empty one being every verb.
+  public static String verbOf(Method m) {
+    Annotation a = BeanScanner.has(m.getAnnotations(), "RequestMapping")
+    if (a != null) {
+      String verb = a.stringValue("method").toUpperCase()
+      return verb.length() == 0 ? "*" : verb
+    }
+    if (BeanScanner.has(m.getAnnotations(), "GetMapping") != null) {
+      return "GET"
+    }
+    if (BeanScanner.has(m.getAnnotations(), "PostMapping") != null) {
+      return "POST"
+    }
+    if (BeanScanner.has(m.getAnnotations(), "PutMapping") != null) {
+      return "PUT"
+    }
+    if (BeanScanner.has(m.getAnnotations(), "DeleteMapping") != null) {
+      return "DELETE"
+    }
+    if (BeanScanner.has(m.getAnnotations(), "PatchMapping") != null) {
+      return "PATCH"
+    }
+    return ""
+  }
+
+  public static String pathOf(Method m) {
+    Annotation a = BeanScanner.has(m.getAnnotations(), "RequestMapping")
+    if (a != null) {
+      return a.stringValue("value")
+    }
+    a = BeanScanner.has(m.getAnnotations(), "GetMapping")
+    if (a != null) {
+      return a.stringValue("value")
+    }
+    a = BeanScanner.has(m.getAnnotations(), "PostMapping")
+    if (a != null) {
+      return a.stringValue("value")
+    }
+    a = BeanScanner.has(m.getAnnotations(), "PutMapping")
+    if (a != null) {
+      return a.stringValue("value")
+    }
+    a = BeanScanner.has(m.getAnnotations(), "DeleteMapping")
+    if (a != null) {
+      return a.stringValue("value")
+    }
+    a = BeanScanner.has(m.getAnnotations(), "PatchMapping")
+    if (a != null) {
+      return a.stringValue("value")
+    }
+    return ""
+  }
+
+  // joinPath concatenates a controller's prefix with a mapping's path, so that
+  // "/pets" and "/{id}" make "/pets/{id}" and neither side needs a trailing
+  // slash.
+  public static String joinPath(String base, String path) {
+    if (base.length() == 0) {
+      return path.length() == 0 ? "/" : path
+    }
+    if (path.length() == 0) {
+      return base
+    }
+    String left = base.endsWith("/") ? base.substring(0, base.length() - 1) : base
+    String right = path.startsWith("/") ? path.substring(1) : path
+    return left + "/" + right
+  }
+}
