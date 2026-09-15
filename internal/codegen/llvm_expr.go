@@ -707,10 +707,18 @@ func (e *llvmEmitter) unary(f *fb, v *ast.Unary) lval {
 		f.ins(fmt.Sprintf("%s = xor i1 %s, true", r, b))
 		return e.boolVal(f, r)
 	case "~":
-		x := e.coerce(f, e.expr(f, v.X), ast.TInt)
+		// The complement is taken in the expression's own type, which is the
+		// promoted one: complementing a long as an int throws away its upper
+		// half, and that is not a wrong shift or a wrong mask somewhere later
+		// -- it is a wrong value that every later round inherits.
+		ct := t
+		if _, ok := ct.(*ast.PrimType); !ok {
+			ct = ast.TInt
+		}
+		x := e.coerce(f, e.expr(f, v.X), ct)
 		r := f.reg()
-		f.ins(fmt.Sprintf("%s = xor i32 %s, -1", r, x.v))
-		return value(r, ast.TInt)
+		f.ins(fmt.Sprintf("%s = xor %s %s, -1", r, e.llvmType(ct), x.v))
+		return value(r, ct)
 	case "++", "--":
 		return e.incDec(f, v)
 	}
