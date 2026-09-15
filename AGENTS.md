@@ -269,10 +269,27 @@ source → lexer → parser → ast → sema → codegen
 
 
 
-- **`bench_string` 比 `74fa648` 慢 67%（交錯 A/B，20 對，雜訊約 1%，同一台機器）**：同一組
-  交錯量測顯示 `bench_alloc` **快 2.19 倍**、`bench_loop` 慢 19%（迴圈回邊安全點的既定代價）。
-  `bench_string` 這 67% 先前沒有任何紀錄，是工作期間漏掉的退步；已列入待處理。對 Java 仍是
-  ~3.7 倍快，所以對外宣稱沒有變成錯的，但這條路徑本身退步了。
+- **`bench_string` 比 `74fa648` 慢 67%（成因已查明，主因已修）**：交錯 A/B（20 對、雜訊約
+  1%、同一台機器）顯示 `bench_alloc` 快 2.19 倍、`bench_loop` 慢 19%（迴圈回邊安全點的既定代
+  價）。慢的其實不是字串，**而是配置器終於真的在配置**：在 `39218f6` 之前，慢路徑會把
+  `ty_bump` 繞回過期的 `used` 水位，所以 60 萬次配置一直重複使用**同一個 256 KB slab**
+  （chunknew=1、只掃 455 個 block、144 次 page fault）——舊版的「較快」是在量一個沒有真正配置
+  的配置器。修正水位之後程式第一次真的有堆積（8.6 MB、2205 次 fault、約 3.5 ms），而
+  `39218f6` 的 sweep 每次把整塊 slab 的死 block 塞回 free list、配置器再**一條一條走慢路徑**
+  把它吸乾（60 萬次配置有 59.5 萬次＝99.2% 走慢路徑，收集次數 8 → 123）；後段
+  0.0136 → 0.0157 是執行緒化：每個迴圈頂端一個 safepoint（本程式 20 萬次 atomic load），以及
+  慢路徑前後各一對 world mutex ＋ heap mutex（實測 34,547 次慢配置約 0.48 ms、14 ns/次）。
+  **已修**：sweep 改為單趟（mark 階段自己記帳 `live_any` 與 `live_bytes`，不再為了判斷整塊
+  slab 能否釋放而先走訪每個 block）；等價性用獨立 walk 逐次收集重新推導兩個值比對，六個基準
+  加上四個 GC／執行緒測試零不符。`bench_invoke` 587.9 → 534.1 ms（1.101x，與移除的那一趟實測
+  58 ms 相符）、`bench_string` 14.43 → 13.87 ms（1.040x），其餘中性；量測取 CPU 時間、taskset
+  綁核、8 種程式碼佈局取中位數（熱迴圈機器碼兩版相同，單一佈局會有 ±10% 的假差異）。
+  **未修且已量測**：配置器吸乾 free list 的成本（`bench_invoke` 的 31%），修法是在持有 heap
+  lock 時整批取進 per-thread 清單，屬配置器設計變更。另一個被量測後否決的想法：把
+  block-start bitmap 改成配置時寫入——600k 次 read-modify-write 落在 inline 快路徑上比它省下
+  的 walk 更貴（14.19 ms 對 13.89 ms），所以維持每次收集重建。對 Java 仍是 ~3.7 倍快，所以對
+  外宣稱沒有變成錯的。
+
 - **基準的量測方法與注意事項**（`/tmp/teyru-bench-report.md`，38 分鐘、10 節）：Java 那一欄
   每次都是全新的 JVM，短程式由暖機主導——同一個 fib(32) 暖機後 Java 只要 5–6 ms，而 Teyru 是
   4 ms，所以「fib 快 4.58 倍」大部分是冷解譯器造成的。`bench_invoke` 必須這樣讀：Teyru 的
