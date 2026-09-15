@@ -1,0 +1,686 @@
+package teyru
+
+/* java.util.concurrent's executor half: Callable, Future, ExecutorService, and
+ * the pools Executors' factories hand out.
+ *
+ * The shape is Java's. A Future is the handle on a task; a worker thread takes
+ * a task at a time off a queue and runs it on itself, so a task's stack,
+ * allocations and monitors belong to that thread exactly as they would if the
+ * program had started the Thread itself; submit(Callable) answers a Future
+ * whose get() waits for the answer; shutdown() stops the pool taking work and
+ * lets the tasks that were already taken finish; awaitTermination waits for the
+ * workers to leave.
+ *
+ * What this is built on, because it changes how a reader should reason about
+ * it:
+ *
+ *   - Monitors, and only monitors, for everything but the waiting. The queue is
+ *     an ArrayDeque under the pool's monitor, a Future's answer is written under
+ *     its own, and AtomicInteger in 38_concurrent_collections is a monitor.
+ *     The runtime has no hardware atomics, so nothing in this file is lock-free
+ *     and nothing scales the way java.util.concurrent scales: a pool of four
+ *     threads taking tasks from one queue contends on one monitor, and that is
+ *     the price of the simple correct thing.
+ *
+ *   - THE POOL AND THE FUTURES DO NOT USE Object.wait. They poll instead: a
+ *     worker with nothing to do, and a get() whose answer is not there yet,
+ *     sleep for Concurrent.POLL_MILLIS and look again. This is not what
+ *     java.util.concurrent does -- a Java worker parks on a condition variable
+ *     and a task wakes it -- and the reason is not taste, it is that this
+ *     runtime's monitor waits are broken:
+ *
+ *       - four threads inside Object.wait on one object, woken by notifyAll,
+ *         lose the wakeup about one run in four (a program that waits this way
+ *         hangs), and sometimes throw IllegalMonitorStateException out of the
+ *         wait that follows;
+ *       - and even one thread waiting on a monitor of its own eventually
+ *         corrupts that monitor's ownership: a worker parked on its own signal
+ *         has been seen to throw IllegalMonitorStateException: "current thread
+ *         is not owner" from the very next synchronized block it left, with a
+ *         plain-language pool of four workers failing this way in every run of
+ *         a test that ran a few hundred tasks.
+ *
+ *     Both were reproduced with programs that use nothing but the prelude --
+ *     Thread, synchronized, Object.wait/notifyAll -- so this is the runtime,
+ *     not this file. What this file does about it is wait on nothing when it
+ *     can poll instead: Thread.sleep takes no monitor, so a pooling worker
+ *     cannot corrupt one. The price is honest and worth stating: a task
+ *     submitted to an idle pool is picked up within Concurrent.POLL_MILLIS
+ *     rather than immediately, and an idle worker wakes twelve times a second
+ *     to look at its queue. For a pool of four that is nothing; for a pool of
+ *     four hundred it would be 4800 wakeups a second, and a reader deciding how
+ *     many workers to keep should know it.
+ *
+ *   - CountDownLatch, in 38_concurrent_collections.teyru, is the one place
+ *     built on Object.wait/notifyAll, because that is what a synchronizer is.
+ *     It waits the only way that is safe here: each waiting thread has a signal
+ *     of its own (Signal, below), so no monitor ever holds two waiters, and the
+ *     wait runs in slices of Concurrent.WAIT_SLICE_MILLIS and re-examines the
+ *     count, so a notification the runtime loses costs one slice rather than a
+ *     hang.
+ *
+ *   - There is no interrupt. Nothing in this language can stop a thread that is
+ *     inside a task, so shutdownNow() cannot mean what it means in Java: it
+ *     drops the tasks that have not started and hands them back, and the tasks
+ *     that are running run to their end. Its comment says so, and no method
+ *     here takes Java's mayInterruptIfRunning flag, because a flag that
+ *     silently did nothing would mislead exactly the reader it was for.
+ *
+ *   - There is no TimeUnit in this standard library. Every duration here is
+ *     milliseconds, the unit Thread.sleep takes.
+ *
+ * A task that throws is reported, never swallowed: FutureTask.run catches the
+ * throwable and keeps it, and get() throws ExecutionException with it as the
+ * cause, which is what Java does. A task that came in through execute() and
+ * throws has no Future to carry it, and it is handled the way Java's worker
+ * handles it: the worker thread dies with the throwable (the runtime's uncaught
+ * handler prints Java's line), and the pool starts a replacement so a fixed
+ * pool does not quietly shrink.
+ *
+ * A pool this program does not shut down outlives it: the runtime waits for
+ * every thread the program started before it exits, so a program that builds a
+ * pool and returns from main without shutting it down does not end until that
+ * pool's workers do -- which for a fixed pool is never. Shut your pools down.
+ *
+ * Not implemented, and deliberately not declared: TimeUnit, invokeAll,
+ * invokeAny, submit(Runnable), the scheduled executor, the fork/join pool,
+ * CompletionService, ThreadFactory, the uncaught-exception handler, and
+ * ThreadPoolExecutor's own tuning surface. */
+
+/* The intervals this library's blocking waits are built from, in milliseconds.
+ *
+ * Two of them, because there are two kinds of wait here and they pay for
+ * different things: see the file comment for why the pool polls and the latch
+ * waits. */
+class Concurrent {
+  private Concurrent() {
+  }
+
+  /* How long a thread that polls sleeps between two looks at its condition.
+     The pool's workers and Future.get() use this. Short enough that a task
+     submitted to an idle pool starts promptly and a finished task is noticed
+     promptly; long enough that a sleeping worker costs almost nothing. */
+  public static final long POLL_MILLIS = 5L
+
+  /* How long one Object.wait runs before the waiting thread looks at its
+     condition again. CountDownLatch's waits use this. A notification that
+     arrives is what ends the wait, as in Java; this is only the ceiling on how
+     long a notification the runtime drops can delay a waiter before it notices
+     the condition itself. */
+  public static final long WAIT_SLICE_MILLIS = 25L
+}
+
+/* A place for exactly one thread to wait: the one kind of monitor wait this
+   library is willing to do.
+ *
+ * A Signal is a monitor with one waiter and a flag: raise() sets the flag and
+ * wakes the waiter, await() waits for the flag and lowers it. Because the flag
+ * survives a raise that arrives before anybody waits, the two can be called in
+ * either order without losing anything -- and because the flag, not the
+ * notification, is what await() answers from, a notification this runtime drops
+ * delays a waiter by one slice instead of stranding it.
+ *
+ * One thread awaits one Signal. That is the point of the class: several threads
+ * inside Object.wait on the same object is the pattern this runtime does not
+ * carry (see the file comment), and a Signal is how 38's CountDownLatch waits
+ * without ever falling into it. */
+class Signal {
+  private boolean raised
+
+  /* Raise it. Any thread may, as often as it likes, and it is not an error to
+     raise a signal nobody is waiting for: the next await answers at once. */
+  public void raise() {
+    synchronized (this) {
+      this.raised = true
+      this.notifyAll()
+    }
+  }
+
+  /* Wait until it is raised, then lower it. It waits in slices and looks at the
+     flag again after each one, so a lost notification costs a slice, not a
+     hang; the flag is checked under the monitor it was set under, so the look
+     is never at a stale value. */
+  public void await() {
+    boolean up = this.await(Concurrent.WAIT_SLICE_MILLIS)
+    while (!up) {
+      up = this.await(Concurrent.WAIT_SLICE_MILLIS)
+    }
+  }
+
+  /* Wait at most this many milliseconds: true when it was raised (and lowered),
+     false when the time ran out. A false answer lowers nothing, so a raise that
+     comes later is still there for the next call. */
+  public boolean await(long millis) {
+    long deadline = System.nanoTime() + millis * 1000000L
+    synchronized (this) {
+      while (!this.raised) {
+        long left = deadline - System.nanoTime()
+        if (left <= 0) {
+          return false
+        }
+        long waitMillis = left / 1000000L
+        if (waitMillis <= 0) {
+          /* under a millisecond left, and this language's wait counts in
+             milliseconds: spend it as one, and let the loop answer */
+          waitMillis = 1
+        }
+        this.wait(waitMillis)
+      }
+      this.raised = false
+      return true
+    }
+  }
+}
+
+/* The waiting half of a condition that some other object owns: the list a
+   CountDownLatch keeps of the signals its waiters are parked on.
+ *
+ * A thread that has to wait parks a Signal of its own here (under the latch's
+ * monitor) and then waits on its own signal; the thread that empties the latch
+ * wakes them all. Every method here is called with the latch's monitor held:
+ * park and leave while the waiter is deciding, wakeAll once the count is zero.
+ * Nothing in it takes a lock of its own, and no lock is ever taken in the other
+ * order -- a waiter holds only its own signal while it waits. */
+class Waiters {
+  private ArrayList<Signal> parked = new ArrayList<Signal>()
+
+  /* Take a signal that is about to wait. */
+  public void park(Signal s) {
+    this.parked.add(s)
+  }
+
+  /* Wake every parked waiter. */
+  public void wakeAll() {
+    for (Signal s : this.parked) {
+      s.raise()
+    }
+    this.parked.clear()
+  }
+
+  /* Forget a waiter that gave up on its own clock. */
+  public void leave(Signal s) {
+    this.parked.remove(s)
+  }
+}
+
+/* A task that answers a value. Java's functional interfaces cannot be written
+   as lambdas here -- this language has none -- so a task is an object with a
+   call method, which is what a program passes to submit. */
+interface Callable<V> {
+  V call()
+}
+
+/* The handle on a task: Java's Future, with Java's four methods. */
+interface Future<V> {
+  /* The answer, waiting for it until it is there. Throws ExecutionException
+     carrying the task's own throwable when the task threw, and
+     CancellationException when it was cancelled. */
+  V get()
+  /* True once the task has finished, thrown, or been cancelled. */
+  boolean isDone()
+  boolean isCancelled()
+  /* Cancel a task that has not started yet: the worker that takes it will find
+     it cancelled and skip it. A task that has already started is not cancelled
+     and this answers false -- there is no interrupt in this language, so
+     nothing could stop it, and Java's cancel(true) is the form that would
+     promise one. Java's cancel(false), which is this. */
+  boolean cancel()
+}
+
+/* Something that runs a Runnable. Java's Executor, and the half of the
+   interface that has nothing to do with answers. */
+interface Executor {
+  void execute(Runnable command)
+}
+
+/* Java's ExecutorService: submitting, and shutting down. */
+interface ExecutorService extends Executor {
+  <T> Future<T> submit(Callable<T> task)
+  /* Stop taking work. The tasks already handed to the pool -- the ones queued
+     and the ones running -- finish, and then the workers leave. */
+  void shutdown()
+  /* Stop now: no new task is taken and the queued ones are handed back. It
+     cannot stop a task that is already running, because nothing here can
+     interrupt a thread; that task runs to its end. The futures of the tasks
+     handed back never complete, as in Java. */
+  List<Runnable> shutdownNow()
+  /* Wait up to this many milliseconds for every worker to leave, answering
+     true when the pool has finished. A duration of zero or less does not wait;
+     it answers whether the pool has already finished. The wait is a poll of
+     the worker count every Concurrent.POLL_MILLIS, because the pool's monitor
+     has no waiters to notify. */
+  boolean awaitTermination(long millis)
+  boolean isShutdown()
+  /* True once shutdown() or shutdownNow() has been called and every worker has
+     left. A pool nobody has shut down is never terminated. */
+  boolean isTerminated()
+}
+
+/* What a task's failure arrives as: get() throws this, with the throwable the
+   task threw as its cause. Java's class of the same name, and checked there
+   and here -- although this language has no throws clause, so nothing makes a
+   caller write the catch. It is the reason a failed task is never silently
+   answered with null. */
+class ExecutionException extends Exception {
+  public ExecutionException(String message) {
+    super(message)
+  }
+  public ExecutionException(String message, Throwable cause) {
+    super(message, cause)
+  }
+  /* Java's Throwable(cause) copies the cause's toString into the message; this
+     standard library's sets the cause and leaves the message null, so the
+     copy is made here to keep the message a program prints the same one Java
+     would. */
+  public ExecutionException(Throwable cause) {
+    super(cause.toString(), cause)
+  }
+}
+
+/* get() on a future whose task was cancelled. Java's CancellationException,
+   which extends IllegalStateException for the same reason: the program that
+   cancelled the task is the program calling get(). */
+class CancellationException extends IllegalStateException {
+  public CancellationException() {
+  }
+  public CancellationException(String message) {
+    super(message)
+  }
+}
+
+/* Handed to execute() or submit() after the pool has been shut down. Java's
+   class of the same name. */
+class RejectedExecutionException extends RuntimeException {
+  public RejectedExecutionException() {
+  }
+  public RejectedExecutionException(String message) {
+    super(message)
+  }
+}
+
+/* A task with a place to put its answer: Java's FutureTask, which is both the
+   Future a caller holds and the Runnable a worker runs.
+ *
+ * The answer, the throwable and the flags are written and read under this
+ * object's monitor, so get() and run() agree about whether the answer is there;
+ * get() polls that flag rather than waiting on the monitor, for the reason the
+ * file comment gives. Any number of threads may call get() on one future: none
+ * of them waits, so none of them shares anything but the monitor they read the
+ * flag under. */
+class FutureTask<T> implements Future<T>, Runnable {
+  private Callable<T> callable
+  private T value
+  private Throwable failure
+  /* done: the task has finished, thrown or been cancelled. running: a worker
+     is inside call() right now, which is what makes cancel() refuse -- a
+     cancelled task is one that never started. */
+  private boolean done
+  private boolean running
+  private boolean cancelled
+
+  public FutureTask(Callable<T> callable) {
+    this.callable = callable
+  }
+
+  /* Run the task. A worker thread calls this; so may a program, and then the
+     task runs on the calling thread. Running a task twice is a no-op the
+     second time, as it is in Java. */
+  public void run() {
+    Callable<T> task
+    synchronized (this) {
+      if (this.done || this.running) {
+        return
+      }
+      this.running = true
+      task = this.callable
+    }
+    /* Outside the monitor: the task may take minutes, may take monitors of its
+       own, and may call get() on a future of its own. Holding this future's
+       monitor across it would make a concurrent get() and a concurrent
+       cancel() -- both of which only want to read or set a flag -- wait for
+       the task to finish. */
+    T answer = null
+    Throwable thrown = null
+    try {
+      answer = task.call()
+    } catch (Throwable t) {
+      thrown = t
+    }
+    synchronized (this) {
+      this.running = false
+      this.value = answer
+      this.failure = thrown
+      this.done = true
+    }
+  }
+
+  public T get() {
+    while (true) {
+      synchronized (this) {
+        if (this.done) {
+          return this.answer()
+        }
+      }
+      /* Not waiting on this object's monitor, and not on one of its own: a poll
+         of the flag under the monitor is enough, and Thread.sleep takes no
+         monitor at all. */
+      Thread.sleep(Concurrent.POLL_MILLIS)
+    }
+  }
+
+  /* The answer, or the throwable standing in for it. Called with this object's
+     monitor held, and only when the task is done. */
+  private T answer() {
+    if (this.cancelled) {
+      throw new CancellationException("the task was cancelled")
+    }
+    if (this.failure != null) {
+      throw new ExecutionException(this.failure)
+    }
+    return this.value
+  }
+
+  public boolean isDone() {
+    synchronized (this) {
+      return this.done
+    }
+  }
+
+  public boolean isCancelled() {
+    synchronized (this) {
+      return this.cancelled
+    }
+  }
+
+  public boolean cancel() {
+    synchronized (this) {
+      if (this.done || this.running) {
+        return false
+      }
+      this.cancelled = true
+      this.done = true
+      return true
+    }
+  }
+}
+
+/* The pool behind all three factories.
+ *
+ * Two numbers describe a pool: how many workers it keeps alive (core -- its
+ * workers never give up), and how long an idle worker may wait for work before
+ * giving up (keepAlive, in milliseconds, 0 meaning never). A fixed pool of four
+ * is 4 and 0; the single-thread executor is 1 and 0; the cached pool is 0 and
+ * 60000, so no worker is kept, one is started whenever a task arrives and none
+ * is idle, and one that has been idle a minute leaves.
+ *
+ * Everything the pool decides is decided under this object's monitor: the
+ * queue, the number of live workers, and how many are idle. A worker takes a
+ * task, or counts itself idle, in the same critical section, so a task can
+ * never fall into the gap between "there is nothing to do" and "this worker
+ * goes idle": either the worker finds the task, or it has already said it is
+ * idle when the task arrives, and then execute() either has an idle worker to
+ * pick it up or starts one. Nobody ever waits on this monitor -- the workers
+ * sleep and look, and awaitTermination sleeps and looks -- so there is nothing
+ * to notify, and no waiter for this runtime's wait to corrupt. */
+class ThreadPool implements ExecutorService {
+  /* Oldest first, taken from the front. ArrayDeque rather than ArrayList
+     because taking a task has to cost O(1): an ArrayList would shift every
+     element of the queue on every take. */
+  private ArrayDeque<Runnable> queue = new ArrayDeque<Runnable>()
+  private int core
+  private long keepAlive
+  private int workers
+  /* The workers that have found the queue empty. What execute() reads to
+     decide whether a cached pool has to start another worker, and what the
+     keep-alive below counts down against. */
+  private int idle
+  /* shutdown: no new task is taken. stopped: shutdownNow was called, so the
+     queued tasks were dropped and a dead worker is not replaced. */
+  private boolean shutdown
+  private boolean stopped
+  private int created
+  private String prefix
+
+  /* Called with this pool's monitor held. */
+  private void startWorker() {
+    this.workers = this.workers + 1
+    this.created = this.created + 1
+    final ThreadPool self = this
+    /* The worker is this thread's whole life: take a task, run it here, and
+       sleep until there is another. It is written as an object rather than a
+       method because a thread runs a Runnable, and the loop must go on for as
+       long as the pool wants the worker. */
+    Thread t = new Thread(new Runnable() {
+      public void run() {
+        while (true) {
+          Runnable task = self.claim()
+          if (task == null) {
+            return
+          }
+          try {
+            task.run()
+          } catch (Throwable failure) {
+            /* A task that came in through execute() has no Future to carry its
+               failure, and this is the moment Java's worker thread dies with
+               it: the runtime's uncaught handler prints Java's line ("Exception
+               in thread ..."), the thread ends, and the program carries on.
+               Putting a replacement in its place before it dies is what
+               ThreadPoolExecutor does, and it is why a fixed pool is still four
+               threads afterwards. A task that came in through submit() never
+               reaches here: FutureTask catches its throwable and keeps it for
+               get(). */
+            self.workerFailed()
+            throw failure
+          }
+        }
+      }
+    }, this.prefix + this.created)
+    t.start()
+  }
+
+  public ThreadPool(int core, long keepAliveMillis, String prefix) {
+    this.core = core
+    this.keepAlive = keepAliveMillis
+    this.prefix = prefix
+    /* Under the monitor, which is what startWorker expects: a worker started
+       a moment ago is already in claim(), and the fields it guards must not be
+       written from outside the critical section it reads them in. The worker
+       that has just been created blocks on this monitor until the constructor
+       is done with it, which costs nothing. */
+    synchronized (this) {
+      for (int i = 0 : i < core : i++) {
+        this.startWorker()
+      }
+    }
+  }
+
+  public void execute(Runnable command) {
+    if (command == null) {
+      throw new NullPointerException("the task is null")
+    }
+    synchronized (this) {
+      if (this.shutdown) {
+        throw new RejectedExecutionException("the pool has been shut down")
+      }
+      this.queue.addLast(command)
+      if (this.core == 0 && this.idle == 0) {
+        /* no worker is kept, and none is sitting idle to take it: this is where
+           a cached pool grows with the work offered to it */
+        this.startWorker()
+      }
+    }
+  }
+
+  public <T> Future<T> submit(Callable<T> task) {
+    if (task == null) {
+      throw new NullPointerException("the task is null")
+    }
+    FutureTask<T> future = new FutureTask<T>(task)
+    this.execute(future)
+    return future
+  }
+
+  public void shutdown() {
+    synchronized (this) {
+      this.shutdown = true
+    }
+  }
+
+  public List<Runnable> shutdownNow() {
+    List<Runnable> dropped = new ArrayList<Runnable>()
+    synchronized (this) {
+      /* What this cannot do is stop a task that has started: there is no
+         interrupt in this language, so the worker that is inside run() is
+         inside it until run() returns. What it does do is refuse new work,
+         hand back every task that never started, and let the workers leave as
+         soon as the task they are on is done. Java's shutdownNow also
+         interrupts the running tasks; here that half is simply absent, and
+         nothing pretends otherwise. */
+      this.shutdown = true
+      this.stopped = true
+      while (!this.queue.isEmpty()) {
+        dropped.add(this.queue.removeFirst())
+      }
+    }
+    return dropped
+  }
+
+  public boolean awaitTermination(long millis) {
+    long deadline = System.nanoTime() + millis * 1000000L
+    while (true) {
+      synchronized (this) {
+        if (this.workers == 0) {
+          return true
+        }
+      }
+      long left = deadline - System.nanoTime()
+      if (left <= 0) {
+        return false
+      }
+      long slice = left / 1000000L
+      if (slice > Concurrent.POLL_MILLIS) {
+        slice = Concurrent.POLL_MILLIS
+      }
+      if (slice <= 0) {
+        slice = 1
+      }
+      Thread.sleep(slice)
+    }
+  }
+
+  public boolean isShutdown() {
+    synchronized (this) {
+      return this.shutdown
+    }
+  }
+
+  public boolean isTerminated() {
+    synchronized (this) {
+      return this.shutdown && this.workers == 0
+    }
+  }
+
+  /* The next task for this worker, or null when the pool is finished with it.
+     The worker is idle from the moment it finds the queue empty here until the
+     moment it takes a task, and it sleeps between the two -- a look at the
+     queue under this monitor, a sleep outside it, and a look again. */
+  private Runnable claim() {
+    /* When this stretch of idleness started, for the keep-alive below. One call
+       of claim is one stretch: it ends when a task is taken. */
+    long idleSince = System.nanoTime()
+    synchronized (this) {
+      this.idle = this.idle + 1
+    }
+    while (true) {
+      Runnable task = null
+      boolean leaving = false
+      synchronized (this) {
+        if (!this.queue.isEmpty()) {
+          this.idle = this.idle - 1
+          task = this.queue.removeFirst()
+        } else if (this.shutdown) {
+          /* Nothing left to take and no more coming: this is where a worker
+             normally leaves. The queue is the only thing that keeps a worker
+             past shutdown, which is what makes "shutdown waits for the tasks
+             that were already accepted" true. */
+          this.idle = this.idle - 1
+          this.workers = this.workers - 1
+          leaving = true
+        } else if (this.keepAlive > 0 &&
+                   (System.nanoTime() - idleSince) / 1000000L >= this.keepAlive) {
+          /* Idle for as long as this pool keeps anyone, and no work to take:
+             the worker leaves. A cached pool is the only pool with a keep-alive
+             above zero, and this is what makes it shrink back to no threads at
+             all once the work stops. Nothing is lost by leaving: the queue was
+             empty in this same critical section, and execute() starts a worker
+             for whatever arrives after the idle count reaches zero. */
+          this.idle = this.idle - 1
+          this.workers = this.workers - 1
+          leaving = true
+        }
+      }
+      if (task != null) {
+        return task
+      }
+      if (leaving) {
+        return null
+      }
+      Thread.sleep(Concurrent.POLL_MILLIS)
+    }
+  }
+
+  /* A worker died of a task's throwable, and this keeps the pool the size it
+     was. Called with no monitor held. */
+  private void workerFailed() {
+    synchronized (this) {
+      this.workers = this.workers - 1
+      if (!this.stopped) {
+        this.startWorker()
+      }
+    }
+  }
+}
+
+/* The pool factories java.util.concurrent.Executors has, and only those: the
+   scheduled and work-stealing ones need machinery this standard library does
+   not have. */
+class Executors {
+  /* For the thread names. Java starts at 1 and numbers pools within the
+     process; so does this. */
+  private static int pools = 0
+
+  private Executors() {
+  }
+
+  /* Called by the three factories. Threads are named the way
+     java.util.concurrent names them -- pool-N-thread-M -- so a thread dump
+     reads the same. */
+  private static ExecutorService newPool(int core, long keepAlive) {
+    Executors.pools = Executors.pools + 1
+    return new ThreadPool(core, keepAlive, "pool-" + Executors.pools + "-thread-")
+  }
+
+  /* A pool of exactly this many threads, with every one of them started before
+     the constructor returns. A pool of zero or fewer is an
+     IllegalArgumentException, as it is in Java. */
+  public static ExecutorService newFixedThreadPool(int nThreads) {
+    if (nThreads <= 0) {
+      throw new IllegalArgumentException("pool size must be greater than zero: " + nThreads)
+    }
+    return Executors.newPool(nThreads, 0L)
+  }
+
+  /* A pool of exactly one thread, which is a fixed pool of one and nothing
+     more: Java's single-thread executor also wraps every task so that a later
+     one cannot run before an earlier one has finished, and taking from one
+     queue in order with one worker gives that here. */
+  public static ExecutorService newSingleThreadExecutor() {
+    return Executors.newPool(1, 0L)
+  }
+
+  /* The unbounded pool: one worker per task that arrives with none idle, each
+     of them leaving after 60 seconds with nothing to do. */
+  public static ExecutorService newCachedThreadPool() {
+    return Executors.newPool(0, 60000L)
+  }
+}
