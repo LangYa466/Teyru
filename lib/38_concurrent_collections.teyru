@@ -1,0 +1,336 @@
+package teyru
+
+/* The rest of java.util.concurrent this runtime can carry honestly: the
+ * synchronizer CountDownLatch, the atomic wrappers, and the concurrent map.
+ *
+ * All three are built on the monitor `synchronized` takes and on
+ * Object.wait/notifyAll, and on nothing else. The runtime has no hardware
+ * atomics, so there is no lock-free anything here, and each class says so in
+ * its own comment: a reader who assumes AtomicInteger.compareAndSet is a CAS,
+ * or that ConcurrentHashMap is striped and lock-free under a heavy put load,
+ * would reason about contention the wrong way. What is true is that every one
+ * of them is safe for several threads to use at once, and that each individual
+ * call is atomic -- which is what makes a counter that two threads increment
+ * end up with exactly the right number, and it is what the tests check.
+ *
+ * The one waiting class here, CountDownLatch, waits the way everything in
+ * 37_executor.teyru waits: a thread that has to block parks a Signal of its own
+ * (declared there) and waits on that, rather than waiting on the latch's own
+ * monitor, and the wait runs in bounded slices and re-examines the count. The
+ * reasons are in that file's comment: this runtime loses wakeups when several
+ * threads are inside Object.wait on one object, and a lost notification must
+ * cost a poll interval rather than a hang. The latch's count and its list of
+ * parked signals are under the latch's monitor; no thread ever waits on it.
+ *
+ * Absent, and deliberately not declared: TimeUnit (every duration here is
+ * milliseconds, as in Thread.sleep), interruptible waits (there is no
+ * interrupt in this language), CyclicBarrier, Semaphore, Phaser, Exchanger,
+ * and the atomic field updaters. CountDownLatch.await here cannot be
+ * interrupted, so it has no InterruptedException to throw and no throws clause
+ * to name one in -- this language has none. */
+
+/* Java's CountDownLatch: a gate that opens when the count reaches zero.
+ *
+ * The count and the list of waiters are one object's monitor. countDown and the
+ * two awaits all take that monitor, so a countDown that empties the latch
+ * cannot slip between an awaiter's test of the count and its decision to wait:
+ * the awaiter holds the monitor while it decides, and a thread that arrives
+ * after the latch opened is answered without waiting at all. */
+class CountDownLatch {
+  /* Written only under this object's monitor. */
+  private int count
+  private Waiters waiters = new Waiters()
+
+  public CountDownLatch(int count) {
+    if (count < 0) {
+      throw new IllegalArgumentException("count must not be negative: " + count)
+    }
+    this.count = count
+  }
+
+  /* Take one off. Every thread that reaches the latch does this once; the
+     thread that takes the last one wakes everybody waiting. Counting down past
+     zero is a no-op, as in Java, so a task that counts down twice does not open
+     the gate early. */
+  public void countDown() {
+    synchronized (this) {
+      if (this.count > 0) {
+        this.count = this.count - 1
+        if (this.count == 0) {
+          this.waiters.wakeAll()
+        }
+      }
+    }
+  }
+
+  /* Wait until the count reaches zero. The wait itself is on this thread's own
+     signal, so any number of threads may await the same latch, and each of them
+     wakes because the latch was emptied, not because a notification happened to
+     reach one waiter. */
+  public void await() {
+    Signal mine = new Signal()
+    synchronized (this) {
+      if (this.count == 0) {
+        return
+      }
+      this.waiters.park(mine)
+    }
+    mine.await()
+  }
+
+  /* Wait up to this many milliseconds. Answers true when the count reached
+     zero and false when the time ran out with it still above zero -- Java's
+     boolean, and the reason a program can wait on a latch it does not fully
+     control without hanging forever. */
+  public boolean await(long millis) {
+    Signal mine = new Signal()
+    synchronized (this) {
+      if (this.count == 0) {
+        return true
+      }
+      this.waiters.park(mine)
+    }
+    boolean opened = mine.await(millis)
+    if (!opened) {
+      /* this waiter gave up, so it must not stay on the list: a latch whose
+         count never reaches zero would otherwise hold every abandoned waiter
+         for the rest of the program */
+      synchronized (this) {
+        this.waiters.leave(mine)
+      }
+    }
+    return opened
+  }
+
+  /* How many countDowns are still outstanding. Java's answer is a long; this
+     one counts an int, which is what Long.MAX_VALUE counts worth of threads
+     would never reach. */
+  public long getCount() {
+    synchronized (this) {
+      return this.count
+    }
+  }
+}
+
+/* An int that several threads may update without losing an update.
+ *
+ * THIS IS A MONITOR, NOT A CAS. Every method below is synchronized on the
+ * object, so each call is atomic with respect to every other call -- which is
+ * all AtomicInteger promises, and all the tests need -- but there is no
+ * hardware compare-and-swap underneath it, because the runtime has none. Two
+ * threads hammering this counter serialize on one monitor; in Java they would
+ * spin on a cache line instead. The answers are the same; the scaling is not,
+ * and a program that would be lock-free in Java is not lock-free here.
+ *
+ * The one place that shows: incrementAndGet is one monitor acquisition, not a
+ * retry loop, so it cannot fail and cannot need retrying -- but it also cannot
+ * be composed with another operation the way getAndIncrement followed by
+ * compareAndSet could be in Java.
+ *
+ * Nothing here waits, so nothing here is affected by the one-waiter rule the
+ * waiting classes in 37_executor.teyru follow: a monitor that is taken and
+ * released is exactly what this runtime does carry. */
+class AtomicInteger {
+  private int value
+
+  public AtomicInteger() {
+  }
+
+  public AtomicInteger(int initialValue) {
+    this.value = initialValue
+  }
+
+  public synchronized int get() {
+    return this.value
+  }
+
+  public synchronized void set(int newValue) {
+    this.value = newValue
+  }
+
+  public synchronized int getAndSet(int newValue) {
+    int old = this.value
+    this.value = newValue
+    return old
+  }
+
+  public synchronized int getAndIncrement() {
+    int old = this.value
+    this.value = old + 1
+    return old
+  }
+
+  public synchronized int incrementAndGet() {
+    this.value = this.value + 1
+    return this.value
+  }
+
+  public synchronized int addAndGet(int delta) {
+    this.value = this.value + delta
+    return this.value
+  }
+
+  /* Set the value to update and answer true only if it was expect when the
+     monitor was taken -- read, compared and written inside one critical
+     section, so no other thread can slip between the comparison and the write.
+     That is the promise compareAndSet makes; only the way it is kept differs
+     from Java's. */
+  public synchronized boolean compareAndSet(int expect, int update) {
+    if (this.value != expect) {
+      return false
+    }
+    this.value = update
+    return true
+  }
+
+  /* Java's AtomicInteger.toString is the value in decimal. */
+  public synchronized String toString() {
+    return "" + this.value
+  }
+}
+
+/* A long under the same lock, with the same caveat as AtomicInteger: this is
+   a monitor, not a CAS, and it is correct rather than lock-free. */
+class AtomicLong {
+  private long value
+
+  public AtomicLong() {
+  }
+
+  public AtomicLong(long initialValue) {
+    this.value = initialValue
+  }
+
+  public synchronized long get() {
+    return this.value
+  }
+
+  public synchronized void set(long newValue) {
+    this.value = newValue
+  }
+
+  public synchronized long getAndSet(long newValue) {
+    long old = this.value
+    this.value = newValue
+    return old
+  }
+
+  public synchronized long getAndIncrement() {
+    long old = this.value
+    this.value = old + 1L
+    return old
+  }
+
+  public synchronized long incrementAndGet() {
+    this.value = this.value + 1L
+    return this.value
+  }
+
+  public synchronized long addAndGet(long delta) {
+    this.value = this.value + delta
+    return this.value
+  }
+
+  public synchronized boolean compareAndSet(long expect, long update) {
+    if (this.value != expect) {
+      return false
+    }
+    this.value = update
+    return true
+  }
+
+  public synchronized String toString() {
+    return "" + this.value
+  }
+}
+
+/* A map several threads may use at once.
+ *
+ * THIS IS A HashMap BEHIND THE MAP'S MONITOR, NOT A LOCK-STRIPED TABLE. Every
+ * method below is synchronized on the map object, so one put excludes every
+ * other put and every get -- there is no per-bin locking and no lock-free read
+ * path, which is most of why java.util.concurrent.ConcurrentHashMap is fast.
+ * What it does give is what Java's gives: no lost puts under concurrency, an
+ * exact size, and no ConcurrentModificationException to fear, because nothing
+ * modifies the table outside the monitor. It is correct, not scalable.
+ *
+ * Two divergences from Java's class, both deliberate:
+ *
+ *   - It does not implement Map<K, V>. Java's implements ConcurrentMap, and
+ *     this standard library's Map declares the whole interface -- clear,
+ *     putAll, containsValue, keySet, values, entrySet, equals, hashCode -- none
+ *     of which is here, because declaring them would mean either implementing
+ *     them (fine, but not what this class is for) or declaring methods that do
+ *     not exist. A program that wants a Map uses a HashMap, under its own
+ *     monitor if threads share it.
+ *
+ *   - keys() answers an Enumeration over a *snapshot* -- every key copied
+ *     under the monitor before the enumeration is handed out -- rather than
+ *     Java's weakly consistent iterator over a live table. So this enumeration
+ *     is stable: it will not see a put that happens after it was made, and it
+ *     will never fail, where Java's may or may not reflect concurrent changes.
+ *     The cost is a copy of the keys.
+ *
+ * Null is rejected as it is in Java's class: a null key or value throws
+ * NullPointerException, and the table behind this can hold neither. */
+class ConcurrentHashMap<K, V> {
+  private HashMap<K, V> map = new HashMap<K, V>()
+
+  /* The previous value for the key, or null when there was none. Java's
+     put(K, V): an existing value -- or one inserted with this same key after
+     this call, the two being indistinguishable under the monitor. */
+  public synchronized V put(K key, V value) {
+    if (key == null || value == null) {
+      throw new NullPointerException("ConcurrentHashMap does not permit null keys or values")
+    }
+    return this.map.put(key, value)
+  }
+
+  /* The value for the key, or null when the key is not there. Called with a
+     key of the same type the putting thread used: the erasion of V is the
+     runtime's, and a value of the wrong type would be found by the cast at the
+     call site, not here. */
+  public synchronized V get(Object key) {
+    if (key == null) {
+      throw new NullPointerException("key is null")
+    }
+    return this.map.get(key)
+  }
+
+  /* The value the key held, or null when it was not there. */
+  public synchronized V remove(Object key) {
+    if (key == null) {
+      throw new NullPointerException("key is null")
+    }
+    return this.map.remove(key)
+  }
+
+  public synchronized boolean containsKey(Object key) {
+    if (key == null) {
+      throw new NullPointerException("key is null")
+    }
+    return this.map.containsKey(key)
+  }
+
+  /* Exact, because nothing changes the table outside the monitor. */
+  public synchronized int size() {
+    return this.map.size()
+  }
+
+  public synchronized boolean isEmpty() {
+    return this.map.isEmpty()
+  }
+
+  /* Every key, as an Enumeration -- Java's return type for this method in this
+     class. The keys are copied under the monitor first, so the enumeration
+     walks a fixed snapshot; see the class comment. */
+  public synchronized Enumeration<K> keys() {
+    List<K> snapshot = new ArrayList<K>(this.map.keySet())
+    return new SetEnumeration<K>(snapshot)
+  }
+
+  /* Java's map toString: {k=v, k=v}. */
+  public synchronized String toString() {
+    return this.map.toString()
+  }
+}
