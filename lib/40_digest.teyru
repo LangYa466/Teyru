@@ -1,0 +1,864 @@
+package teyru
+
+/* java.security.MessageDigest and the checksum interface java.util.zip declares,
+   with the hash functions themselves written here as plain Teyru arithmetic
+   rather than reached for through the runtime. The runtime has a SHA-1 -- the
+   WebSocket handshake needs one -- and it is deliberately not on this side of
+   the language: a digest a program can ask for by name is a digest whose
+   intermediates have to exist where the program can see them.
+
+   What is here. MessageDigest.getInstance answers for MD5, SHA-1, SHA-224,
+   SHA-256, SHA-384 and SHA-512: the SHA-2 family is one block function over 32
+   or 64 bit words, so the four SHA-2 sizes fall out of two implementations and
+   two initial values, and MD5 is the other block function the JDK ships.
+   CRC32 is java.util.zip's reflected CRC-32, over the same Checksum interface
+   that class implements, and it is the second half of this file because a
+   digest and a checksum are asked the same question by the same kind of
+   caller.
+
+   What is not here, and why each is a decision rather than an omission.
+
+   * The JDK at 21 also answers for SHA3-256 and its siblings and for
+     SHA-512/256 (and SHA-512/224). getInstance throws NoSuchAlgorithmException
+     for those instead of answering with a different digest: a digest that is
+     silently not the one the caller named is the worst thing this file could
+     do, while a name that is not known is a compile-time-sized problem a
+     caller can see.
+   * getInstance(String, String) and getInstance(String, Provider) are absent,
+     for the reason the rest of this library has no Provider: there are no
+     providers to name, and a method that ignored its second argument would be
+     answering a question it had not read.
+   * clone() is absent. Java's MessageDigest clone copies the digest state and
+     throws CloneNotSupportedException for the algorithms that cannot be copied
+     mid-stream; nothing in this library clones, and an object that can be
+     copied is an object whose invariants have to be written twice.
+   * update(ByteBuffer) is absent because there is no ByteBuffer in this
+     library, and a method that took an Object and hoped would be worse than a
+     method that does not exist.
+   * toString() is not overridden. Java's carries the provider's name and the
+     number of bytes that have been fed; there are no providers here, and the
+     runtime's Object.toString is what a program printing one gets.
+   * CRC32C, Adler32 and the Deflater are not here. CRC32C is a different
+     polynomial rather than a flag on this one, and Adler32 belongs to a
+     compression stream this library does not have.
+
+   The one structural difference from Java is that MessageDigest is concrete
+   with a private constructor rather than abstract over a MessageDigestSpi.
+   Nothing observable follows from it -- getInstance is the only way to a
+   MessageDigest in either language -- but it is a difference, so it is named.
+
+   How this file is verified. tests/programs/t170_digest.teyru is the same
+   program as the javac 21 program in this file's .java.ref, whose output is
+   tests/programs/t170_digest.expected: the empty message, one byte, "abc", the
+   messages that straddle the 55/56 byte and 111/112 byte padding boundaries,
+   a message that is mostly a block, a multi-block message fed a byte at a time
+   and as a slice, one digest carried into the next by digest(byte[]), reset
+   and reuse, and -- for SHA-384 and SHA-512 -- messages that straddle the
+   128 byte block. Every hex string printed there is the JDK's own answer for
+   that input, which is the only oracle that can say whether the round
+   constants, the padding and the byte order are right.
+
+   tests/programs/t171_crc32.teyru is the same arrangement for CRC32, against
+   the same javac. What neither test can reach: a digest of a message larger
+   than the counters, and the messages of the failures (an unknown algorithm
+   name, a null array, a digest buffer too short) which are checked but printed
+   through getMessage() alone, because a Teyru exception's toString carries
+   this runtime's package where Java's carries java.security's. */
+
+class GeneralSecurityException extends Exception {
+  public GeneralSecurityException() {
+  }
+  public GeneralSecurityException(String message) {
+    super(message)
+  }
+}
+
+class NoSuchAlgorithmException extends GeneralSecurityException {
+  public NoSuchAlgorithmException() {
+  }
+  public NoSuchAlgorithmException(String message) {
+    super(message)
+  }
+}
+
+/* What digest(byte[], int, int) throws when the caller's buffer cannot hold the
+   digest. Java declares it on that one method and nowhere else in this file. */
+class DigestException extends GeneralSecurityException {
+  public DigestException() {
+  }
+  public DigestException(String message) {
+    super(message)
+  }
+}
+
+class MessageDigest extends Object {
+  /* Which block function this instance runs. The two 64-bit SHA-2 sizes share
+     one block function and differ in their initial value and their output
+     length, exactly as they do in the standards. */
+  private static final int MD5 = 0
+  private static final int SHA1 = 1
+  private static final int SHA224 = 2
+  private static final int SHA256 = 3
+  private static final int SHA384 = 4
+  private static final int SHA512 = 5
+
+  /* MD5, RFC 1321: T[i] is floor(2^32 * abs(sin(i + 1))) and S[i] the per-round
+     rotation. These are arrays rather than named constants for a reason worth
+     writing down: a `static final int` initialized in place from a hexadecimal
+     literal over 2^31 folds to the literal's own width, so the field reads back
+     as 3614090360 rather than -680876936, while an initializer inside an array
+     (and every other kind of int field) does truncate. Keeping the standards'
+     constants in the notation the standards write them in therefore means
+     keeping them in a table, which is where they belong anyway. */
+  private static final int[] MD5_K = {
+    0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a,
+    0xa8304613, 0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be,
+    0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340,
+    0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+    0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8,
+    0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c,
+    0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
+    0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+    0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92,
+    0xffeff47d, 0x85845dd1, 0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
+    0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+  }
+  private static final int[] MD5_S = {
+    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+    5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+    4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+    6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+  }
+  private static final int[] MD5_IV = { 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476 }
+
+  /* SHA-1, FIPS 180-4: five words, eighty rounds, four constants. */
+  private static final int[] SHA1_IV = { 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0 }
+  private static final int[] SHA1_K = { 0x5a827999, 0x6ed9eba1, 0x8f1bbcdc, 0xca62c1d6 }
+
+  /* SHA-256 and SHA-224: eight words, sixty-four rounds. SHA-224 is SHA-256 with
+     the second thirty-two bits of the square roots of the ninth to sixteenth
+     primes as its initial value and its last word left unprinted, which is why
+     one implementation serves both. */
+  private static final int[] SHA256_IV = {
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  }
+  private static final int[] SHA224_IV = {
+    0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939, 0xffc00b31, 0x68581511, 0x64f98fa7, 0xbefa4fa4,
+  }
+  private static final int[] SHA256_K = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+    0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+    0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  }
+
+  /* SHA-512 and SHA-384: eight 64-bit words, eighty rounds, eighty constants.
+     SHA-384 is SHA-512 with the square roots of the ninth to sixteenth primes
+     as its initial value and its last two words left unprinted. */
+  private static final long[] SHA512_IV = {
+    0x6a09e667f3bcc908L, 0xbb67ae8584caa73bL, 0x3c6ef372fe94f82bL, 0xa54ff53a5f1d36f1L,
+    0x510e527fade682d1L, 0x9b05688c2b3e6c1fL, 0x1f83d9abfb41bd6bL, 0x5be0cd19137e2179L,
+  }
+  private static final long[] SHA384_IV = {
+    0xcbbb9d5dc1059ed8L, 0x629a292a367cd507L, 0x9159015a3070dd17L, 0x152fecd8f70e5939L,
+    0x67332667ffc00b31L, 0x8eb44a8768581511L, 0xdb0c2e0d64f98fa7L, 0x47b5481dbefa4fa4L,
+  }
+  private static final long[] SHA512_K = {
+    0x428a2f98d728ae22L, 0x7137449123ef65cdL, 0xb5c0fbcfec4d3b2fL, 0xe9b5dba58189dbbcL,
+    0x3956c25bf348b538L, 0x59f111f1b605d019L, 0x923f82a4af194f9bL, 0xab1c5ed5da6d8118L,
+    0xd807aa98a3030242L, 0x12835b0145706fbeL, 0x243185be4ee4b28cL, 0x550c7dc3d5ffb4e2L,
+    0x72be5d74f27b896fL, 0x80deb1fe3b1696b1L, 0x9bdc06a725c71235L, 0xc19bf174cf692694L,
+    0xe49b69c19ef14ad2L, 0xefbe4786384f25e3L, 0x0fc19dc68b8cd5b5L, 0x240ca1cc77ac9c65L,
+    0x2de92c6f592b0275L, 0x4a7484aa6ea6e483L, 0x5cb0a9dcbd41fbd4L, 0x76f988da831153b5L,
+    0x983e5152ee66dfabL, 0xa831c66d2db43210L, 0xb00327c898fb213fL, 0xbf597fc7beef0ee4L,
+    0xc6e00bf33da88fc2L, 0xd5a79147930aa725L, 0x06ca6351e003826fL, 0x142929670a0e6e70L,
+    0x27b70a8546d22ffcL, 0x2e1b21385c26c926L, 0x4d2c6dfc5ac42aedL, 0x53380d139d95b3dfL,
+    0x650a73548baf63deL, 0x766a0abb3c77b2a8L, 0x81c2c92e47edaee6L, 0x92722c851482353bL,
+    0xa2bfe8a14cf10364L, 0xa81a664bbc423001L, 0xc24b8b70d0f89791L, 0xc76c51a30654be30L,
+    0xd192e819d6ef5218L, 0xd69906245565a910L, 0xf40e35855771202aL, 0x106aa07032bbd1b8L,
+    0x19a4c116b8d2d0c8L, 0x1e376c085141ab53L, 0x2748774cdf8eeb99L, 0x34b0bcb5e19b48a8L,
+    0x391c0cb3c5c95a63L, 0x4ed8aa4ae3418acbL, 0x5b9cca4f7763e373L, 0x682e6ff3d6b2b8a3L,
+    0x748f82ee5defb2fcL, 0x78a5636f43172f60L, 0x84c87814a1f0ab72L, 0x8cc702081a6439ecL,
+    0x90befffa23631e28L, 0xa4506cebde82bde9L, 0xbef9a3f7b2c67915L, 0xc67178f2e372532bL,
+    0xca273eceea26619cL, 0xd186b8c721c0c207L, 0xeada7dd6cde0eb1eL, 0xf57d4f7fee6ed178L,
+    0x06f067aa72176fbaL, 0x0a637dc5a2c898a6L, 0x113f9804bef90daeL, 0x1b710b35131c471bL,
+    0x28db77f523047d84L, 0x32caab7b40c72493L, 0x3c9ebe0a15c9bebcL, 0x431d67c49c100d4cL,
+    0x4cc5d4becb3e42b6L, 0x597f299cfc657e2aL, 0x5fcb6fab3ad6faecL, 0x6c44198c4a475817L,
+  }
+
+  /* The name the caller asked for, which is what getAlgorithm answers: Java
+     does not canonicalize it either, so getInstance("md5").getAlgorithm() is
+     "md5" and not "MD5". */
+  private String algorithm
+  private int kind
+
+  /* The state. The 32-bit block functions keep theirs in h32 -- four words for
+     MD5, five for SHA-1, eight for the SHA-2 pair -- and the 64-bit pair in
+     h64; only the array the current kind uses is ever read. */
+  private int[] h32
+  private long[] h64
+
+  /* The bytes of the message that do not complete a block yet, and how many of
+     them there are. The block is 64 bytes for the 32-bit kinds and 128 for the
+     64-bit ones. */
+  private byte[] buf
+  private int bufLen
+
+  /* The message length in bytes. Every one of these five standards ends its
+     message with the bit length: 64 bits of it for MD5, SHA-1 and SHA-256, and
+     128 bits of it for SHA-512 and SHA-384. A byte count is all that has to be
+     kept for either, because the bit count is that count shifted -- a byte
+     count that is a long already carries all 128 bits of the bit count for
+     SHA-512, in its own top three bits. */
+  private long total
+
+  /* ------------------------------------------------------------ the bits */
+
+  private static int rotl32(int x, int n) {
+    return (x << n) | (x >>> (32 - n))
+  }
+  private static int rotr32(int x, int n) {
+    return (x >>> n) | (x << (32 - n))
+  }
+  private static long rotr64(long x, int n) {
+    return (x >>> n) | (x << (64 - n))
+  }
+
+  /* ------------------------------------------------------- the structure */
+
+  private int blockSize() {
+    if (kind == SHA384 || kind == SHA512) {
+      return 128
+    }
+    return 64
+  }
+
+  /* The initial value of the current kind, which is both the state a fresh
+     digest starts in and the one reset() returns to. */
+  private void init() {
+    h32 = new int[8]
+    h64 = new long[8]
+    buf = new byte[blockSize()]
+    bufLen = 0
+    total = 0
+    if (kind == MD5) {
+      for (int i = 0 : i < 4 : i++) {
+        h32[i] = MD5_IV[i]
+      }
+      return
+    }
+    if (kind == SHA1) {
+      for (int i = 0 : i < 5 : i++) {
+        h32[i] = SHA1_IV[i]
+      }
+      return
+    }
+    if (kind == SHA224 || kind == SHA256) {
+      int[] iv = SHA256_IV
+      if (kind == SHA224) {
+        iv = SHA224_IV
+      }
+      for (int i = 0 : i < 8 : i++) {
+        h32[i] = iv[i]
+      }
+      return
+    }
+    long[] iv = SHA512_IV
+    if (kind == SHA384) {
+      iv = SHA384_IV
+    }
+    for (int i = 0 : i < 8 : i++) {
+      h64[i] = iv[i]
+    }
+  }
+
+  /* One block, from `off` in `b`, folded into the state. Every call site hands
+     a whole block: the buffer when the message ended inside a block, and the
+     caller's array when it did not. */
+  private void block(byte[] b, int off) {
+    if (kind == MD5) {
+      md5Block(b, off)
+      return
+    }
+    if (kind == SHA1) {
+      sha1Block(b, off)
+      return
+    }
+    if (kind == SHA384 || kind == SHA512) {
+      sha512Block(b, off)
+      return
+    }
+    sha256Block(b, off)
+  }
+
+  /* ------------------------------------------------- the 32-bit functions */
+
+  private void md5Block(byte[] b, int off) {
+    int[] x = new int[16]
+    for (int i = 0 : i < 16 : i++) {
+      int j = off + i * 4
+      x[i] = (b[j] & 0xFF) | ((b[j + 1] & 0xFF) << 8) | ((b[j + 2] & 0xFF) << 16) | ((b[j + 3] & 0xFF) << 24)
+    }
+    int a = h32[0]
+    int bb = h32[1]
+    int c = h32[2]
+    int d = h32[3]
+    for (int i = 0 : i < 64 : i++) {
+      int f = 0
+      int g = 0
+      if (i < 16) {
+        f = (bb & c) | (~bb & d)
+        g = i
+      } else if (i < 32) {
+        f = (d & bb) | (~d & c)
+        g = (5 * i + 1) % 16
+      } else if (i < 48) {
+        f = bb ^ c ^ d
+        g = (3 * i + 5) % 16
+      } else {
+        f = c ^ (bb | ~d)
+        g = (7 * i) % 16
+      }
+      int tmp = d
+      d = c
+      c = bb
+      bb = bb + rotl32(a + f + MD5_K[i] + x[g], MD5_S[i])
+      a = tmp
+    }
+    h32[0] = h32[0] + a
+    h32[1] = h32[1] + bb
+    h32[2] = h32[2] + c
+    h32[3] = h32[3] + d
+  }
+
+  private void sha1Block(byte[] b, int off) {
+    int[] w = new int[80]
+    for (int i = 0 : i < 16 : i++) {
+      int j = off + i * 4
+      w[i] = ((b[j] & 0xFF) << 24) | ((b[j + 1] & 0xFF) << 16) | ((b[j + 2] & 0xFF) << 8) | (b[j + 3] & 0xFF)
+    }
+    for (int i = 16 : i < 80 : i++) {
+      w[i] = rotl32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1)
+    }
+    int a = h32[0]
+    int bb = h32[1]
+    int c = h32[2]
+    int d = h32[3]
+    int e = h32[4]
+    for (int i = 0 : i < 80 : i++) {
+      int f = 0
+      int k = 0
+      if (i < 20) {
+        f = (bb & c) | (~bb & d)
+        k = SHA1_K[0]
+      } else if (i < 40) {
+        f = bb ^ c ^ d
+        k = SHA1_K[1]
+      } else if (i < 60) {
+        f = (bb & c) | (bb & d) | (c & d)
+        k = SHA1_K[2]
+      } else {
+        f = bb ^ c ^ d
+        k = SHA1_K[3]
+      }
+      int tmp = rotl32(a, 5) + f + e + k + w[i]
+      e = d
+      d = c
+      c = rotl32(bb, 30)
+      bb = a
+      a = tmp
+    }
+    h32[0] = h32[0] + a
+    h32[1] = h32[1] + bb
+    h32[2] = h32[2] + c
+    h32[3] = h32[3] + d
+    h32[4] = h32[4] + e
+  }
+
+  private void sha256Block(byte[] b, int off) {
+    int[] w = new int[64]
+    for (int i = 0 : i < 16 : i++) {
+      int j = off + i * 4
+      w[i] = ((b[j] & 0xFF) << 24) | ((b[j + 1] & 0xFF) << 16) | ((b[j + 2] & 0xFF) << 8) | (b[j + 3] & 0xFF)
+    }
+    for (int i = 16 : i < 64 : i++) {
+      int x = w[i - 15]
+      int y = w[i - 2]
+      int s0 = rotr32(x, 7) ^ rotr32(x, 18) ^ (x >>> 3)
+      int s1 = rotr32(y, 17) ^ rotr32(y, 19) ^ (y >>> 10)
+      w[i] = w[i - 16] + s0 + w[i - 7] + s1
+    }
+    int a = h32[0]
+    int bb = h32[1]
+    int c = h32[2]
+    int d = h32[3]
+    int e = h32[4]
+    int f = h32[5]
+    int g = h32[6]
+    int h = h32[7]
+    for (int i = 0 : i < 64 : i++) {
+      int s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25)
+      int ch = (e & f) ^ (~e & g)
+      int t1 = h + s1 + ch + SHA256_K[i] + w[i]
+      int s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22)
+      int maj = (a & bb) ^ (a & c) ^ (bb & c)
+      int t2 = s0 + maj
+      h = g
+      g = f
+      f = e
+      e = d + t1
+      d = c
+      c = bb
+      bb = a
+      a = t1 + t2
+    }
+    h32[0] = h32[0] + a
+    h32[1] = h32[1] + bb
+    h32[2] = h32[2] + c
+    h32[3] = h32[3] + d
+    h32[4] = h32[4] + e
+    h32[5] = h32[5] + f
+    h32[6] = h32[6] + g
+    h32[7] = h32[7] + h
+  }
+
+  /* ------------------------------------------------- the 64-bit functions */
+
+  private void sha512Block(byte[] b, int off) {
+    long[] w = new long[80]
+    for (int i = 0 : i < 16 : i++) {
+      int j = off + i * 8
+      w[i] = ((b[j] & 0xFFL) << 56) | ((b[j + 1] & 0xFFL) << 48) | ((b[j + 2] & 0xFFL) << 40) | ((b[j + 3] & 0xFFL) << 32) |
+             ((b[j + 4] & 0xFFL) << 24) | ((b[j + 5] & 0xFFL) << 16) | ((b[j + 6] & 0xFFL) << 8) | (b[j + 7] & 0xFFL)
+    }
+    for (int i = 16 : i < 80 : i++) {
+      long x = w[i - 15]
+      long y = w[i - 2]
+      long s0 = rotr64(x, 1) ^ rotr64(x, 8) ^ (x >>> 7)
+      long s1 = rotr64(y, 19) ^ rotr64(y, 61) ^ (y >>> 6)
+      w[i] = w[i - 16] + s0 + w[i - 7] + s1
+    }
+    long a = h64[0]
+    long bb = h64[1]
+    long c = h64[2]
+    long d = h64[3]
+    long e = h64[4]
+    long f = h64[5]
+    long g = h64[6]
+    long h = h64[7]
+    for (int i = 0 : i < 80 : i++) {
+      long s1 = rotr64(e, 14) ^ rotr64(e, 18) ^ rotr64(e, 41)
+      long ch = (e & f) ^ (~e & g)
+      long t1 = h + s1 + ch + SHA512_K[i] + w[i]
+      long s0 = rotr64(a, 28) ^ rotr64(a, 34) ^ rotr64(a, 39)
+      long maj = (a & bb) ^ (a & c) ^ (bb & c)
+      long t2 = s0 + maj
+      h = g
+      g = f
+      f = e
+      e = d + t1
+      d = c
+      c = bb
+      bb = a
+      a = t1 + t2
+    }
+    h64[0] = h64[0] + a
+    h64[1] = h64[1] + bb
+    h64[2] = h64[2] + c
+    h64[3] = h64[3] + d
+    h64[4] = h64[4] + e
+    h64[5] = h64[5] + f
+    h64[6] = h64[6] + g
+    h64[7] = h64[7] + h
+  }
+
+  /* ------------------------------------------------------- the finishing */
+
+  /* RFC 1321 and FIPS 180-4 each say the same thing about the end of a message:
+     a single 1 bit, then zeros until the length field would fit, then the
+     message's length in bits -- little-endian for MD5, big-endian for the SHA
+     family, and 128 bits wide for the 64-bit pair. */
+  private void finish() {
+    long bits = total << 3
+    int bs = blockSize()
+    int lenField = 8
+    if (kind == SHA384 || kind == SHA512) {
+      lenField = 16
+    }
+    buf[bufLen] = (byte) 0x80
+    bufLen++
+    if (bufLen > bs - lenField) {
+      while (bufLen < bs) {
+        buf[bufLen] = (byte) 0
+        bufLen++
+      }
+      block(buf, 0)
+      bufLen = 0
+    }
+    while (bufLen < bs - lenField) {
+      buf[bufLen] = (byte) 0
+      bufLen++
+    }
+    if (lenField == 16) {
+      long high = total >>> 61
+      for (int i = 0 : i < 8 : i++) {
+        buf[bufLen + i] = (byte) (high >>> (56 - 8 * i))
+      }
+      bufLen = bufLen + 8
+    }
+    if (kind == MD5) {
+      for (int i = 0 : i < 8 : i++) {
+        buf[bufLen + i] = (byte) (bits >>> (8 * i))
+      }
+    } else {
+      for (int i = 0 : i < 8 : i++) {
+        buf[bufLen + i] = (byte) (bits >>> (56 - 8 * i))
+      }
+    }
+    block(buf, 0)
+    bufLen = 0
+  }
+
+  /* The state as the digest bytes: the four MD5 words little-endian and in
+     order, the SHA-1 and SHA-256 words big-endian, the SHA-512 words
+     big-endian -- and for SHA-224 and SHA-384 only as many words as the
+     standard prints, which is where their lengths come from. */
+  private byte[] stateBytes() {
+    byte[] out = new byte[digestLength()]
+    if (kind == MD5) {
+      for (int i = 0 : i < 4 : i++) {
+        int v = h32[i]
+        for (int j = 0 : j < 4 : j++) {
+          out[i * 4 + j] = (byte) (v >>> (8 * j))
+        }
+      }
+      return out
+    }
+    if (kind == SHA384 || kind == SHA512) {
+      int words = 8
+      if (kind == SHA384) {
+        words = 6
+      }
+      for (int i = 0 : i < words : i++) {
+        long v = h64[i]
+        for (int j = 0 : j < 8 : j++) {
+          out[i * 8 + j] = (byte) (v >>> (56 - 8 * j))
+        }
+      }
+      return out
+    }
+    int words = 8
+    if (kind == SHA1) {
+      words = 5
+    }
+    if (kind == SHA224) {
+      words = 7
+    }
+    for (int i = 0 : i < words : i++) {
+      int v = h32[i]
+      for (int j = 0 : j < 4 : j++) {
+        out[i * 4 + j] = (byte) (v >>> (24 - 8 * j))
+      }
+    }
+    return out
+  }
+
+  /* ------------------------------------------------------------ the shape */
+
+  private MessageDigest(int kind, String algorithm) {
+    this.kind = kind
+    this.algorithm = algorithm
+    init()
+  }
+
+  /* Java's aliases, read off the JDK's own provider: SHA for SHA-1, SHA1 for
+     SHA-1, and the hyphenless spelling of every SHA-2 name. The lookup is
+     case-insensitive, as Java's is, and the name is not canonicalized on the
+     way in, because Java does not canonicalize it either. */
+  public static MessageDigest getInstance(String algorithm) {
+    if (algorithm == null) {
+      throw new NullPointerException("null algorithm name")
+    }
+    if (algorithm.equalsIgnoreCase("MD5")) {
+      return new MessageDigest(MD5, algorithm)
+    }
+    if (algorithm.equalsIgnoreCase("SHA") || algorithm.equalsIgnoreCase("SHA-1") || algorithm.equalsIgnoreCase("SHA1")) {
+      return new MessageDigest(SHA1, algorithm)
+    }
+    if (algorithm.equalsIgnoreCase("SHA-224") || algorithm.equalsIgnoreCase("SHA224")) {
+      return new MessageDigest(SHA224, algorithm)
+    }
+    if (algorithm.equalsIgnoreCase("SHA-256") || algorithm.equalsIgnoreCase("SHA256")) {
+      return new MessageDigest(SHA256, algorithm)
+    }
+    if (algorithm.equalsIgnoreCase("SHA-384") || algorithm.equalsIgnoreCase("SHA384")) {
+      return new MessageDigest(SHA384, algorithm)
+    }
+    if (algorithm.equalsIgnoreCase("SHA-512") || algorithm.equalsIgnoreCase("SHA512")) {
+      return new MessageDigest(SHA512, algorithm)
+    }
+    throw new NoSuchAlgorithmException(algorithm + " MessageDigest not available")
+  }
+
+  public String getAlgorithm() {
+    return algorithm
+  }
+
+  public int getDigestLength() {
+    return digestLength()
+  }
+
+  private int digestLength() {
+    if (kind == MD5) {
+      return 16
+    }
+    if (kind == SHA1) {
+      return 20
+    }
+    if (kind == SHA224) {
+      return 28
+    }
+    if (kind == SHA256) {
+      return 32
+    }
+    if (kind == SHA384) {
+      return 48
+    }
+    return 64
+  }
+
+  /* The name the provider would have built this digest under, which is what
+     Java's DigestException carries: the JDK's MessageDigest passes the
+     caller's spelling to nothing but getAlgorithm(), and the provider's own
+     canonical name to the one message that names the algorithm. So
+     getInstance("sha1").getAlgorithm() is "sha1" while the exception below it
+     says "SHA-1", and both of those are Java's behaviour, not a slip. */
+  private String canonicalName() {
+    if (kind == MD5) {
+      return "MD5"
+    }
+    if (kind == SHA1) {
+      return "SHA-1"
+    }
+    if (kind == SHA224) {
+      return "SHA-224"
+    }
+    if (kind == SHA256) {
+      return "SHA-256"
+    }
+    if (kind == SHA384) {
+      return "SHA-384"
+    }
+    return "SHA-512"
+  }
+
+  public void reset() {
+    init()
+  }
+
+  /* ------------------------------------------------------------ the input */
+
+  public void update(byte input) {
+    buf[bufLen] = input
+    bufLen++
+    total++
+    if (bufLen == blockSize()) {
+      block(buf, 0)
+      bufLen = 0
+    }
+  }
+
+  public void update(byte[] input) {
+    if (input == null) {
+      throw new NullPointerException()
+    }
+    update(input, 0, input.length)
+  }
+
+  /* A message is folded in as it arrives: whatever completes a block is
+     processed straight out of the caller's array, and only the tail that does
+     not complete one is copied into the buffer. */
+  public void update(byte[] input, int offset, int len) {
+    if (input == null) {
+      throw new IllegalArgumentException("No input buffer given")
+    }
+    /* Java's own two checks, in its order: the length check is on the pair as
+       MessageDigest sees them, and the range check that follows is the one the
+       provider makes with jdk.internal.util.Preconditions, which reports the
+       half-open range it refused. Both are reproduced, message and all, so a
+       program that prints one prints what javac's program printed. */
+    if (input.length - offset < len) {
+      throw new IllegalArgumentException("Input buffer too short")
+    }
+    if (offset < 0 || len < 0 || len > input.length - offset) {
+      throw new ArrayIndexOutOfBoundsException("Range [" + offset + ", " + offset + " + " + len +
+        ") out of bounds for length " + input.length)
+    }
+    int bs = blockSize()
+    total = total + len
+    int pos = offset
+    int end = offset + len
+    if (bufLen > 0) {
+      while (pos < end && bufLen < bs) {
+        buf[bufLen] = input[pos]
+        bufLen++
+        pos++
+      }
+      if (bufLen == bs) {
+        block(buf, 0)
+        bufLen = 0
+      }
+    }
+    while (end - pos >= bs) {
+      block(input, pos)
+      pos = pos + bs
+    }
+    while (pos < end) {
+      buf[bufLen] = input[pos]
+      bufLen++
+      pos++
+    }
+  }
+
+  /* ----------------------------------------------------------- the output */
+
+  /* digest() completes the message, hands back its digest and returns the
+     object to its initial state, which is what Java's digest() does: a caller
+     who wants to hash twice reuses the digest rather than constructing one. */
+  public byte[] digest() {
+    finish()
+    byte[] out = stateBytes()
+    reset()
+    return out
+  }
+
+  public byte[] digest(byte[] input) {
+    update(input)
+    return digest()
+  }
+
+  /* Java's buffer-shaped digest: the digest goes into the caller's array at
+     `offset`, and what comes back is how many bytes were written. The two
+     failures are Java's, message for message, including the missing space
+     before "digests" that the JDK's own string has. */
+  public int digest(byte[] out, int offset, int len) {
+    if (out == null) {
+      throw new IllegalArgumentException("No output buffer given")
+    }
+    if (out.length - offset < len) {
+      throw new IllegalArgumentException("Output buffer too small for specified offset and length")
+    }
+    if (len < digestLength()) {
+      throw new DigestException("Length must be at least " + digestLength() + " for " + canonicalName() + "digests")
+    }
+    byte[] d = digest()
+    System.arraycopy(d, 0, out, offset, d.length)
+    return d.length
+  }
+
+  /* The comparison a program should use on two digests, and the reason it
+     exists rather than equals: it does not stop at the first difference, so
+     how long it takes says nothing about how much of the digest matched. */
+  public static boolean isEqual(byte[] digesta, byte[] digestb) {
+    if (digesta == digestb) {
+      return true
+    }
+    if (digesta == null || digestb == null) {
+      return false
+    }
+    if (digesta.length != digestb.length) {
+      return false
+    }
+    int result = 0
+    for (int i = 0 : i < digesta.length : i++) {
+      result = result | (digesta[i] ^ digestb[i])
+    }
+    return result == 0
+  }
+}
+
+/* java.util.zip.Checksum: what a checksum is asked for by the classes that
+   stream bytes through one. Java declares update(byte[]) as a default method on
+   the interface -- the two three-argument and one-byte forms are the ones an
+   implementation must write -- and that is how it is written here. */
+interface Checksum {
+  void update(int b)
+  default void update(byte[] b) {
+    update(b, 0, b.length)
+  }
+  void update(byte[] b, int off, int len)
+  long getValue()
+  void reset()
+}
+
+/* java.util.zip.CRC32, the reflected CRC-32 that gzip, zip and PNG all use: the
+   polynomial is 0xEDB88320 (0x04C11DB7 reversed), the register starts at all
+   ones and the value is complemented on the way out, which is why the empty
+   message checksums to zero.
+
+   The table is built once from the polynomial rather than written out; a
+   256-entry table of numbers nobody reads is 256 chances to mistype a digit,
+   and the loop that produces it is the definition. */
+class CRC32 extends Object implements Checksum {
+  private static int[] table() {
+    int[] t = new int[256]
+    for (int i = 0 : i < 256 : i++) {
+      int c = i
+      for (int k = 0 : k < 8 : k++) {
+        if ((c & 1) != 0) {
+          c = (int) (0xEDB88320L ^ (c >>> 1))
+        } else {
+          c = c >>> 1
+        }
+      }
+      t[i] = c
+    }
+    return t
+  }
+  private static final int[] TABLE = table()
+
+  /* The running register, in the complemented form the algorithm keeps it in:
+     it starts at all ones, every byte mixes in at the bottom, and getValue
+     complements it back out. Only getValue() is observable -- Java's own field
+     holds the same 2^32 states in a different arrangement, and this one reaches
+     the same value. */
+  private int crc = -1
+
+  public CRC32() {
+  }
+
+  public void update(int b) {
+    crc = (crc >>> 8) ^ TABLE[(crc ^ b) & 0xFF]
+  }
+
+  public void update(byte[] b, int off, int len) {
+    if (b == null) {
+      throw new NullPointerException()
+    }
+    /* Java's check here is the same Preconditions call the digest makes, so
+       the message that names the refused range is the same message. */
+    if (off < 0 || len < 0 || len > b.length - off) {
+      throw new ArrayIndexOutOfBoundsException("Range [" + off + ", " + off + " + " + len +
+        ") out of bounds for length " + b.length)
+    }
+    int end = off + len
+    for (int i = off : i < end : i++) {
+      crc = (crc >>> 8) ^ TABLE[(crc ^ b[i]) & 0xFF]
+    }
+  }
+
+  public long getValue() {
+    return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFFL
+  }
+
+  public void reset() {
+    crc = -1
+  }
+}
