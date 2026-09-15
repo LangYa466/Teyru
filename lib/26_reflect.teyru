@@ -475,6 +475,7 @@ class Class {
   static native int fieldCountOf(long cm, boolean declared)
   static native String fieldNameOf(long cm, boolean declared, int i)
   static native long fieldTypeOf(long cm, boolean declared, int i)
+  static native long fieldElemOf(long cm, boolean declared, int i)
   static native long fieldOwnerOf(long cm, boolean declared, int i)
   static native int fieldModsOf(long cm, boolean declared, int i)
   static native Object fieldGetOf(long cm, boolean declared, int i, Object self)
@@ -888,6 +889,27 @@ class Field {
 
   public Class getType() {
     return Class.makeOf(Class.fieldTypeOf(cm, declared, idx))
+  }
+
+  /* The element type the field's declared type carries, or null when it carries
+     none: a List<Person>, a Set<Person> or a Person[] answers Person, a
+     Map<String,Person> the value type Person, and a raw List or a field that is
+     not a container at all answers null.
+
+     The compiler writes it into the field's descriptor (see
+     internal/codegen/reflect.go), because it is the one thing reflection
+     erases: getType() answers teyru.List for `List<Person>`, so a reader that
+     has only the erased class cannot tell the elements from the container. It
+     is what makes a container of objects bindable. A nested container is
+     one level deep only -- `List<List<Person>>` answers List, and the inner
+     element type is erased again, because a descriptor holds one class and not
+     a tree of them. */
+  public Class getElementType() {
+    long elem = Class.fieldElemOf(cm, declared, idx)
+    if (elem == 0) {
+      return null
+    }
+    return Class.makeOf(elem)
   }
 
   public Class getDeclaringClass() {

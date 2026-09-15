@@ -180,6 +180,7 @@ var nativeTable = map[string]nativeFn{
 	"Class.fieldCountOf(J,Z)":                 {fn: "ty_class_fieldcount"},
 	"Class.fieldNameOf(J,Z,I)":                {fn: "ty_field_name"},
 	"Class.fieldTypeOf(J,Z,I)":                {fn: "ty_field_type"},
+	"Class.fieldElemOf(J,Z,I)":                {fn: "ty_field_elem"},
 	"Class.fieldOwnerOf(J,Z,I)":               {fn: "ty_field_owner"},
 	"Class.fieldModsOf(J,Z,I)":                {fn: "ty_field_mods"},
 	"Class.fieldGetOf(J,Z,I,Object)":          {fn: "ty_field_get"},

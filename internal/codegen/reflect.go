@@ -151,6 +151,76 @@ func (e *Emitter) fieldOffsets(cl *ast.Class) map[*ast.Field]int64 {
 	return out
 }
 
+// elementOf answers the declared element type of a container type: the element
+// of a Collection or an array, the value type of a Map, and nil when the type
+// declares none. It is the one thing reflection erases and a binding of a
+// container field needs (see elementTypeExpr).
+func (e *Emitter) elementOf(t ast.Type) ast.Type {
+	switch tt := erasureOf(t).(type) {
+	case *ast.ArrayType:
+		return declaredElem(tt.Elem)
+	case *ast.ClassType:
+		if tt.Class == nil || len(tt.Args) == 0 {
+			return nil
+		}
+		if iface := e.prog.LookupClass("teyru.Map"); iface != nil &&
+			e.prog.IsSubtype(tt, &ast.ClassType{Class: iface}) {
+			// a Map's elements are its values, which is the second argument
+			if len(tt.Args) < 2 {
+				return nil
+			}
+			return declaredElem(tt.Args[1])
+		}
+		return declaredElem(tt.Args[0])
+	}
+	return nil
+}
+
+// declaredElem is what a type argument names once it is erased: a wildcard is
+// its bound, a type variable its bound, and anything else that is not a class,
+// a primitive or an array -- a bare `?` or a `? super X`, whose elements are
+// whatever Object's are -- is nil, so that the descriptor says "no element
+// type" rather than naming a class the declaration never named.
+func declaredElem(t ast.Type) ast.Type {
+	if t == nil {
+		return nil
+	}
+	if w, ok := t.(*ast.WildcardType); ok {
+		if w.Bound == nil || w.Super {
+			return nil
+		}
+		t = w.Bound
+	}
+	t = erasureOf(t)
+	switch t.(type) {
+	case *ast.PrimType, *ast.ClassType, *ast.ArrayType:
+		return t
+	}
+	return nil
+}
+
+// elementTypeExpr names the class object of a field's declared element type, or
+// NULL when the field's declared type carries none.
+//
+// This is where the generic type the language erases is written down: a field
+// declared `List<Person>` is a field of class teyru.List to everything that
+// reads it at run time, so a reader that has only the erased class cannot tell
+// its elements from the container. The compiler still knows -- the declared
+// type is in the AST it is emitting from -- so the element is written into the
+// field's descriptor next to the type, and java.lang.reflect answers it as
+// Field.getElementType (lib/26_reflect.teyru). The cost is one pointer per
+// field in a static table that is already emitted, and no work at run time.
+//
+// A nested container is one level deep: `List<List<Person>>` names teyru.List
+// for its elements, and the inner element type is erased again.
+func (e *Emitter) elementTypeExpr(t ast.Type) string {
+	elem := e.elementOf(t)
+	if elem == nil {
+		return "NULL"
+	}
+	return e.typeClassExpr(elem)
+}
+
 // emitFieldTable writes the field descriptors of a class and answers with the
 // table's C name, or NULL when the class declares no field.
 func (e *Emitter) emitFieldTable(cl *ast.Class) string {
@@ -171,8 +241,9 @@ func (e *Emitter) emitFieldTable(cl *ast.Class) string {
 		}
 		anns, nannos := e.emitAnnoTable(mangle(cl.Full)+"_f_"+mangle(f.Name), f.Annos)
 		entries = append(entries, fmt.Sprintf(
-			"  {.name = %q, .type = %s, .owner = &cls_%s, .off = %s, .mods = %d, .addr = %s, .prim = %d, .annos = %s, .nannos = %d},\n",
-			f.Name, e.typeClassExpr(f.Type), mangle(cl.Full), offset, javaMods(f.Mods), addr, primKindOf(f.Type), anns, nannos))
+			"  {.name = %q, .type = %s, .owner = &cls_%s, .off = %s, .mods = %d, .addr = %s, .prim = %d, .annos = %s, .nannos = %d, .elem = %s},\n",
+			f.Name, e.typeClassExpr(f.Type), mangle(cl.Full), offset, javaMods(f.Mods), addr, primKindOf(f.Type), anns, nannos,
+			e.elementTypeExpr(f.Type)))
 	}
 	name := "fds_" + mangle(cl.Full)
 	fmt.Fprintf(&e.meta, "static const tyfield %s[] = {\n%s};\n", name, strings.Join(entries, ""))

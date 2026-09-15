@@ -527,6 +527,13 @@ int64_t ty_field_type(int64_t cm, int32_t declared, int32_t i) {
   return H(field_at(T(cm), declared, i)->type);
 }
 
+/* The declared element type of a container field, or 0 when the field's
+   declared type carries none -- the answer is what the compiler wrote into the
+   descriptor (elem), and it is what makes a List<Person> readable as one. */
+int64_t ty_field_elem(int64_t cm, int32_t declared, int32_t i) {
+  return H(field_at(T(cm), declared, i)->elem);
+}
+
 int64_t ty_field_owner(int64_t cm, int32_t declared, int32_t i) {
   return H(field_at(T(cm), declared, i)->owner);
 }

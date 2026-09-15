@@ -1348,6 +1348,13 @@ class JsonWriter {
     out.append("null")
   }
 
+  // The document written so far, which is what the sink holds: Gson's writer
+  // takes a java.io.Writer and has no such call, and this one is handed the
+  // StringBuilder it appends to, so the text can be read back from either.
+  public String toString() {
+    return out.toString()
+  }
+
   /* Gson's TypeAdapters.JSON_ELEMENT adapter, which Streams.write delegates to:
      the whole tree in one place, so that JsonElement.toString() and
      Gson.toJson() cannot drift apart. */
@@ -1595,8 +1602,27 @@ class JsonReader {
   private int depth
   private boolean lenient
 
+  /* The token layer's own state, which parseDocument does not touch: the
+     containers that are open (two ints each, the kind and the values read), the
+     token peek answered, and what that token carries. */
+  private static final int DOCUMENT = 1
+  private static final int ARRAY = 2
+  private static final int OBJECT = 3
+
+  private static final int FRAMES = 16
+
+  private int[] frames
+  private int open
+  private String peeked
+  private String tokenText
+  private boolean tokenFlag
+  private boolean named
+
   public JsonReader(String src) {
     this.src = src
+    frames = new int[FRAMES * 2]
+    frames[0] = DOCUMENT
+    open = 1
   }
 
   /* setLenient opens the door to the documents Gson's lenient reader takes and
@@ -1614,6 +1640,383 @@ class JsonReader {
 
   public boolean isLenient() {
     return lenient
+  }
+
+  /* ---- streaming: Gson's JsonReader, one token at a time ----------------
+
+     A tree answers a document that fits in memory and is wanted whole; a token
+     stream answers one read once, from front to back, holding nothing but the
+     containers that are open -- which is the shape Gson's JsonReader has, and
+     the one a document too large for a tree is read with:
+
+       while (in.hasNext()) { in.nextName() ... }
+
+     This reader holds the text it was built from, so what the token layer saves
+     here is the tree and not the text. The scanner underneath is the same one
+     parseDocument uses -- skipWhitespace, parseName, parseStringLiteral,
+     parseNumberLiteral -- so the two agree on the grammar, on what lenient
+     accepts, and on what a failure says.
+
+     A document is read once, one way or the other: parseDocument answers the
+     whole text as a JsonElement and the calls below consume it token by token,
+     and a program that mixes them continues from wherever the last call left
+     the scan. */
+
+  // The tokens, spelled as Gson's JsonToken names them. peek answers one of
+  // these and the accessors below refuse a call that does not match it.
+  public static final String BEGIN_OBJECT = "BEGIN_OBJECT"
+  public static final String END_OBJECT = "END_OBJECT"
+  public static final String BEGIN_ARRAY = "BEGIN_ARRAY"
+  public static final String END_ARRAY = "END_ARRAY"
+  public static final String NAME = "NAME"
+  public static final String STRING = "STRING"
+  public static final String NUMBER = "NUMBER"
+  public static final String BOOLEAN = "BOOLEAN"
+  public static final String NULL = "NULL"
+  public static final String END_DOCUMENT = "END_DOCUMENT"
+
+  /* peek is the type of the next token. The token is read once and kept until
+     an accessor takes it -- a second peek answers the same token rather than
+     reading another -- and the separator before it, a comma between elements or
+     the colon after a name, is consumed here. */
+  public String peek() {
+    if (peeked == null) {
+      scan()
+    }
+    return peeked
+  }
+
+  // hasNext: another element in the array or the object being read, or another
+  // value at the document level. It is what a loop over a container asks.
+  public boolean hasNext() {
+    String t = peek()
+    return !t.equals(END_ARRAY) && !t.equals(END_OBJECT) && !t.equals(END_DOCUMENT)
+  }
+
+  public void beginObject() {
+    take(BEGIN_OBJECT)
+    push(OBJECT)
+  }
+
+  public void endObject() {
+    take(END_OBJECT)
+    pop(OBJECT)
+  }
+
+  public void beginArray() {
+    take(BEGIN_ARRAY)
+    push(ARRAY)
+  }
+
+  public void endArray() {
+    take(END_ARRAY)
+    pop(ARRAY)
+  }
+
+  // nextName is an object member's name, which is the token the reader is on
+  // when an object has another member.
+  public String nextName() {
+    String t = peek()
+    if (!t.equals(NAME)) {
+      throw new IllegalStateException("expected a name but was " + t)
+    }
+    peeked = null
+    return tokenText
+  }
+
+  // nextString is a string, and a number too: Gson's reader answers a number's
+  // text for it, which is how a String member takes the number a document
+  // carries without a second spelling of the call.
+  public String nextString() {
+    String t = peek()
+    if (!t.equals(STRING) && !t.equals(NUMBER)) {
+      throw new IllegalStateException("expected a string but was " + t)
+    }
+    peeked = null
+    return tokenText
+  }
+
+  public long nextLong() {
+    String text = number("long", true)
+    try {
+      return JsonNumbers.parseLong(text)
+    } catch (IllegalArgumentException ex) {
+      // an integer literal the type cannot hold, which Gson refuses the same way
+      throw new IllegalStateException("expected a long but was " + text)
+    }
+  }
+
+  public int nextInt() {
+    return (int) nextLong()
+  }
+
+  public double nextDouble() {
+    return JsonNumbers.parseDouble(number("double", false))
+  }
+
+  public boolean nextBoolean() {
+    String t = peek()
+    if (!t.equals(BOOLEAN)) {
+      throw new IllegalStateException("expected a boolean but was " + t)
+    }
+    peeked = null
+    return tokenFlag
+  }
+
+  public void nextNull() {
+    String t = peek()
+    if (!t.equals(NULL)) {
+      throw new IllegalStateException("expected null but was " + t)
+    }
+    peeked = null
+  }
+
+  /* skipValue is the value the reader is on, whatever it is, dropped without
+     being looked at -- the call a program makes for a member it does not want,
+     which is what reading a document for a few of its members costs instead of
+     building all of it. A container is walked the same way, so the reader ends
+     up past the whole value. */
+  public void skipValue() {
+    String t = peek()
+    if (t.equals(BEGIN_OBJECT)) {
+      beginObject()
+      while (hasNext()) {
+        nextName()
+        skipValue()
+      }
+      endObject()
+      return
+    }
+    if (t.equals(BEGIN_ARRAY)) {
+      beginArray()
+      while (hasNext()) {
+        skipValue()
+      }
+      endArray()
+      return
+    }
+    if (t.equals(STRING) || t.equals(NUMBER)) {
+      nextString()
+      return
+    }
+    if (t.equals(BOOLEAN)) {
+      nextBoolean()
+      return
+    }
+    if (t.equals(NULL)) {
+      nextNull()
+      return
+    }
+    throw new IllegalStateException("expected a value but was " + t)
+  }
+
+  /* number is the text of the number the reader is on, refused when the reader
+     is on anything else. A whole-number accessor also refuses a literal with a
+     fraction or an exponent, which is Gson's "Expected an int but was 1.5"
+     rather than a rounding the caller did not ask for. */
+  private String number(String want, boolean whole) {
+    String t = peek()
+    if (!t.equals(NUMBER)) {
+      throw new IllegalStateException("expected a " + want + " but was " + t)
+    }
+    if (whole && !JsonNumbers.isIntegerText(tokenText)) {
+      throw new IllegalStateException("expected a whole number but was " + tokenText)
+    }
+    peeked = null
+    return tokenText
+  }
+
+  // take consumes the token the caller's call is for and refuses a call that
+  // does not match the document.
+  private void take(String want) {
+    String t = peek()
+    if (!t.equals(want)) {
+      throw new IllegalStateException("expected " + want + " but was " + t)
+    }
+    peeked = null
+  }
+
+  /* scan reads the next token and leaves it as the peeked one: the separator
+     that precedes a token is taken here, the token itself is not (an accessor
+     consumes it), and the frame the token belongs to is updated as the token is
+     read -- a value is counted where it belongs, a name leaves the object
+     waiting for its value. */
+  private void scan() {
+    skipWhitespace()
+    if (named) {
+      // the value of the name just read
+      named = false
+      count()
+      peeked = scanValue()
+      return
+    }
+    int kind = frames[2 * (open - 1)]
+    int read = frames[2 * (open - 1) + 1]
+    if (kind == DOCUMENT) {
+      if (read > 0) {
+        if (pos >= src.length()) {
+          peeked = END_DOCUMENT
+          return
+        }
+        throw error("did not consume the entire document")
+      }
+      count()
+      peeked = scanValue()
+      return
+    }
+    char closer = kind == ARRAY ? ']' : '}'
+    if (pos >= src.length()) {
+      throw error(kind == ARRAY ? "unterminated array" : "unterminated object")
+    }
+    if (read > 0) {
+      // an element has been read, so what comes next is the comma before
+      // another one, or the bracket that closes the container
+      char c = src.charAt(pos)
+      if (c == closer) {
+        pos++
+        peeked = kind == ARRAY ? END_ARRAY : END_OBJECT
+        return
+      }
+      if (c != ',') {
+        throw error("expected ',' or '" + closer + "' but was '" + c + "'")
+      }
+      pos++
+      skipWhitespace()
+      if (pos >= src.length()) {
+        throw error(kind == ARRAY ? "unterminated array" : "unterminated object")
+      }
+      // A trailing comma is what a lenient reader takes here; a strict one falls
+      // through to the value (or the name) it was promised and refuses there,
+      // which is the message parseArray and parseObject give for the same
+      // document.
+      if (lenient && src.charAt(pos) == closer) {
+        pos++
+        peeked = kind == ARRAY ? END_ARRAY : END_OBJECT
+        return
+      }
+    } else if (src.charAt(pos) == closer) {
+      // nothing read yet: the bracket closes an empty container
+      pos++
+      peeked = kind == ARRAY ? END_ARRAY : END_OBJECT
+      return
+    }
+    if (kind == ARRAY) {
+      count()
+      peeked = scanValue()
+      return
+    }
+    tokenText = parseName()
+    skipWhitespace()
+    if (pos >= src.length() || src.charAt(pos) != ':') {
+      throw error("expected ':' after the name")
+    }
+    pos++
+    named = true
+    peeked = NAME
+  }
+
+  // scanValue is one value's token: a container's opening bracket, or a
+  // scalar, which is read whole and kept in tokenText or tokenFlag.
+  private String scanValue() {
+    if (pos >= src.length()) {
+      throw error("expected a value but was the end of the document")
+    }
+    char c = src.charAt(pos)
+    if (c == '{') {
+      pos++
+      return BEGIN_OBJECT
+    }
+    if (c == '[') {
+      pos++
+      return BEGIN_ARRAY
+    }
+    if (c == '"') {
+      tokenText = parseStringLiteral()
+      return STRING
+    }
+    if (lenient) {
+      return scanLenientValue(c)
+    }
+    if (c == 't') {
+      expect("true")
+      tokenFlag = true
+      return BOOLEAN
+    }
+    if (c == 'f') {
+      expect("false")
+      tokenFlag = false
+      return BOOLEAN
+    }
+    if (c == 'n') {
+      expect("null")
+      return NULL
+    }
+    if (c == '-' || JsonNumbers.isDigit((int) c)) {
+      tokenText = parseNumberLiteral()
+      return NUMBER
+    }
+    throw error("expected a value but was '" + c + "'")
+  }
+
+  // scanLenientValue is scanValue's lenient half, the same one
+  // parseLenientValue takes: a single-quoted string, one of the three words, a
+  // loosely written number, or an unquoted string -- which is a STRING, since
+  // Gson reads an unquoted word as a string too.
+  private String scanLenientValue(char c) {
+    if (c == '\'') {
+      tokenText = parseStringLiteral()
+      return STRING
+    }
+    tokenText = scanBare()
+    if (tokenText.length() == 0) {
+      throw error("expected a value but was '" + c + "'")
+    }
+    if (tokenText.equals("true")) {
+      tokenFlag = true
+      return BOOLEAN
+    }
+    if (tokenText.equals("false")) {
+      tokenFlag = false
+      return BOOLEAN
+    }
+    if (tokenText.equals("null")) {
+      return NULL
+    }
+    if (JsonNumbers.isNumberText(tokenText)) {
+      return NUMBER
+    }
+    return STRING
+  }
+
+  // count is one more element read in the container the reader is in.
+  private void count() {
+    frames[2 * (open - 1) + 1]++
+  }
+
+  private void push(int kind) {
+    // open counts the document frame too, and the limit counts containers.
+    if (open - 1 >= MAX_DEPTH) {
+      throw error("nesting depth limit of " + MAX_DEPTH + " exceeded")
+    }
+    if (2 * (open + 1) > frames.length) {
+      int[] bigger = new int[frames.length * 2]
+      for (int i = 0 : i < frames.length : i++) {
+        bigger[i] = frames[i]
+      }
+      frames = bigger
+    }
+    frames[2 * open] = kind
+    frames[2 * open + 1] = 0
+    open++
+  }
+
+  // pop closes the container the reader is in, which has to be the one the call
+  // is for: endObject inside an array is a caller that has lost its place.
+  private void pop(int kind) {
+    if (open <= 1 || frames[2 * (open - 1)] != kind) {
+      throw new IllegalStateException("not inside " + (kind == OBJECT ? "an object" : "an array"))
+    }
+    open--
   }
 
   public JsonElement parseDocument() {

@@ -12,16 +12,21 @@ package teyru
 //
 // The annotations below are the ones Gson's binding is configured by:
 // @SerializedName for a member's name, @Expose, @Since and @Until, and
-// @JsonAdapter for a hand-written adapter. Gson's `alternate` is not declared --
-// an annotation element with an array default is not something this language's
-// annotation syntax has, and an element without a default would have to be
-// written at every use -- and @JsonAdapter names its class with a String rather
-// than a class literal, because a Class-valued annotation element does not
-// survive to run time here (reading one answers Object, measured, not the class
-// that was written): `@JsonAdapter("PersonAdapter")` is looked up with
-// Class.forName, which takes the name either way it is written.
+// @JsonAdapter for a hand-written adapter. Gson declares a field's other names
+// as an array element of @SerializedName (`alternate = {"a", "b"}`), and an
+// annotation element with an array type is not something this language's
+// reflection carries: an alternate is a second @SerializedName on the same
+// field, and the first of them is the name the member is written with (see
+// JsonFields.serializedNames in lib/27_json_binding.teyru). @JsonAdapter names
+// its class with a String rather than a class literal, because a Class-valued
+// annotation element does not survive to run time here (reading one answers
+// Object, measured, not the class that was written):
+// `@JsonAdapter("PersonAdapter")` is looked up with Class.forName, which takes
+// the name either way it is written.
 
-// @SerializedName renames a field in the JSON, as Gson's does.
+// @SerializedName renames a field in the JSON, as Gson's does. Written again on
+// the same field it adds a name the reader also accepts, which is Gson's
+// `alternate`; the first one written is the name the writer uses.
 @interface SerializedName {
   String value()
 }

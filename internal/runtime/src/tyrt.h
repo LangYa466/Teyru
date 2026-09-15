@@ -103,6 +103,12 @@ typedef struct tyfield {
   int32_t prim; /* primitive kind when the type is a primitive, else 0 */
   const tyannotation *annos; /* the annotations written on the field, or NULL */
   int32_t nannos;
+  /* the declared element type of a container field: the element of a Collection
+     or an array, the value type of a Map, and NULL when the declared type
+     carries none. Reflection erases it -- a List<Person> is a List -- so a
+     reader that only has the erased type reads it here
+     (Field.getElementType, lib/26_reflect.teyru). */
+  tyclass *elem;
 } tyfield;
 
 typedef struct tymethod {
@@ -715,6 +721,7 @@ void *ty_class_forname_in(tystr *name, tyclass **table, int32_t count, tyclass *
 int32_t ty_class_fieldcount(int64_t cm, int32_t declared);
 tystr *ty_field_name(int64_t cm, int32_t declared, int32_t i);
 int64_t ty_field_type(int64_t cm, int32_t declared, int32_t i);
+int64_t ty_field_elem(int64_t cm, int32_t declared, int32_t i);
 int64_t ty_field_owner(int64_t cm, int32_t declared, int32_t i);
 int32_t ty_field_mods(int64_t cm, int32_t declared, int32_t i);
 void *ty_field_get(int64_t cm, int32_t declared, int32_t i, void *self);
