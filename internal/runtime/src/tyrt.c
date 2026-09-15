@@ -122,6 +122,17 @@ static size_t gc_nslabs = 0, gc_capslabs = 0;
    many are a thread's private slab. Only a shared slab may be released
    wholesale. */
 static size_t gc_nshared = 0;
+/* The address range those slabs lie in: the lowest byte of the lowest slab and
+   the number of bytes up to the highest byte of the highest one, rebuilt by
+   collect_slabs together with the list. valid_obj tests a candidate word against
+   it before it walks the list, because most of the words a conservative scan
+   reads name something that is not in the heap at all -- a class descriptor, an
+   address on a C stack, a small integer -- and without the test each one of them
+   costs a walk of every slab. It is a filter and not a decision: a word inside
+   the range is still tested against every slab one at a time, so every answer is
+   the one the walk would have given. */
+static char *gc_heap_lo = NULL;
+static size_t gc_heap_span = 0;
 
 /* The heap lock: held by a thread while it refills its slab, and by the
    collector for the whole of a collection. ty_heap_lock counts the caller as
@@ -230,6 +241,13 @@ static int obj_in_chunk(tychunk *c, char *p) {
 
 static int valid_obj(char *p) {
   if (((uintptr_t)p) & (TY_ALIGN - 1)) return 0;
+  /* Outside the range the slabs cover: no slab can hold this word, so the walk
+     below would answer 0 for it anyway. Most of what a conservative scan reads
+     lands here -- a class pointer, an address on a C stack, a small integer --
+     and one word lands here once per traced object: an object whose class was
+     emitted with a reference offset of 0, whose word at offset 0 is its own
+     class pointer. */
+  if ((uintptr_t)p - (uintptr_t)gc_heap_lo >= gc_heap_span) return 0;
   /* A collection tests thousands of candidate words, and they are almost always
      in the slab the previous one was in, so the last slab that answered is tried
      first: walking every slab every time makes a collection quadratic in the
@@ -336,6 +354,17 @@ static void collect_slabs(void) {
     }
     gc_slabs[gc_nslabs++] = (tychunk *)t->chunk;
   }
+  /* The range the filter in valid_obj tests against, over the same slabs. A
+     collection with no slab at all leaves it empty, and then nothing is an
+     object, which is also what the walk would say. */
+  char *lo = NULL, *hi = NULL;
+  for (size_t i = 0; i < gc_nslabs; i++) {
+    tychunk *c = gc_slabs[i];
+    if (!lo || c->mem < lo) lo = c->mem;
+    if (!hi || c->mem + c->cap > hi) hi = c->mem + c->cap;
+  }
+  gc_heap_lo = lo;
+  gc_heap_span = hi ? (size_t)(hi - lo) : 0;
 }
 
 /* Scans one thread's stack conservatively, from where that thread stopped (or
