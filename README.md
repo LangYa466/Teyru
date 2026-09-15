@@ -31,11 +31,12 @@ teyru run hello.teyru
 |---|---|
 | linux/amd64 | 原生，整套測試都跑 |
 | windows/amd64 | 已建置並以 Wine 執行；當時的 195 支測試程式有 179 支輸出逐位元組相同，差異的 16 支已逐一歸因（14 支在改動前的編譯器上用 gcc 也會失敗，2 支是 NTFS 檔名與 POSIX 路徑的事實） |
-| linux/arm64、darwin/amd64、darwin/arm64 | 已實作，由 CI 建置與執行 |
+| linux/arm64、darwin/amd64、darwin/arm64 | 已實作，**尚未驗證**：這台機器裝不到 arm64 的 sysroot，也沒有 macOS |
 
 執行期把平台相依集中在 `internal/runtime/src/tyrt_plat.h` 後面（POSIX 與 Windows 各一份），
-`--target <os>/<arch>` 選擇編譯器、旗標與輸出檔名。拿不到的 runner 不請求——見
-`.github/workflows/ci.yml` 開頭的說明。
+`--target <os>/<arch>` 選擇編譯器、旗標與輸出檔名；沒有 OpenSSL 的目標（windows、macOS）
+在使用到 TLS 的程式上會以指名診斷拒絕，而不是在連結階段失敗。目前沒有 CI：這份表上的每一列
+都是在一台 linux/amd64 機器上跑出來的，所以「已驗證」與「已實作」在這裡是兩件不同的事。
 
 ## 標準程式庫
 
