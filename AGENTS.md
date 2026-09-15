@@ -268,10 +268,17 @@ source → lexer → parser → ast → sema → codegen
 
 
 
-- **`bench_string` 比 `74fa648` 慢 67%（交錯 A/B，20 對，雜訊約 1%，同一台機器）**：同一組
-  交錯量測顯示 `bench_alloc` **快 2.19 倍**、`bench_loop` 慢 19%（迴圈回邊安全點的既定代價）。
-  `bench_string` 這 67% 先前沒有任何紀錄，是工作期間漏掉的退步；已列入待處理。對 Java 仍是
-  ~3.7 倍快，所以對外宣稱沒有變成錯的，但這條路徑本身退步了。
+- **`bench_string` 比 `74fa648` 慢 1.7 倍（已二分到 commit，成因部分已量測）**：交錯 A/B、
+  15 對取最小，輸出 checksum 相同：`74fa648` 0.0085 秒，現在 0.0144 秒。用「重建每個候選
+  commit 的編譯器、best-of-7」二分 254 個 commit，第一個跨過門檻的是 `39218f6`
+  「fix(runtime): the collector and the allocator disagreed on blocks」（父 commit 0.0095 秒，
+  它本身 0.0136 秒），之後的 commit 再補上剩下的（0.0136 → 0.0157）。
+  那個 commit 為了讓收集器能拒絕「指向存活物件內部的字組」而加了 block-start bitmap，並在
+  **每次收集重建**（`build_block_starts()`，走訪每個 slab 的大小字組）。把執行期加上臨時開關
+  實測（僅量測，不落地）：**重建約佔一成**（0.0145 → 0.0130），bitmap 查表量不到差異
+  （0.0145）。所以那次跳升的**另外三分之一、以及之後所有成長，是別的原因**——目前未定，
+  已列入待辦。對 Java 仍是 ~3.7 倍快，所以對外宣稱沒有變成錯的，但這條路徑確實退步了。
+
 - **基準的量測方法與注意事項**（`/tmp/teyru-bench-report.md`，38 分鐘、10 節）：Java 那一欄
   每次都是全新的 JVM，短程式由暖機主導——同一個 fib(32) 暖機後 Java 只要 5–6 ms，而 Teyru 是
   4 ms，所以「fib 快 4.58 倍」大部分是冷解譯器造成的。`bench_invoke` 必須這樣讀：Teyru 的
