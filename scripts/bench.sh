@@ -73,9 +73,22 @@ for f in examples/bench_*.teyru; do
   $BIN build -O2 -o "$exe" "$f" >/dev/null
   t=$(best "$exe")
   j=""
+  missing=""
   if [ "$JAVA" = "1" ] && command -v java >/dev/null 2>&1 && [ -f "examples/$name.java" ]; then
     javac -d /tmp "examples/$name.java" 2>/dev/null || true
-    [ -f "/tmp/$name.class" ] && j=$(best java -cp /tmp "$name")
+    if [ -f "/tmp/$name.class" ]; then
+      j=$(best java -cp /tmp "$name")
+    else
+      # A Java file that did not produce a class named after the file: the row
+      # would otherwise print "-", which reads as "not measured rather than
+      # measured", and a benchmark that loses is exactly the one whose column
+      # must not disappear. Say so instead.
+      missing="!no-class"
+    fi
+  fi
+  if [ -n "$missing" ]; then
+    printf '%-20s %9ss %9s %10s\n' "$name" "$t" "$missing" "$missing"
+    continue
   fi
   if [ -n "$j" ]; then
     ratio=$(awk -v a="$j" -v b="$t" 'BEGIN{ if (b>0) printf "%.2fx", a/b; else print "-" }')

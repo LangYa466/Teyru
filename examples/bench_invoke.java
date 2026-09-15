@@ -1,6 +1,10 @@
-// The same two loops for javac, so the ratio can be compared with a JIT:
+// The same two loops for javac, so the ratio can be compared with a JIT.
 //
-//   javac examples/bench_invoke.java && java BenchInvoke
+// The class is named after the file, the way every other benchmark here is, and
+// the way javac's rule about a public class forces: scripts/bench.sh compiles
+// examples/NAME.java and then runs `java -cp /tmp NAME`, so a file whose public
+// class is called something else produces no runnable NAME and its row quietly
+// loses its Java column. That is exactly what had happened here.
 import java.lang.reflect.*;
 
 class Adder {
@@ -14,7 +18,7 @@ class Adder {
   }
 }
 
-class BenchInvoke {
+public class bench_invoke {
   public static void main(String[] args) throws Exception {
     int rounds = 20000000;
     Adder a = new Adder(7);
