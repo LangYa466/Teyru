@@ -211,12 +211,26 @@ source → lexer → parser → ast → sema → codegen
     本身；把 `forName` 的表拿掉也只降回約 4.1 MB。
 - JSON 綁定（`lib/27_json_binding.teyru`）讀的是類別本身：基本型別、字串、`char`、
   列舉、`Object`、巢狀類別、record，以及**容器**（`List`／`Set`／`Map`／`Deque` 等
-  介面與其實作、陣列）都已往返。尚未完成的是：容器裡的**物件元素**（元素型別由
-  抹除後的宣告型別推導，遇到物件時目前是明確拒絕而不是產生壞資料）、
-  `GsonBuilder` 的其餘旋鈕（`serializeNulls`／`setPrettyPrinting`／
-  `setLenient`／`setFieldNamingPolicy`／`excludeFields*`）、`@Expose`／
-  `@Since`／`@Until` 的過濾、`JsonSerializer`／`JsonDeserializer` 轉接器，以及
-  Gson 的串流 `JsonReader`／`JsonWriter`。
+  介面與其實作、陣列）都已往返，容器裡的**物件元素**也已綁定：元素型別由編譯器寫
+  進欄位描述子（`internal/codegen/reflect.go` 的 `tyfield.elem`），
+  `Field.getElementType()` 讀得到——反射本身仍然沒有泛型型別（沒有
+  `getGenericType`），元素型別是另外記下來的。`GsonBuilder` 的旋鈕
+  （`serializeNulls`／`setPrettyPrinting`／`setLenient`／`setFieldNamingPolicy`
+  的五種政策／`excludeFieldsWithModifiers`／`excludeFieldsWithoutExposeAnnotation`／
+  `setVersion`）、`@Expose`／`@Since`／`@Until`／`@SerializedName` 的過濾與改名、
+  `JsonSerializer`／`JsonDeserializer` 轉接器（`registerTypeAdapter`／
+  `registerTypeHierarchyAdapter`／`@JsonAdapter`）與串流 `JsonReader`／`JsonWriter`
+  都已完成。尚未完成的是：
+  - 元素型別只記**一層**：`List<List<Person>>` 的內層元素按文件的形狀判讀，裡面是
+    物件或陣列就明確拒絕；宣告為 `Object` 的元素（含 raw `List` 與未定界型別變數的
+    抹除結果）也一樣。
+  - 陣列的 component 是 `? super` 或未定界型別變數時沒有類別可以建立陣列，該成員
+    明確拒絕。
+  - `@SerializedName` 的 `alternate` 沒有實作：元素是陣列型別的註解值反射不帶（讀它
+    會說不是 String），所以多個名稱要用**重複標註**寫，第一個是寫出用的名字，其餘是
+    讀入也接受的替代名。
+  - `@JsonAdapter` 用字串命名轉接器類別（`Class` 型別的註解元素留不到執行期），名稱
+    以 `Class.forName` 查。
 - 執行緒只有一部分：`Thread`（`Runnable`、`start`／`join`／`sleep`／`yield`／
   `currentThread`／`getId`／`getName`／`isAlive`）、真的 `synchronized`（含
   `synchronized` 方法修飾子，方法會持有監視器整段）與 `Object.wait`／`notify`／
