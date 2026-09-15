@@ -1,11 +1,23 @@
 # The suite, on every platform this compiler claims to build for.
 #
-# The point of the matrix is that the runtime is portable and that a claim about
-# a platform is a claim CI can check: linux x86-64 is where the suite is a full
-# shell suite, windows x86-64 runs the same programs natively, and macOS runs
-# them on both of its architectures. arm64 linux builds and runs a program; the
-# cross-build job builds for windows and arm64 from x86-64, which is what proves
-# the platform layer compiles for a target this runner is not.
+# Three jobs run on every push, because three kinds of runner are available to
+# anybody: linux x86-64 (the full shell suite), windows x86-64 (the same programs
+# natively) and the cross-build (every target that can be built from x86-64,
+# including windows and arm64, which is what proves the platform layer compiles
+# for a target its runner is not).
+#
+# Two jobs are gated behind a repository variable, because their runners are not
+# free on this plan and a job that waits for a runner nobody can get does not fail
+# — it queues forever, and takes the whole run with it. `macos` needs a paid plan
+# (macOS minutes are billed even for a public repository) and the arm64 Linux
+# labels have to be enabled for the account. Set the variable to turn them on:
+#
+#   gh variable set RUN_PAID_RUNNERS --repo teyru-lang/Teyru --body true
+#
+# They are otherwise ordinary jobs: nothing about them is disabled, they are
+# simply not asked for until someone can serve them. A platform whose tests have
+# never run is a platform whose claim rests on the cross-build alone, and the
+# docs say which is which.
 #
 # tests/ is the teyru-lang/tests submodule: a checkout without --recurse-submodules
 # has the directory and nothing in it, and every test in this repository refuses
@@ -17,6 +29,15 @@ on:
     branches: ["**"]
   pull_request:
   workflow_dispatch:
+
+# One run per branch at a time. Without this, every push to a branch whose jobs
+# are waiting for a runner nobody can get leaves its run queued as well, and a
+# repository ends up with a wall of runs that are not failing and will never
+# finish. Superseded runs are cancelled, which is what a suite is for: the state
+# of the branch, not the history of its pushes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -84,6 +105,9 @@ jobs:
 
   macos:
     name: macos ${{ matrix.arch }}
+    # See the header: macOS runners are billed on every plan, so this waits for a
+    # variable rather than for a runner that is not there.
+    if: vars.RUN_PAID_RUNNERS == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -112,6 +136,7 @@ jobs:
   # program that runs, which is the strongest claim made for it here.
   linux-arm64:
     name: linux arm64 (build and smoke run)
+    if: vars.RUN_PAID_RUNNERS == 'true'
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
