@@ -344,6 +344,12 @@ type llvmEmitter struct {
 	// closure over interface dispatch complete.
 	ifaceNeeds []ifaceNeed
 
+	// classIdx and structText hold each class's emitted struct type and where its
+	// fields sit in it, so that the type and the field accesses cannot be walked
+	// two different ways.
+	classIdx   map[*ast.Class]map[*ast.Field]int
+	structText map[*ast.Class]string
+
 	// tyclassEntries and tyclassIdx are the tyclass type's fields as emitted,
 	// which is what a class record's initializer and a vtable lookup both walk.
 	tyclassEntries []structEntry
@@ -445,6 +451,12 @@ func (e *llvmEmitter) needMethod(m *ast.Method) {
 	}
 	e.methods[m] = true
 	e.mqueue = append(e.mqueue, m)
+	// A method's own class comes with it. Its body may name the class's table
+	// without naming the class anywhere else -- a static field read ends in
+	// `ty_clinit(&cls_X)`, and X's table is only emitted if something asked for
+	// the class -- and a descriptor that is referenced but not written is a
+	// module clang rejects.
+	e.needClass(m.Owner)
 }
 
 // needClass brings a class in: its table, its supertypes and its static
@@ -675,6 +687,40 @@ func (e *llvmEmitter) classSize(cl *ast.Class) int64 {
 	return size
 }
 
+// classStruct is the layout of a class's instances as an emitted struct type,
+// and where each field sits in it.
+//
+// The struct type and the indices a field access uses come from this one walk,
+// because they have to agree: LLVM pads a struct itself when the alignment
+// already puts the next field where the layout says, and a padding entry the
+// emitter counts but does not write -- or the other way round -- makes the
+// eleventh field of a class index the twelfth slot, which clang reports as
+// "invalid getelementptr indices" in a file the program's author never wrote.
+func (e *llvmEmitter) classStruct(cl *ast.Class) (string, map[*ast.Field]int) {
+	if idx, ok := e.classIdx[cl]; ok {
+		return e.structText[cl], idx
+	}
+	layout := []rtField{{"obj", "ptr", 0}}
+	offsets, _ := util.FieldOffsets(cl.InstFields, nil)
+	for i, f := range cl.InstFields {
+		// the field's position in InstFields is its key: two fields of one class
+		// cannot share a name, but a name is not what this walk is about
+		layout = append(layout, rtField{fmt.Sprint(i), e.llvmType(f.Type), offsets[i]})
+	}
+	decl, _, byKey := structDecl("C_"+util.Mangle(cl.Full), layout)
+	idx := make(map[*ast.Field]int, len(cl.InstFields))
+	for i, f := range cl.InstFields {
+		idx[f] = byKey[fmt.Sprint(i)]
+	}
+	if e.classIdx == nil {
+		e.classIdx = map[*ast.Class]map[*ast.Field]int{}
+		e.structText = map[*ast.Class]string{}
+	}
+	e.classIdx[cl] = idx
+	e.structText[cl] = decl
+	return decl, idx
+}
+
 // emitTypesDecl writes the struct a class's instances have, with explicit
 // padding, so that the fields sit at the offsets the runtime and the collector
 // were told about.
@@ -684,33 +730,17 @@ func (e *llvmEmitter) emitTypesDecl() {
 			// the runtime owns these two layouts
 			continue
 		}
-		layout := []rtField{{"obj", "ptr", 0}}
-		offsets, _ := util.FieldOffsets(cl.InstFields, nil)
-		for i, f := range cl.InstFields {
-			layout = append(layout, rtField{f.Name, e.llvmType(f.Type), offsets[i]})
-		}
-		decl, _, _ := structDecl("C_"+util.Mangle(cl.Full), layout)
+		decl, _ := e.classStruct(cl)
 		e.types.WriteString(decl)
 	}
 }
 
-// fieldStructIndex is where a field sits in the emitted struct type, counting
-// the padding fields the struct carries.
+// fieldStructIndex is where a field sits in the emitted struct type, from the
+// same walk that wrote that type.
 func (e *llvmEmitter) fieldStructIndex(cl *ast.Class, fd *ast.Field) (int, bool) {
-	offsets, _ := util.FieldOffsets(cl.InstFields, nil)
-	pos := 1 // the object header
-	cur := int64(util.SizeRef)
-	for i, f := range cl.InstFields {
-		if f == fd {
-			return pos, true
-		}
-		if offsets[i] > cur {
-			pos++ // the padding in front of this field
-		}
-		pos++
-		cur = offsets[i] + util.SizeOf(f.Type)
-	}
-	return 0, false
+	_, idx := e.classStruct(cl)
+	i, ok := idx[fd]
+	return i, ok
 }
 
 // ---------------------------------------------------------------- strings
