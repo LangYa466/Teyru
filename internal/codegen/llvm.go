@@ -349,6 +349,7 @@ type llvmEmitter struct {
 	// two different ways.
 	classIdx   map[*ast.Class]map[*ast.Field]int
 	structText map[*ast.Class]string
+	capIdx     map[*ast.Class]map[string]int
 
 	// tyclassEntries and tyclassIdx are the tyclass type's fields as emitted,
 	// which is what a class record's initializer and a vtable lookup both walk.
@@ -374,6 +375,7 @@ func newLLVMEmitter(p *sema.Program) *llvmEmitter {
 		boxUsed:     map[ast.PrimKind]bool{},
 		exnUsed:     map[string]*ast.Class{},
 		trapNames:   map[string]string{},
+		capIdx:      map[*ast.Class]map[string]int{},
 		classWraps:  map[string]string{},
 		primClasses: map[ast.PrimKind]bool{},
 	}
@@ -476,9 +478,7 @@ func (e *llvmEmitter) needClass(cl *ast.Class) {
 		// does not write; an enum or a record needs members, which it does
 		e.refuse(noPos, "an annotation (%s): the llvm back end does not write the annotation tables its members are read from", cl.Full)
 	}
-	if len(cl.CapFields) > 0 {
-		e.refuse(noPos, "a class that captures enclosing variables (%s): the llvm back end has no closure layout", cl.Full)
-	}
+
 	if cl.Inner || cl.OuterField != nil {
 		// An inner class reaches its enclosing instance through a field the
 		// compiler adds, and every unqualified name in it may have to walk that
@@ -513,6 +513,15 @@ func (e *llvmEmitter) instantiate(cl *ast.Class) {
 	e.needClass(cl)
 	if e.inst[cl] {
 		return
+	}
+	if th := e.p.LookupClass("teyru.Thread"); th != nil && isSubclass(cl, th) {
+		// A thread's run() is dispatched by the runtime's thread start, not by a
+		// call site in the program: the slot it dispatches through is one no
+		// call site names, and a slot this back end did not fill is a stub that
+		// stops with a message. Threads are outside this back end's subset --
+		// the C back end lowers them through ty_thread_start's selector -- so a
+		// program that starts one is refused here rather than run into that stub.
+		e.refuse(noPos, "a thread (%s): the llvm back end does not lower the runtime's thread start, which is what dispatches run()", cl.Full)
 	}
 	e.inst[cl] = true
 	// Slots 0, 1 and 2 are toString, hashCode and equals. The collector does not
@@ -705,7 +714,7 @@ func (e *llvmEmitter) classSize(cl *ast.Class) int64 {
 		// object.
 		return rtStructSize(tySBLayout)
 	}
-	_, size := util.FieldLayout(cl.InstFields, nil)
+	_, size := util.FieldLayout(cl.InstFields, e.capTypes(cl))
 	return size
 }
 
@@ -738,16 +747,32 @@ func (e *llvmEmitter) classStruct(cl *ast.Class) (string, map[*ast.Field]int) {
 		return e.structText[cl], idx
 	}
 	layout := []rtField{{"obj", "ptr", 0}}
-	offsets, _ := util.FieldOffsets(cl.InstFields, nil)
+	caps := e.p.CapturedVars(cl)
+	offsets, _ := util.FieldOffsets(cl.InstFields, e.capTypes(cl))
 	for i, f := range cl.InstFields {
-		// the field's position in InstFields is its key: two fields of one class
+		// the field's position in the walk is its key: two fields of one class
 		// cannot share a name, but a name is not what this walk is about
 		layout = append(layout, rtField{fmt.Sprint(i), e.llvmType(f.Type), offsets[i]})
 	}
+	for i := range caps {
+		fd := cl.CapFields[caps[i]]
+		if fd == nil {
+			continue
+		}
+		// the captures come after the instance fields, at the offsets
+		// util.FieldLayout appended for them
+		layout = append(layout, rtField{fmt.Sprintf("cap%d", i), e.llvmType(fd.Type),
+			offsets[len(cl.InstFields)+i]})
+	}
 	decl, _, byKey := structDecl("C_"+util.Mangle(cl.Full), layout)
-	idx := make(map[*ast.Field]int, len(cl.InstFields))
+	idx := make(map[*ast.Field]int, len(cl.InstFields)+len(caps))
 	for i, f := range cl.InstFields {
 		idx[f] = byKey[fmt.Sprint(i)]
+	}
+	for i := range caps {
+		if fd := cl.CapFields[caps[i]]; fd != nil {
+			idx[fd] = byKey[fmt.Sprintf("cap%d", i)]
+		}
 	}
 	if e.classIdx == nil {
 		e.classIdx = map[*ast.Class]map[*ast.Field]int{}
@@ -755,6 +780,18 @@ func (e *llvmEmitter) classStruct(cl *ast.Class) (string, map[*ast.Field]int) {
 	}
 	e.classIdx[cl] = idx
 	e.structText[cl] = decl
+	byName := map[string]int{}
+	for i, f := range cl.InstFields {
+		byName[f.Name] = byKey[fmt.Sprint(i)]
+	}
+	for i := range caps {
+		fd := cl.CapFields[caps[i]]
+		if fd == nil {
+			continue
+		}
+		byName[fd.Name] = byKey[fmt.Sprintf("cap%d", i)]
+	}
+	e.capIdx[cl] = byName
 	return decl, idx
 }
 
@@ -776,8 +813,18 @@ func (e *llvmEmitter) emitTypesDecl() {
 // same walk that wrote that type.
 func (e *llvmEmitter) fieldStructIndex(cl *ast.Class, fd *ast.Field) (int, bool) {
 	_, idx := e.classStruct(cl)
-	i, ok := idx[fd]
-	return i, ok
+	if i, ok := idx[fd]; ok {
+		return i, true
+	}
+	// A field reached by name may arrive as a field object the checker built for
+	// that reference rather than the one the class holds -- a capture, or a
+	// field of a generic class the checker substituted -- so the name is the
+	// fallback: a name is what the body wrote, and one class cannot have two
+	// fields of one name.
+	if i, ok := e.capIdx[cl][fd.Name]; ok {
+		return i, true
+	}
+	return 0, false
 }
 
 // ---------------------------------------------------------------- strings
@@ -928,6 +975,17 @@ func (e *llvmEmitter) fnSig(m *ast.Method) (string, []string) {
 	for _, p := range m.Params {
 		params = append(params, e.llvmType(p))
 	}
+	// A constructor of a class declared inside a method takes that method's
+	// captured variables after the ones it declares: the object has to hold them
+	// before any initializer of its own runs. They are the compiler's
+	// parameters, so only the signature and the calls carry them -- a program's
+	// own view of the constructor is the declared one, which is what `new`
+	// matches.
+	if m.IsCtor {
+		for _, t := range e.capTypes(m.Owner) {
+			params = append(params, e.llvmType(t))
+		}
+	}
 	return ret, params
 }
 
@@ -953,9 +1011,6 @@ func (e *llvmEmitter) emitMethodBody(m *ast.Method) {
 		e.decl(m.Native, ret, params, "")
 		return
 	}
-	if m.SynthKind == "lambda" || m.SynthKind == "lambda-ctor" {
-		e.refuse(noPos, "a lambda body (%s): the llvm back end has no closure layout", m.Name)
-	}
 	ret, params := e.fnSig(m)
 	f := newFB(e, m, ret)
 	e.fb = f
@@ -966,8 +1021,23 @@ func (e *llvmEmitter) emitMethodBody(m *ast.Method) {
 	for i := range m.Params {
 		names = append(names, fmt.Sprintf("%%a%d", i))
 	}
+	if m.IsCtor {
+		// the captures come after the declared parameters, so they need names in
+		// the signature as well
+		for i := range e.capTypes(m.Owner) {
+			names = append(names, fmt.Sprintf("%%a%d", len(m.Params)+i))
+		}
+	}
 	fmt.Fprintf(&e.defs, "define internal %s @%s(%s) {\n", ret, e.methodSymbol(m), joinParams(params, names))
 	f.entry()
+	if m.Lambda != nil {
+		f.lam = m.Lambda
+		f.bodyClass = e.enclosureOf(m.Lambda)
+	}
+	if m.Owner != nil && len(m.Owner.CapFields) > 0 {
+		// a class declared inside a method reads its captures through `this`
+		e.bindCaptures(f, m.Owner)
+	}
 	// The parameters are copied into stack slots, because a Teyru method may
 	// assign to one and the value has to survive the assignment.
 	for i, pv := range m.ParamVars {
@@ -985,6 +1055,14 @@ func (e *llvmEmitter) emitMethodBody(m *ast.Method) {
 func (e *llvmEmitter) emitBody(f *fb, m *ast.Method) {
 	body := bodyOf(m)
 	switch {
+	case m.SynthKind == "lambda":
+		e.lambdaBody(f, m, m.Lambda)
+	case m.SynthKind == "lambda-ctor":
+		// A closure is allocated and filled in at the site where the lambda is
+		// written, not by a constructor, so this member is never called. It is
+		// written as an empty body rather than left undefined, because a symbol
+		// the module names has to exist.
+		f.retVoid()
 	case m.SynthKind == "clinit" || (m.Owner != nil && m.Owner.ClInit == m && body == nil):
 		e.clinitBody(f, m.Owner)
 	case m.IsCtor:
@@ -1235,7 +1313,7 @@ func classFlags(cl *ast.Class) int64 {
 // dereferences garbage, so it comes from util.FieldLayout, the one place both
 // back ends learn the layout from.
 func (e *llvmEmitter) emitRefOffsets(cl *ast.Class) {
-	refs, _ := util.FieldLayout(cl.InstFields, nil)
+	refs, _ := util.FieldLayout(cl.InstFields, e.capTypes(cl))
 	if len(refs) == 0 {
 		// The C back end still writes a one-element array holding 0, and the
 		// same shape here means a reader of one build can read the other's.
@@ -1291,11 +1369,16 @@ func (e *llvmEmitter) emitVtable(cl *ast.Class) {
 		util.Mangle(cl.Full), len(parts), strings.Join(parts, ", "))
 }
 
-// trap names the stub that stands in for a method no call site reaches. One
-// stub serves every slot with the same signature.
+// trap names the stub that stands in for a method no call site reaches.
+//
+// One stub per method, not per signature: a stub serves a vtable slot, and the
+// only thing a stub is for is to say which method is missing when something
+// reaches it. Sharing stubs between methods with the same signature made the
+// message name whichever method happened to ask first, which sent a reader to
+// the wrong method -- the message has to be about the slot it stands in.
 func (e *llvmEmitter) trap(m *ast.Method) string {
 	ret, params := e.fnSig(m)
-	sig := e.sigOf(ret, params)
+	sig := e.sigOf(ret, params) + "|" + m.Owner.Full + "." + m.Name
 	if n, ok := e.trapNames[sig]; ok {
 		return n
 	}
@@ -1324,7 +1407,7 @@ func (e *llvmEmitter) trapStub(name string, m *ast.Method, ret string, params []
 func (e *llvmEmitter) emitClassRecord(cl *ast.Class) {
 	n := util.Mangle(cl.Full)
 	size := e.classSize(cl)
-	refs, _ := util.FieldLayout(cl.InstFields, nil)
+	refs, _ := util.FieldLayout(cl.InstFields, e.capTypes(cl))
 	super := "ptr null"
 	if cl.Super != nil {
 		super = "ptr @cls_" + util.Mangle(cl.Super.Class.Full)
@@ -1614,17 +1697,23 @@ type fb struct {
 	term bool   // it already has its terminator
 	n    int
 
-	locals        map[*ast.Var]string
+	locals map[*ast.Var]string
 	// slots are the function's own stack slots. Once a try statement has opened
 	// a frame in this function, every access to one of them is volatile: a
 	// setjmp's second return can arrive with the memory of the frame but not
-	// with whatever the optimiser kept in a register or proved dead, and C's own
-	// rule for a local changed between setjmp and longjmp is exactly this.
-	// Without it a local assigned inside a try and read in its catch reads the
-	// value it had at the setjmp, which is what a wrong answer at -O1 and above
-	// looked like.
+	// with whatever the optimiser kept in a register, and C's own rule for
+	// locals live across setjmp is exactly this. Without it a local assigned
+	// inside a try and read in its catch reads the value it had at the setjmp
+	// -- which is what a wrong answer at -O1 and above looked like.
 	slots    map[string]bool
 	volatile bool
+	// lam is the lambda whose body is being written, when it is one: inside such
+	// a body `this` is the instance the lambda was created in, which is what
+	// selfOperand reads. bodyClass is the class the body was written in, which
+	// is where a bare name resolves -- not the closure class.
+	lam       *ast.Lambda
+	bodyClass *ast.Class
+
 	swType        map[string]ast.Type
 	retT          ast.Type
 	loops         []loopFrame

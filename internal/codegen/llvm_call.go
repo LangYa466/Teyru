@@ -80,8 +80,11 @@ func (e *llvmEmitter) callExpr(f *fb, c *ast.Call) lval {
 	if !m.IsStatic() {
 		switch {
 		case c.Recv == nil:
-			// an unqualified call is a call on the instance the code runs on
-			recv = "%this"
+			// An unqualified call is a call on the instance the code runs on --
+			// which inside a lambda body is the instance the lambda was created
+			// in, not the closure. Dispatching on the closure would call the
+			// lambda's own method and recurse.
+			recv = e.selfOperand(f)
 		case c.Super:
 			recv = "%this"
 		default:
@@ -91,16 +94,28 @@ func (e *llvmEmitter) callExpr(f *fb, c *ast.Call) lval {
 	if m.Selector >= 0 && !m.IsStatic() {
 		// An interface call dispatches through the receiver's interface map.
 		//
-		// An unqualified one -- the body of a default method calling another
-		// method of its interface -- would be a call on `this`, and that shape is
-		// refused rather than lowered: it is the one case this back end has not
-		// verified end to end, and a receiver it got wrong would read a field of
-		// the wrong object rather than fail. The C back end lowers it, so a
-		// program that needs it is a program to build with `--backend=c` today.
-		if c.Recv == nil || c.Super {
-			e.refuse(c.GetPos(), "a call inside an interface's own default or static method (%s.%s): the llvm back end does not lower this receiver yet", m.Owner.Full, m.Name)
+		// An unqualified one is a call on `this` -- the body of a default
+		// method calling another method of its interface, or a class method
+		// calling a default it inherits. `this` is the instance either way and
+		// the interface map of that instance holds the implementation, so the
+		// dispatch is the same one an explicit receiver makes. `super.m()` is
+		// the one that is not: it has to reach that interface's own default and
+		// skip the override the instance would otherwise answer with, which is
+		// a direct call to a body this back end has not verified.
+		if c.Super {
+			e.refuse(c.GetPos(), "Iface.super.%s(): the llvm back end does not lower a call to a specific interface's default (it dispatches through the receiver, which would reach an override)", m.Name)
 		}
-		return e.ifaceDispatch(f, m, e.expr(f, c.Recv), e.callArgs(f, m, c, c.Args))
+		if c.Recv == nil {
+			return e.ifaceDispatch(f, m, value(e.selfOperand(f), e.refType()), e.callArgs(f, m, c, c.Args))
+		}
+		// The receiver was evaluated above, before the arguments, which is the
+		// order Java evaluates them in. Evaluating c.Recv again here would run
+		// it a second time: for a receiver that is itself a call -- `it.next()`
+		// as the receiver of `getKey()`, which is how the standard library's
+		// key iterator is written -- that call would happen twice and the first
+		// result be thrown away, so a walk over a collection would see every
+		// other element.
+		return e.ifaceDispatch(f, m, value(recv, c.Recv.GetType()), e.callArgs(f, m, c, c.Args))
 	}
 	// A native method that is not overridable is the runtime helper itself; one
 	// that is goes through the receiver's vtable, because the override is what
@@ -153,24 +168,45 @@ func (e *llvmEmitter) needsReflection(f *fb, m *ast.Method) bool {
 	return ce.reflectionCall(m)
 }
 
-// ifaceMethod is the interface method of a given name, or nil when the program
-// has no such interface method.
-func (e *llvmEmitter) ifaceMethod(cl *ast.Class, name string) *ast.Method {
+// ifaceMethod is the interface method of a given name and arity, or nil when the
+// program has no such interface method. The arity matters: an interface may
+// declare two methods of one name with different parameters, and picking the
+// wrong one dispatches a call to a method whose signature the caller does not
+// have.
+func (e *llvmEmitter) ifaceMethod(cl *ast.Class, name string, arity int) *ast.Method {
 	if cl == nil {
 		return nil
 	}
 	for _, m := range cl.Methods[name] {
-		if m.Selector >= 0 {
+		if m.Selector >= 0 && len(m.Params) == arity {
 			return m
 		}
 	}
 	return nil
 }
 
+// ifaceMethodFor is ifaceMethod for a method object rather than a name.
+func (e *llvmEmitter) ifaceMethodFor(cl *ast.Class, name string, arity int) *ast.Method {
+	return e.ifaceMethod(cl, name, arity)
+}
+
 // ifaceDispatch calls an interface method: the receiver's dynamic class decides
 // which implementation runs, and that class's interface map is what says which.
 func (e *llvmEmitter) ifaceDispatch(f *fb, im *ast.Method, recv lval, args []lval) lval {
-	e.ifaceSlot(im, im.Selector)
+	// The checker's selector is the one to use: it is what the interface map of
+	// every class that answers the interface was built from. The lookup by name
+	// is only a fallback for a method object that arrived without one, and it
+	// matches on the name AND the parameter count -- matching on the name alone
+	// picks the first overload of that name, which for `Writer.write` is
+	// `write(int)` where the call site meant `write(String)`, and a String
+	// receiver then arrives in an int parameter.
+	sel := im.Selector
+	if sel < 0 {
+		if canon := e.ifaceMethodFor(im.Owner, im.Name, len(im.Params)); canon != nil {
+			sel = canon.Selector
+		}
+	}
+	e.ifaceSlot(im, sel)
 	ret, _ := e.fnSig(im)
 	vals := []string{argOperand("ptr", recv.v)}
 	for i, a := range args {
@@ -181,7 +217,7 @@ func (e *llvmEmitter) ifaceDispatch(f *fb, im *ast.Method, recv lval, args []lva
 		vals = append(vals, argOperand(want, e.convertTo(f, a, want)))
 	}
 	e.nullCheck(f, recv.v)
-	fn := e.itabLookup(f, recv.v, im.Selector)
+	fn := e.itabLookup(f, recv.v, sel)
 	if ret == "void" {
 		f.ins(fmt.Sprintf("call void %s(%s)", fn, strings.Join(vals, ", ")))
 		return value("0", im.Result)
@@ -642,6 +678,7 @@ func (e *llvmEmitter) newExpr(f *fb, v *ast.New) lval {
 	e.clinitIfNeeded(f, cl)
 	if v.Ctor != nil {
 		args := e.callArgs(f, v.Ctor, nil, v.Args)
+		args = append(args, e.capturesForNew(f, cl)...)
 		e.directCall(f, v.Ctor, obj, args)
 	}
 	return value(obj, v.GetType())

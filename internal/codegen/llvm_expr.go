@@ -71,15 +71,20 @@ func (e *llvmEmitter) expr(f *fb, x ast.Expr) lval {
 		if v.Qual != "" {
 			e.refuse(v.GetPos(), "an enclosing instance (%s.this): the llvm back end has no inner-class layout", v.Qual)
 		}
-		return value("%this", v.GetType())
+		return value(e.selfOperand(f), v.GetType())
 	case *ast.SuperExpr:
 		return value("%this", v.GetType())
 	case *ast.SwitchExpr:
 		return e.switchExpr(f, v)
 	case *ast.ClassLit:
 		return e.classObject(f, v)
-	case *ast.Lambda, *ast.MethodRef:
-		e.refuse(x.GetPos(), "a lambda or method reference: the llvm back end has no closure layout")
+	case *ast.Lambda:
+		return e.lambdaExpr(f, v)
+	case *ast.MethodRef:
+		if v.Lam == nil {
+			e.refuse(v.GetPos(), "a method reference the checker did not desugar")
+		}
+		return e.lambdaExpr(f, v.Lam)
 	}
 	e.refuse(x.GetPos(), "the expression %T: the llvm back end does not lower it", x)
 	return value("0", nil)
@@ -148,6 +153,7 @@ func (e *llvmEmitter) ident(f *fb, v *ast.Ident) lval {
 		if r == nil {
 			return e.zeroValue(v.GetType())
 		}
+		r = e.canonicalField(r)
 		if c, ok := e.constField(f, r); ok {
 			return c
 		}
@@ -155,14 +161,13 @@ func (e *llvmEmitter) ident(f *fb, v *ast.Ident) lval {
 			return e.staticField(f, r, v.GetType())
 		}
 		e.bareFieldCheck(f, r)
-		return e.fieldRead(f, r, "%this", v.GetType())
+		return e.fieldRead(f, r, e.selfOperand(f), v.GetType())
 	case *ast.Var:
 		if r == nil {
 			return e.zeroValue(v.GetType())
 		}
 		if r.Field != nil {
-			// the `field` of a property accessor
-			return e.fieldRead(f, r.Field, "%this", v.GetType())
+			return e.propertyStorageRead(f, r.Field, v.GetType())
 		}
 		return e.load(f, f.localSlot(r), v.GetType())
 	case *ast.Class:
@@ -212,6 +217,7 @@ func (e *llvmEmitter) selectExpr(f *fb, v *ast.Select) lval {
 		if r == nil {
 			return e.zeroValue(v.GetType())
 		}
+		r = e.canonicalField(r)
 		if c, ok := e.constField(f, r); ok {
 			return c
 		}
@@ -252,6 +258,52 @@ func (e *llvmEmitter) fieldRead(f *fb, fd *ast.Field, recv string, t ast.Type) l
 	return e.load(f, e.fieldAddr(f, fd, recv, recv != "%this"), t)
 }
 
+// propertyStorageRead is the `field` a property accessor reads: a static
+// property's storage is a global -- its accessor is a static method with no
+// `this` to reach it through -- and an instance property's is a field of the
+// object the body runs on.
+func (e *llvmEmitter) propertyStorageRead(f *fb, fd *ast.Field, t ast.Type) lval {
+	fd = e.canonicalField(fd)
+	if fd.Mods.Has(ast.ModStatic) {
+		return e.staticField(f, fd, t)
+	}
+	return e.fieldRead(f, fd, e.selfOperand(f), t)
+}
+
+// propertyStorageAddr is the same storage as an address, for an assignment to
+// `field`.
+func (e *llvmEmitter) propertyStorageAddr(f *fb, fd *ast.Field) string {
+	fd = e.canonicalField(fd)
+	if fd.Mods.Has(ast.ModStatic) {
+		e.needClass(fd.Owner)
+		e.clinitIfNeeded(f, fd.Owner)
+		return e.staticGlobal(fd.Owner, fd)
+	}
+	return e.fieldAddr(f, fd, e.selfOperand(f), false)
+}
+
+// canonicalField is the field object the class itself holds, found by name.
+//
+// A reference in a body can arrive carrying a field object the checker built for
+// that use rather than the one the class was laid out with, and the two must not
+// disagree: whether a field is static decides between a global and an offset, and
+// a copy that lost the flag reads the wrong storage entirely. The class's own
+// field is the one the layout and the class table were built from.
+func (e *llvmEmitter) canonicalField(fd *ast.Field) *ast.Field {
+	if fd == nil || fd.Owner == nil {
+		return fd
+	}
+	if canon := fd.Owner.FieldMap[fd.Name]; canon != nil {
+		return canon
+	}
+	for _, f := range fd.Owner.Fields {
+		if f.Name == fd.Name {
+			return f
+		}
+	}
+	return fd
+}
+
 // bareFieldCheck refuses a bare field name that belongs to neither the class
 // being compiled nor one of its supertypes: an unqualified name is a field of
 // the instance the code runs on, and when it belongs to an enclosing class the
@@ -259,12 +311,22 @@ func (e *llvmEmitter) fieldRead(f *fb, fd *ast.Field, recv string, t ast.Type) l
 // through an explicit receiver is not this case -- `m.end` names another object,
 // and its offset is the one the receiver's own table gives it.
 func (e *llvmEmitter) bareFieldCheck(f *fb, fd *ast.Field) {
-	if f.fn == nil || f.fn.Owner == nil || fd.Owner == nil {
+	body := f.fn
+	owner := (*ast.Class)(nil)
+	if body != nil {
+		owner = body.Owner
+	}
+	if f.bodyClass != nil {
+		// a lambda body is written in the enclosing class, and that is where its
+		// bare names resolve -- the closure class has no fields but its captures
+		owner = f.bodyClass
+	}
+	if owner == nil || fd.Owner == nil {
 		return
 	}
-	if f.fn.Owner != fd.Owner && !isSubclass(f.fn.Owner, fd.Owner) {
+	if owner != fd.Owner && !isSubclass(owner, fd.Owner) {
 		e.refuse(noPos, "the bare name %s, a field of another class (%s), read from %s: the llvm back end does not lower enclosing-instance access",
-			fd.Name, fd.Owner.Full, f.fn.Owner.Full)
+			fd.Name, fd.Owner.Full, owner.Full)
 	}
 }
 
@@ -272,6 +334,7 @@ func (e *llvmEmitter) bareFieldCheck(f *fb, fd *ast.Field) {
 // emitted struct type, whose fields were laid out with util.FieldOffsets, so the
 // offset is the one the collector was told about.
 func (e *llvmEmitter) fieldAddr(f *fb, fd *ast.Field, recv string, check bool) string {
+	fd = e.canonicalField(fd)
 	cl := fd.Owner
 	e.needClass(cl)
 	idx, ok := e.fieldStructIndex(cl, fd)
@@ -302,8 +365,8 @@ func (e *llvmEmitter) loadRaw(f *fb, ty, ptr string, align int64) string {
 	return r
 }
 
-// volOf is `volatile ` for an access the optimiser must not keep in a register
-// or prove dead: a slot of a function that has opened a try frame.
+// volOf is `volatile ` for an access the optimiser must not keep in a register:
+// a slot of a function that has opened a try frame.
 func volOf(f *fb, ptr string) string {
 	if f.volatile && f.slots[ptr] {
 		return "volatile "
@@ -1234,29 +1297,26 @@ func (e *llvmEmitter) addr(f *fb, x ast.Expr) (string, ast.Type) {
 			if r == nil {
 				break
 			}
+			r = e.canonicalField(r)
 			if r.Mods.Has(ast.ModStatic) {
 				e.needClass(r.Owner)
 				e.clinitIfNeeded(f, r.Owner)
 				return e.staticGlobal(r.Owner, r), v.GetType()
 			}
 			e.bareFieldCheck(f, r)
-			return e.fieldAddr(f, r, "%this", false), v.GetType()
+			return e.fieldAddr(f, r, e.selfOperand(f), false), v.GetType()
 		case *ast.Var:
 			if r == nil {
 				break
 			}
 			if r.Field != nil {
-				if r.Field.Mods.Has(ast.ModStatic) {
-					e.needClass(r.Field.Owner)
-					e.clinitIfNeeded(f, r.Field.Owner)
-					return e.staticGlobal(r.Field.Owner, r.Field), v.GetType()
-				}
-				return e.fieldAddr(f, r.Field, "%this", false), v.GetType()
+				return e.propertyStorageAddr(f, r.Field), v.GetType()
 			}
 			return f.localSlot(r), r.Type
 		}
 	case *ast.Select:
 		if r, ok := v.Ref.(*ast.Field); ok && r != nil {
+			r = e.canonicalField(r)
 			if r.Mods.Has(ast.ModStatic) {
 				e.needClass(r.Owner)
 				e.clinitIfNeeded(f, r.Owner)
