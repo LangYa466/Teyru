@@ -411,6 +411,12 @@ func (e *llvmEmitter) run() {
 	if e.p.Main != nil {
 		e.needMethod(e.p.Main)
 	}
+	// A program whose own declarations carry a library annotation is read
+	// through the annotation tables at run time, and this back end writes no
+	// tables. The C back end decides the same thing with the same predicate.
+	if ce := (&Emitter{prog: e.p}); ce.programUsesAnnotations() {
+		e.refuse(noPos, "an annotation on the program's own declaration: the llvm back end does not write the annotation tables reflection reads")
+	}
 	// The work queue grows while it is drained: a method body names classes,
 	// which bring their constructors, their static initializers and their
 	// vtable's methods.
