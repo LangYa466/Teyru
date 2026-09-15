@@ -31,6 +31,11 @@ class HttpSession {
   public String id = ""
   public long creationTime = 0
   public long lastAccessTime = 0
+  // maxInactiveInterval is how long the session may go untouched, in seconds,
+  // as the servlet's setMaxInactiveInterval means it: 0 or less is never. What
+  // a session actually gets is this when it was set on the session, and the
+  // store's default otherwise.
+  public int maxInactiveInterval = 0
   // fresh is public because Sessions.of sets it on the session it just made.
   public boolean fresh = false
   private Map<String, Object> attributes = new LinkedHashMap<String, Object>()
@@ -94,6 +99,29 @@ class HttpSession {
     lastAccessTime = System.currentTimeMillis()
   }
 
+  public int getMaxInactiveInterval() {
+    return maxInactiveInterval
+  }
+
+  public void setMaxInactiveInterval(int seconds) {
+    maxInactiveInterval = seconds
+  }
+
+  // isExpired answers whether the session has been idle longer than it is
+  // allowed to be. The interval that applies is the session's own when it has
+  // one, and the store's default otherwise, which is how a container lets a
+  // program set a timeout for everything and shorten it for one session.
+  public boolean isExpired(long now) {
+    int limit = maxInactiveInterval
+    if (limit <= 0) {
+      limit = Sessions.defaultTimeout
+    }
+    if (limit <= 0) {
+      return false
+    }
+    return now - lastAccessTime > (long)limit * 1000L
+  }
+
   // invalidate forgets the attributes and takes the id out of the store, so the
   // next request that carries the old cookie is given a new session. The
   // client's cookie is not cleared here because a session has no answer to
@@ -110,7 +138,18 @@ class Sessions {
   public static final String COOKIE_NAME = "TEYRUSSESSIONID"
 
   private static Map<String, HttpSession> store = new LinkedHashMap<String, HttpSession>()
+  // order is the ids in the order they were created, which is the order a sweep
+  // walks them in: a session that is never touched again is only found by the
+  // sweep, so the sweep has to exist.
+  private static List<String> order = new ArrayList<String>()
   private static Random random = new Random()
+  private static int defaultTimeout = 0
+  // sweepAt is where the next sweep picks up. Every request checks a few
+  // sessions rather than every request checking all of them, which is how a
+  // store with no background thread can still bound itself: the work is spread
+  // over the traffic instead of done by a reaper.
+  private static int sweepAt = 0
+  private static final int SWEEP_PER_USE = 8
 
   // of answers the session this request belongs to, making one when the request
   // carries no usable id. The new session's cookie is stamped on the answer by
@@ -131,6 +170,8 @@ class Sessions {
     made.lastAccessTime = made.creationTime
     made.fresh = true
     store.put(made.id, made)
+    order.add(made.id)
+    Sessions.sweepSome()
     req.pendingSession = made.id
     return made
   }
@@ -139,6 +180,7 @@ class Sessions {
   // handler that must not create one uses, the way a login page reads an
   // existing session without starting another.
   public static HttpSession find(HttpRequest req) {
+    Sessions.sweepSome()
     String id = req.cookie(Sessions.COOKIE_NAME)
     if (id.isEmpty()) {
       return null
@@ -147,12 +189,85 @@ class Sessions {
     if (s == null) {
       return null
     }
+    // An expired session is not a session: the cookie the client is still
+    // holding names nothing, and the next request that wants one is given a new
+    // one, which is what a container does when a session times out.
+    if (s.isExpired(System.currentTimeMillis())) {
+      Sessions.forget(id)
+      return null
+    }
     s.touch()
     return s
   }
 
+  // setTimeout is the store's default inactivity limit in seconds, for sessions
+  // that do not set their own. 0 means no limit, which is the default: a program
+  // that wants its sessions to expire has to say so.
+  public static void setTimeout(int seconds) {
+    defaultTimeout = seconds
+  }
+
+  public static int getTimeout() {
+    return defaultTimeout
+  }
+
+  // prune drops every session that has expired and answers how many it dropped.
+  // It is the whole store at once, for a test or for a program that has a quiet
+  // moment; the sweeps that happen during requests are what keep a busy server
+  // from growing without bound.
+  public static int prune() {
+    long now = System.currentTimeMillis()
+    int dropped = 0
+    List<String> keep = new ArrayList<String>()
+    for (int i = 0 : i < order.size() : i++) {
+      String id = order.get(i)
+      HttpSession s = store.get(id)
+      if (s != null && s.isExpired(now)) {
+        store.remove(id)
+        dropped = dropped + 1
+      } else {
+        keep.add(id)
+      }
+    }
+    order = keep
+    sweepAt = 0
+    return dropped
+  }
+
+  // sweepSome checks the next few sessions and drops the ones that have expired.
+  // A store with no background thread cannot look at everything on every
+  // request, and it does not have to: each request advances a cursor, so the
+  // cost per request is bounded and every session is looked at eventually.
+  private static void sweepSome() {
+    // A store with no default limit has nothing to sweep for: a session that set
+    // its own interval is checked when it is found (find does that exactly) and
+    // by prune. Walking the ids here to ask whether any session has one would
+    // make every request O(sessions), which is the cost the sweep exists to
+    // avoid.
+    if (defaultTimeout <= 0) {
+      return
+    }
+    long now = System.currentTimeMillis()
+    int checked = 0
+    while (checked < SWEEP_PER_USE && order.size() > 0) {
+      if (sweepAt >= order.size()) {
+        sweepAt = 0
+      }
+      String id = order.get(sweepAt)
+      HttpSession s = store.get(id)
+      if (s == null || s.isExpired(now)) {
+        store.remove(id)
+        order.remove(sweepAt)
+      } else {
+        sweepAt = sweepAt + 1
+      }
+      checked = checked + 1
+    }
+  }
+
   public static void forget(String id) {
     store.remove(id)
+    order.remove(id)
   }
 
   public static int count() {
@@ -163,6 +278,8 @@ class Sessions {
   // running server does.
   public static void clear() {
     store.clear()
+    order.clear()
+    sweepAt = 0
   }
 
   private static String newId() {
