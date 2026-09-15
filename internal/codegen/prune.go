@@ -33,8 +33,15 @@ package codegen
 //   - a live class answers slots 0, 1 and 2 for whatever object it can have,
 //     because the runtime calls those three through the vtable by index
 //     (print_uncaught, ty_obj_hash and ty_obj_equal in tyrt);
-//   - a live class answers every other slot a live dispatch asks for, and each
-//     answer is a method that is live by adoption;
+//   - a class answers another slot when a live dispatch asks for that index AND
+//     the class can be its receiver: it must inherit from the class the dispatch
+//     was compiled against. The generated C carries that class -- indirect()
+//     writes `((RET(*)(OWNER*, ...))((recv)->obj.cls->vtable[N]))` -- so the test
+//     is a walk over the class records, the one llvm.go states as isSubclass.
+//     Without it one reachable `Class.toString` keeps slot 7 of every class that
+//     overrides that selector, which is most of the library;
+//   - every answer's method is live by adoption, which is what makes this a
+//     fixpoint rather than one pass;
 //   - the interface table is left alone. A native method a program supplies may
 //     dispatch through it with a selector the compiler never sees -- that is
 //     what `--native-header` exists for -- so every entry stays a plain
@@ -79,7 +86,8 @@ func pruneVtables(src string) string {
 	if p == nil {
 		return src
 	}
-	return p.rewrite(p.liveSlots())
+	p.liveSlots()
+	return p.rewrite()
 }
 
 // cdef is one file-scope definition in the generated C: a function, or one of
@@ -91,13 +99,22 @@ type cdef struct {
 	end   int // last line, inclusive
 	// refs are the definitions this one names, by index into the parse's defs.
 	refs map[int]bool
-	// slots are the vtable indices this definition dispatches through. Only a
-	// function has them.
-	slots map[int]bool
+	// slots are the dispatches this definition makes: the slot index read, and
+	// the class the call was compiled against, whose subclasses can be its
+	// receiver. Only a function has them.
+	slots map[slotKey]bool
 	// entries and targets are a vtable's initializer, in slot order: the text as
 	// written, and the C name it holds, or "" for an entry that is already NULL.
 	entries []string
 	targets []string
+}
+
+// slotKey is one vtable dispatch: the index read, and the class it was compiled
+// against. An empty owner means the scan could not read one, and then every class
+// answers, which is the direction that cannot break a program.
+type slotKey struct {
+	owner string
+	idx   int
 }
 
 type cparse struct {
@@ -107,10 +124,13 @@ type cparse struct {
 	// roots is the entry point's references: the seed of the fixpoint. It is not
 	// one of the defs, because main is written without `static`.
 	roots *cdef
-	// live marks the definitions the fixpoint reached, and slotsLive the vtable
-	// indices a reached method dispatches.
-	live      []bool
-	slotsLive map[int]bool
+	// live marks the definitions the fixpoint reached, and need the dispatches a
+	// reached method makes.
+	live []bool
+	need map[slotKey]bool
+	// bases is each class's transitive supertypes, by mangled name, read out of
+	// the class records the C writes: `.super = &cls_Y` and `.ifaces = if_X`.
+	bases map[string]map[string]bool
 }
 
 // parseC reads the generated C into definitions. It is a line scan and not a
@@ -149,7 +169,7 @@ func parseC(src string) *cparse {
 			continue
 		}
 		d := &cdef{name: name, fn: sep == '(', start: i, end: i,
-			refs: map[int]bool{}, slots: map[int]bool{}}
+			refs: map[int]bool{}, slots: map[slotKey]bool{}}
 		end, ok := defEnd(lines, i, d.fn)
 		if !ok {
 			return nil // a body or a table that does not end: not this shape
@@ -172,6 +192,7 @@ func parseC(src string) *cparse {
 	if mainAt < 0 || len(p.defs) == 0 {
 		return nil
 	}
+	p.buildBases()
 	for i, d := range p.defs {
 		for k := d.start; k <= d.end; k++ {
 			if owned[k] == i {
@@ -179,13 +200,107 @@ func parseC(src string) *cparse {
 			}
 		}
 	}
-	p.roots = &cdef{name: "int main", refs: map[int]bool{}, slots: map[int]bool{}}
+	p.roots = &cdef{name: "int main", refs: map[int]bool{}, slots: map[slotKey]bool{}}
 	for k := mainAt; k < len(lines); k++ {
 		p.scanLine(lines[k], p.roots)
 	}
 	p.live = make([]bool, len(p.defs))
-	p.slotsLive = map[int]bool{}
+	p.need = map[slotKey]bool{}
 	return p
+}
+
+// buildBases reads each class's supertypes out of the class records, which is all
+// a subclass test needs: `.super = &cls_Y` names the one class it extends,
+// `.ifaces = if_X` names the array its interfaces are written in, and that array
+// is a list of `&cls_I`. An interface is walked like a superclass, which can only
+// make the test answer yes more often -- the safe direction, since a slot kept is
+// a byte and a slot dropped wrongly is a jump to NULL.
+func (p *cparse) buildBases() {
+	p.bases = map[string]map[string]bool{}
+	parents := map[string][]string{}
+	for _, d := range p.defs {
+		if d.fn || !strings.HasPrefix(d.name, "cls_") {
+			continue
+		}
+		me := d.name[len("cls_"):]
+		body := strings.Join(p.lines[d.start:d.end+1], " ")
+		if sup := recordField(body, "super"); strings.HasPrefix(sup, "&cls_") {
+			parents[me] = append(parents[me], sup[len("&cls_"):])
+		}
+		arr := recordField(body, "ifaces")
+		if !strings.HasPrefix(arr, "if_") {
+			continue
+		}
+		def, ok := p.lookup(arr)
+		if !ok {
+			continue
+		}
+		parents[me] = append(parents[me], classRefs(p.lines[def.start])...)
+	}
+	var walk func(string, map[string]bool) map[string]bool
+	walk = func(c string, onPath map[string]bool) map[string]bool {
+		if b, ok := p.bases[c]; ok {
+			return b
+		}
+		if onPath[c] {
+			return map[string]bool{}
+		}
+		onPath[c] = true
+		b := map[string]bool{}
+		for _, parent := range parents[c] {
+			b[parent] = true
+			for up := range walk(parent, onPath) {
+				b[up] = true
+			}
+		}
+		delete(onPath, c)
+		p.bases[c] = b
+		return b
+	}
+	for c := range parents {
+		walk(c, map[string]bool{})
+	}
+}
+
+// recordField reads one designator out of a class record: the text after
+// `.name = ` up to the comma that ends it.
+func recordField(body, name string) string {
+	m := strings.Index(body, "."+name+" = ")
+	if m < 0 {
+		return ""
+	}
+	rest := body[m+len(name)+4:]
+	if end := strings.IndexByte(rest, ','); end >= 0 {
+		rest = rest[:end]
+	}
+	return strings.TrimSpace(rest)
+}
+
+// classRefs lists the classes one line names as `&cls_X`.
+func classRefs(line string) []string {
+	var out []string
+	for k := 0; ; {
+		m := strings.Index(line[k:], "&cls_")
+		if m < 0 {
+			return out
+		}
+		k += m + len("&cls_")
+		end := k
+		for end < len(line) && isIdentByte(line[end]) {
+			end++
+		}
+		out = append(out, line[k:end])
+		k = end
+	}
+}
+
+// lookup finds a definition by name.
+func (p *cparse) lookup(name string) (*cdef, bool) {
+	i, ok := p.index[name]
+	if !ok {
+		return nil, false
+	}
+	return p.defs[i], true
 }
 
 // defEnd returns the last line of the definition that starts at line start: for
@@ -303,7 +418,7 @@ func (p *cparse) scanLine(line string, d *cdef) {
 	for i := 0; i < len(line); {
 		if line[i] == '-' && strings.HasPrefix(line[i:], dispatchPrefix) {
 			if n, ok := scanInt(line, i+len(dispatchPrefix), ']'); ok {
-				d.slots[n] = true
+				d.slots[slotKey{owner: dispatchOwner(line, i), idx: n}] = true
 			}
 		}
 		if !isIdentByte(line[i]) {
@@ -318,6 +433,34 @@ func (p *cparse) scanLine(line string, d *cdef) {
 			d.refs[idx] = true
 		}
 	}
+}
+
+// dispatchOwner reads the class a dispatch was compiled against, which is the
+// class whose subclasses can be its receiver. indirect() writes a virtual call as
+//
+//	(( RET(*)(OWNER*, ...))((recv)->obj.cls->vtable[N]))((OWNER*)recv, ...)
+//
+// so OWNER is the first parameter of the function-pointer signature standing
+// immediately before the lookup, and the last such signature before the lookup is
+// the one that belongs to it: a receiver expression written earlier brings its own
+// signature, which is nearer, and an argument written later cannot be nearer at
+// all. The untyped form the synthesizer writes for hashCode,
+// `((tyobj*)x)->cls->vtable[1]`, reads `void` there instead, and an owner that is
+// not a class means every class -- the answer that keeps the slot.
+func dispatchOwner(line string, at int) string {
+	open := strings.LastIndex(line[:at], "(*)(C_")
+	if open < 0 {
+		return ""
+	}
+	rest := line[open+len("(*)(C_"):]
+	end := 0
+	for end < len(rest) && isIdentByte(rest[end]) {
+		end++
+	}
+	if end == 0 || !strings.HasPrefix(rest[end:], "*") {
+		return "" // a value parameter rather than the receiver: nothing to read
+	}
+	return rest[:end]
 }
 
 // scanInt reads the decimal integer at i, which must be followed by the given
@@ -337,9 +480,9 @@ func scanInt(line string, i int, close byte) (int, bool) {
 	return n, true
 }
 
-// liveSlots runs the fixpoint and answers with the vtable indices a method the
-// program can reach dispatches. It leaves the reached definitions in p.live.
-func (p *cparse) liveSlots() map[int]bool {
+// liveSlots runs the fixpoint: it marks the definitions the program can reach in
+// p.live and records the dispatches they make in p.need.
+func (p *cparse) liveSlots() {
 	queue := make([]int, 0, len(p.defs))
 	enqueue := func(i int) {
 		if !p.live[i] {
@@ -350,16 +493,16 @@ func (p *cparse) liveSlots() map[int]bool {
 	for i := range p.roots.refs {
 		enqueue(i)
 	}
-	for n := range p.roots.slots {
-		p.slotsLive[n] = true
+	for k := range p.roots.slots {
+		p.need[k] = true
 	}
 	for {
 		for len(queue) > 0 {
 			i := queue[len(queue)-1]
 			queue = queue[:len(queue)-1]
 			d := p.defs[i]
-			for n := range d.slots {
-				p.slotsLive[n] = true
+			for k := range d.slots {
+				p.need[k] = true
 			}
 			// A vtable's entries are not references. They are the slots a live
 			// dispatch asks for, and the class loop below is what decides which
@@ -373,9 +516,10 @@ func (p *cparse) liveSlots() map[int]bool {
 				enqueue(n)
 			}
 		}
-		// A live class answers the object protocol and every slot a live
-		// dispatch asks for, and each answer is a method that is then live too:
-		// every live class is therefore re-answered whenever anything changed.
+		// A live class answers the object protocol and every slot a live dispatch
+		// of one of its supertypes asks for, and each answer is a method that is
+		// then live too: every live class is re-answered whenever anything
+		// changed.
 		grew := false
 		for i, d := range p.defs {
 			if !p.live[i] || !strings.HasPrefix(d.name, "cls_") {
@@ -386,7 +530,7 @@ func (p *cparse) liveSlots() map[int]bool {
 				continue
 			}
 			for n, target := range p.defs[vt].targets {
-				if n >= objectProtocolSlots && !p.slotsLive[n] {
+				if !p.answers(d.name[len("cls_"):], n) {
 					continue
 				}
 				if idx, ok := p.index[target]; ok && !p.live[idx] {
@@ -396,16 +540,46 @@ func (p *cparse) liveSlots() map[int]bool {
 			}
 		}
 		if !grew && len(queue) == 0 {
-			return p.slotsLive
+			return
 		}
 	}
+}
+
+// answers reports whether class x fills slot idx: slots 0, 1 and 2 because the
+// runtime calls those on whatever object it is handed, and any other slot because
+// a live dispatch asks for that index on a class x inherits from.
+func (p *cparse) answers(x string, idx int) bool {
+	if idx < objectProtocolSlots {
+		return true
+	}
+	for k := range p.need {
+		if k.idx == idx && p.isSub(x, k.owner) {
+			return true
+		}
+	}
+	return false
+}
+
+// isSub reports whether class x is, or inherits from, the class a dispatch was
+// compiled against. A class the walk knows nothing about answers yes: the test
+// exists to drop slots, so the only answer that can break a program is a
+// confident no.
+func (p *cparse) isSub(x, owner string) bool {
+	if owner == "" || x == owner {
+		return true
+	}
+	base, ok := p.bases[x]
+	if !ok {
+		return true
+	}
+	return base[owner]
 }
 
 // rewrite returns src with every vtable slot no live dispatch asks for set to
 // NULL. A slot at an object-protocol index is kept for every class, live or not:
 // what the runtime reads on an object is not a property of the program's call
 // sites.
-func (p *cparse) rewrite(slots map[int]bool) string {
+func (p *cparse) rewrite() string {
 	out := make([]string, len(p.lines))
 	copy(out, p.lines)
 	for _, d := range p.defs {
@@ -415,7 +589,7 @@ func (p *cparse) rewrite(slots map[int]bool) string {
 		kept := make([]string, len(d.entries))
 		dropped := false
 		for n := range d.entries {
-			if n < objectProtocolSlots || slots[n] {
+			if p.answers(d.name[len("vt_"):], n) {
 				kept[n] = d.entries[n]
 				continue
 			}
