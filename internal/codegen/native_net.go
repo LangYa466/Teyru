@@ -116,6 +116,73 @@ var nativeNetTable = registerNativeNet(map[string]nativeFn{
 		proto: "tystr *ty_net_bytes_to_str(tyarr *, int32_t, int32_t)",
 	},
 
+	// ---- TLS ----
+	//
+	// One entry per native in the TLS half of lib/15_net.teyru. They are the
+	// reason internal/runtime/src/tyrt_tls.c exists as a file of its own: a
+	// build compiles that file, and links OpenSSL, only when the program can
+	// reach one of the helpers below -- so the socket layer's own programs keep
+	// their plaintext-only dependencies, and a program that cannot reach TLS
+	// (a hello world) is not linked against libssl at all.
+	//
+	// The one that returns an object -- tlsDetail0, the text of the last
+	// failure -- allocates it and hands it straight back, so it needs no root,
+	// exactly as Net.strerror0 above does not.
+	"Net.tlsClientContext0(String)": {
+		fn:    "ty_tls_client_context",
+		proto: "int32_t ty_tls_client_context(tystr *)",
+	},
+	"Net.tlsServerContext0(String,String)": {
+		fn:    "ty_tls_server_context",
+		proto: "int32_t ty_tls_server_context(tystr *, tystr *)",
+	},
+	"Net.tlsFreeContext0(I)": {
+		fn:    "ty_tls_context_free",
+		proto: "int32_t ty_tls_context_free(int32_t)",
+	},
+	// The client handshake: the context, the connected descriptor, and the host
+	// the certificate has to be for.
+	"Net.tlsConnect0(I,I,String)": {
+		fn:    "ty_tls_connect",
+		proto: "int32_t ty_tls_connect(int32_t, int32_t, tystr *)",
+	},
+	// The server handshake: the context holds the certificate and the key, and
+	// there is no name to check.
+	"Net.tlsAccept0(I,I)": {
+		fn:    "ty_tls_accept",
+		proto: "int32_t ty_tls_accept(int32_t, int32_t)",
+	},
+	// The same contract as Net.read0 and Net.write0, over a session: a read
+	// returns what the record had, 0 at the end of the stream and a negative
+	// code on failure, and a write loops until the last byte is out.
+	"Net.tlsRead0(I,A,I,I)": {
+		fn:    "ty_tls_read",
+		proto: "int32_t ty_tls_read(int32_t, tyarr *, int32_t, int32_t)",
+	},
+	"Net.tlsWrite0(I,A,I,I)": {
+		fn:    "ty_tls_write_all",
+		proto: "int32_t ty_tls_write_all(int32_t, tyarr *, int32_t, int32_t)",
+	},
+	"Net.tlsWriteStr0(I,String)": {
+		fn:    "ty_tls_write_str",
+		proto: "int32_t ty_tls_write_str(int32_t, tystr *)",
+	},
+	"Net.tlsClose0(I)": {
+		fn:    "ty_tls_close",
+		proto: "int32_t ty_tls_close(int32_t)",
+	},
+	// What the last failure on this thread was about, and which family it
+	// belongs to. The Teyru half turns the pair into the exception that names
+	// it, so no code of this layer's ever reaches a caller.
+	"Net.tlsDetail0()": {
+		fn:    "ty_tls_detail_text",
+		proto: "tystr *ty_tls_detail_text(void)",
+	},
+	"Net.tlsKind0(I)": {
+		fn:    "ty_tls_kind",
+		proto: "int32_t ty_tls_kind(int32_t)",
+	},
+
 	// ---- files ----
 	"Fs.kind0(String)": {
 		fn:    "ty_file_kind",

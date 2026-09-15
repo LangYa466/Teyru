@@ -74,8 +74,23 @@ type finFrame struct {
 	name  string // C name of the frame's exception handler
 }
 
-// Emit returns the C source for a program.
-func Emit(p *sema.Program) string {
+// Link is what a build has to link for a program besides the runtime every
+// program links.
+//
+// It exists because the runtime has one part that is not self-contained: the
+// TLS layer is written against OpenSSL, a library this compiler does not ship,
+// and a program that cannot reach it must not be linked against it -- the point
+// of the native runtime is a program that needs nothing but the C library.
+type Link struct {
+	// TLS is set when the program's reachable code can call one of the TLS
+	// helpers. It is then that a build compiles internal/runtime/src/tyrt_tls.c
+	// and passes -lssl -lcrypto, and that a target without OpenSSL refuses the
+	// program by name (see internal/driver).
+	TLS bool
+}
+
+// Emit returns the C source for a program, and what linking it takes.
+func Emit(p *sema.Program) (string, Link) {
 	e := &Emitter{
 		prog:        p,
 		strings:     map[string]int{},
@@ -106,7 +121,16 @@ func Emit(p *sema.Program) string {
 	// The last step is the one piece of reachability this back end decides for
 	// itself: a vtable holds the address of every method its class declares, and
 	// an address is what link-time optimisation cannot drop (see prune.go).
-	return pruneVtables(out.String())
+	src, tls := pruneVtables(out.String())
+	return src, Link{TLS: tls}
+}
+
+// LinkForIR is Link for the module the LLVM back end wrote. That back end
+// resolves its own reachability -- a module holds the functions the program can
+// run and nothing else -- so what is written there is what is linked, and a
+// helper named in it is a helper the link needs.
+func LinkForIR(ir string) Link {
+	return Link{TLS: strings.Contains(ir, tlsPrefix)}
 }
 
 func (e *Emitter) run() {

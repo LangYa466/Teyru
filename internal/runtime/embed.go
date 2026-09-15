@@ -54,6 +54,16 @@ var Reflect string
 //go:embed src/tyrt_thread.c
 var Thread string
 
+// TLS is tyrt_tls.c: TLS over the socket layer, built on OpenSSL. It is a file
+// of its own because it is the one part of the runtime that links a library the
+// compiler does not ship: the build compiles it, and passes -lssl -lcrypto,
+// only for a program whose reachable code calls one of its helpers, so that
+// every program that does not use TLS stays a binary that needs nothing but the
+// C library (see internal/codegen/prune.go and internal/driver/driver.go).
+//
+//go:embed src/tyrt_tls.c
+var TLS string
+
 // PlatPosix and PlatWin are tyrt_plat.h's two implementations: the POSIX one
 // (the C library's threads, sockets and files) and the Windows one (winpthreads
 // and Winsock). A build compiles exactly one of them, chosen by the target it

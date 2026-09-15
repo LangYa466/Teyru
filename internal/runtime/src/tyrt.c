@@ -159,6 +159,10 @@ static typlat_mutex heap_mtx = TYPLAT_MUTEX_INITIALIZER;
 static void *freelist[TY_NCLASS];
 static void *bigfree = NULL;
 void ty_free_block(void *payload, size_t total);
+/* The per-thread batch in tythread is indexed by size class, so the two class
+   counts have to be the same number: a table smaller than the free lists would
+   be written out of bounds by the class of the block being handed out. */
+_Static_assert(TY_BATCH_CLASSES == TY_NCLASS, "the batch table is indexed by size class");
 
 #define TY_MARK_BIT 1u
 /* The high bit of the size word marks a block that is on a free list. The
@@ -355,6 +359,15 @@ static void trace_object(void *obj) {
    no thread can take a slab, hand one back, or allocate into one while this
    runs. */
 static void collect_slabs(void) {
+  /* Every thread's batch of free blocks goes back to the heap here, before the
+     sweep below rebuilds the free lists. A batch holds blocks whose size word
+     still says "free" -- that is what filing them on a list sets -- so the
+     sweep re-links every one of them, and a thread left holding a link into the
+     list the sweep rewrote would hand the same block out twice. The world is
+     stopped, so no thread is popping from its own table while it is emptied. */
+  for (tythread *t = ty_thread_list(); t; t = t->next) {
+    memset(t->batch, 0, sizeof t->batch);
+  }
   gc_nslabs = 0;
   for (tychunk *c = chunks; c; c = c->next) {
     if (gc_nslabs == gc_capslabs) {
@@ -577,6 +590,31 @@ static void *take_free(size_t total) {
   return NULL;
 }
 
+/* Up to TY_BATCH blocks of size class k, taken out of the heap's free list into
+   this thread's own list, and the first of them handed back to the caller. The
+   caller holds the heap lock, so the batch is taken in one piece and paid for
+   once.
+
+   Every block in freelist[k] has size k * TY_ALIGN -- ty_free_block filed it by
+   the same rounding size_class does -- so the block handed out here is exactly
+   the size the request asked for, with no tail to give back and no size word to
+   change beyond writing the class back. */
+static void *take_batch(int k) {
+  tythread *me = ty_self;
+  int n = 0;
+  while (n < TY_BATCH && freelist[k]) {
+    void *p = freelist[k];
+    freelist[k] = *(void **)((char *)p + 8);
+    *(void **)((char *)p + 8) = me->batch[k];
+    me->batch[k] = p;
+    n++;
+  }
+  if (!n) return NULL;
+  void *p = me->batch[k];
+  me->batch[k] = *(void **)((char *)p + 8);
+  return p;
+}
+
 /* A fresh slab of at least `total` usable bytes, owned by the calling thread. */
 static tychunk *chunk_new(size_t total) {
     size_t cap = total > TY_CHUNK ? ((total + TY_CHUNK - 1) & ~(size_t)(TY_CHUNK - 1)) : TY_CHUNK;
@@ -602,6 +640,32 @@ static void *block_object(char *p, size_t total) {
 }
 
 void *ty_alloc_slow(size_t total) {
+  /* The batch first, and before the lock: a block this thread took from the
+     free list in a batch of TY_BATCH is handed out here without the heap lock
+     at all, which is the whole point of taking it in a batch. The budget is
+     tested here for the same reason the fast path tests it -- a budget that ran
+     out while this list still had blocks would otherwise postpone the
+     collection for as long as the list lasts -- and a thread that has spent its
+     budget takes the locked path below and collects. A batch hit is
+     deliberately not a safepoint, which the locked path is: generated code
+     already stops at every loop head and every call, and the budget sends the
+     thread down the locked path -- which stops -- as soon as it runs out. */
+  tythread *me = ty_self;
+  int k = size_class(total);
+  /* `state == TY_TH_RUNNING` is what makes popping here safe without the heap
+     lock. A collection empties every batch in collect_slabs, and it can only
+     have got there if this thread was stopped: a running thread is exactly
+     what ty_gc_stop_world waits for. So a thread that is stopped -- one inside
+     a blocking call, or the collector itself -- does not touch this list, and
+     takes the locked path below instead, where the lock and the world protocol
+     already order it against the collection. */
+  if (k >= 0 && me->state == TY_TH_RUNNING && me->batch[k] &&
+      me->alloc_since <= ty_gc_threshold) {
+    void *p = me->batch[k];
+    me->batch[k] = *(void **)((char *)p + 8);
+    me->alloc_since += (int64_t)total;
+    return block_object(p, total);
+  }
   /* Stop first: a collection may be asked for while this runs, and a thread must
      not be holding the heap lock while it waits for one to end. */
   ty_safepoint();
@@ -610,15 +674,22 @@ void *ty_alloc_slow(size_t total) {
      fast path tests both -- so a collection comes first, and then the thread's
      own slab is tried again: it is still this thread's memory, and a collection
      neither moves it nor takes it away. */
-  if (ty_self->alloc_since > ty_gc_threshold) ty_gc_locked();
-  char *p = ty_self->bump;
-  if (!(p + total > ty_self->bump_end)) {
-    ty_self->bump = p + total;
-    ty_self->alloc_since += (int64_t)total;
+  if (me->alloc_since > ty_gc_threshold) ty_gc_locked();
+  char *p = me->bump;
+  if (!(p + total > me->bump_end)) {
+    me->bump = p + total;
+    me->alloc_since += (int64_t)total;
     ty_heap_unlock();
     return block_object(p, total);
   }
-  p = take_free(total);
+  /* The slab is exhausted. Free blocks come as a batch when they are in a size
+     class at all: the sweep links a whole slab of dead blocks onto these lists
+     at every collection, and every one of them drained one at a time is a lock
+     and a safepoint. A big block -- one over the largest class -- is taken one
+     at a time as it always was: they are large, they are few, and a batch of
+     them would hold more memory than the threads that want them. */
+  p = k >= 0 ? take_batch(k) : NULL;
+  if (!p) p = take_free(total);
   if (!p) {
     /* Refill: a slab of this thread's own. The old one goes back to the shared
        heap, where the collector can reclaim it and where its free blocks are
@@ -629,20 +700,20 @@ void *ty_alloc_slow(size_t total) {
        and the free lists were consulted above, so collecting here would re-trace
        a live set the threshold has not asked for yet. Grow instead; the next
        threshold crossing pays for it. */
-    if (ty_self->chunk) {
+    if (me->chunk) {
       ty_heap_sync();
-      tychunk *old = (tychunk *)ty_self->chunk;
+      tychunk *old = (tychunk *)me->chunk;
       old->next = chunks;
       chunks = old;
     }
     tychunk *c = chunk_new(total);
-    ty_self->chunk = c;
-    ty_self->bump = c->mem + total;
-    ty_self->bump_end = c->mem + c->cap;
+    me->chunk = c;
+    me->bump = c->mem + total;
+    me->bump_end = c->mem + c->cap;
     c->used = total;
     p = c->mem;
   }
-  ty_self->alloc_since += (int64_t)total;
+  me->alloc_since += (int64_t)total;
   ty_heap_unlock();
   return block_object(p, total);
 }

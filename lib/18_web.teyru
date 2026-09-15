@@ -1030,6 +1030,11 @@ class HttpServer {
   private ApplicationContext ctx
   private boolean verbose = false
   private int served = 0
+  // The certificate this server presents, or null when it serves plain HTTP.
+  // A field of the server rather than a parameter of serve(): the certificate
+  // is part of what the server is, and a caller configures it the way it
+  // configures the port -- before the first connection, once.
+  private TlsServer tls = null
   // readTimeoutMs bounds how long one connection may take to send its request.
   // Ten seconds is generous for a request that is already written and short
   // enough that a stalled client does not hold the server for the afternoon.
@@ -1065,6 +1070,40 @@ class HttpServer {
     return this
   }
 
+  // ssl gives this server a certificate and a key, and from then on every
+  // connection it accepts is a TLS connection: Spring's server.ssl.certificate
+  // and server.ssl.certificate-private-key, which are a PEM certificate chain
+  // and the PEM key that belongs to it, given here as paths.
+  //
+  // The pair is read and checked now rather than at the first connection, so a
+  // server whose certificate cannot be used fails where it is configured --
+  // where a program can still say what was wrong -- instead of failing every
+  // client that arrives.
+  //
+  // A server that is never given one serves plain HTTP, and the compiler is what
+  // keeps the possibility free: TLS is the one part of the runtime that links a
+  // library the compiler does not ship, and a build compiles and links it only
+  // for a program whose reachable code names the TLS layer. That is why the
+  // certificate is a field and a factory rather than a flag threaded through the
+  // serving loop -- and it is a program-wide answer, not a per-server one, so a
+  // program that reflects (which names every class, this project's classes
+  // included) answers yes without ever calling this.
+  public HttpServer ssl(String certificate, String privateKey) {
+    if (tls != null) {
+      tls.close()
+    }
+    tls = new TlsServer(certificate, privateKey)
+    return this
+  }
+
+  // Whether this server speaks TLS. It is what a handler that builds an
+  // absolute URL out of a request needs to know: the scheme it is answering on
+  // is http or https, and a redirect that names the wrong one sends the client
+  // back to the port it was told not to use.
+  public boolean isSecure() {
+    return tls != null
+  }
+
   // getPort answers with the port the server is listening on. Before bind() it
   // is the port that was asked for; after it, the one the kernel gave, which is
   // what makes `new HttpServer(0, ...)` useful -- port 0 asks for any free
@@ -1085,6 +1124,16 @@ class HttpServer {
     if (listener != null) {
       listener.close()
       listener = null
+    }
+    // The certificate's context is the server's to free, and the server is
+    // finished with it here. It is not a leak until then: a context is what
+    // every connection of this server's handshakes through. Closing therefore
+    // belongs after the loop has stopped -- the order ServerTask makes easy,
+    // stop() then join() then close() -- because a context freed under a
+    // handshake in flight is a handshake reading a freed certificate.
+    if (tls != null) {
+      tls.close()
+      tls = null
     }
   }
 
@@ -1114,6 +1163,16 @@ class HttpServer {
     try {
       while (true) {
         Socket s = listener.accept()
+        try {
+          s = startTls(s)
+        } catch (IOException e) {
+          // A handshake that failed is a connection that ends, not a server
+          // that stops: a port scanner, a client that speaks plain HTTP to a
+          // TLS port, and a peer that went away in the middle of the handshake
+          // all arrive here, and none of them is a reason to stop listening.
+          s.close()
+          continue
+        }
         serveOne(s)
       }
     } finally {
@@ -1144,10 +1203,35 @@ class HttpServer {
       } catch (SocketTimeoutException e) {
         break
       }
+      try {
+        s = startTls(s)
+      } catch (IOException e) {
+        // Not counted as answered, because nothing was: the connection ended in
+        // the handshake. The loop goes on listening, which is what a burst of
+        // clients that cannot complete a handshake must not be able to stop.
+        s.close()
+        continue
+      }
       serveOne(s)
       answered++
     }
     return answered
+  }
+
+  // startTls is the handshake a connection goes through when this server was
+  // given a certificate, and the connection itself when it was not. It is the
+  // one place TLS enters the serving loop, and it is why the loop above reads
+  // the same whether the server speaks TLS or not: what comes back is a Socket
+  // either way, and the request line is read off it the same way.
+  private Socket startTls(Socket s) {
+    if (tls == null) {
+      return s
+    }
+    // The handshake is bounded by the same read timeout that bounds a request,
+    // so a peer that starts a handshake and stops cannot hold the thread that
+    // answers connections -- there is only one of it.
+    s.setSoTimeout(readTimeoutMs)
+    return tls.accept(s)
   }
 
   // serveOne reads one request off a connection, answers it, and closes. A
@@ -1647,6 +1731,19 @@ class Application {
   // does, and it is here so that main is one line.
   public static void serve(ApplicationContext ctx, int port, int idleMs) {
     HttpServer server = new HttpServer(port, routerFrom(ctx), ctx)
+    // Spring's two properties, read the way Spring reads them: a Spring Boot
+    // application given server.ssl.certificate and
+    // server.ssl.certificate-private-key serves HTTPS, and so does this one,
+    // given --server.ssl.certificate=... on its command line (Application.boot
+    // turns those into properties). A program that names neither serves plain
+    // HTTP as it always did; naming one of them without the other is a
+    // configuration that cannot work, and the empty path it reads is the
+    // missing one -- the certificate then fails to load, which is where a
+    // certificate that is not there fails too.
+    String certificate = ctx.getProperty("server.ssl.certificate", "")
+    if (certificate.length() > 0) {
+      server.ssl(certificate, ctx.getProperty("server.ssl.certificate-private-key", ""))
+    }
     WebSocketScanner.register(ctx, server)
     server.bind()
     server.serveIdle(idleMs == 0 ? 0 : idleMs)

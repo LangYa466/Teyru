@@ -30,6 +30,15 @@ package teyru
 // cannot silently change what the runtime finds at an offset -- the trap the
 // PrintStream.target field documents.
 //
+// TLS is here as well, and it is a socket rather than a second protocol stack:
+// the handshake happens on a connection that was made the plaintext way and
+// from then on the bytes go through it (TlsSocket, TlsServer and Tls at the end
+// of this file). What that costs is worth saying where it can be read: the TLS
+// layer is the one part of the runtime written against a library the compiler
+// does not ship, so a build compiles it, and links OpenSSL for it, only when
+// the program can reach one of its natives -- and a target that has no OpenSSL
+// is refused by name rather than left to the linker.
+//
 // What this is not: there are no threads in the language, so there is no
 // thread-per-connection server here and no pool. Two servers in one process do
 // work, because a socket is a descriptor and nothing about it is global, but a
@@ -97,6 +106,69 @@ class EOFException extends IOException {
   }
 }
 
+// The TLS layer's failures, cut the same way the socket's are: one base for
+// everything that can go wrong inside a TLS connection, and a class per thing
+// that a caller may reasonably want to tell apart. java.net.ssl has the same
+// split (SSLException, SSLHandshakeException, SSLPeerUnverifiedException) under
+// different names, and the names here say what happened rather than which part
+// of the protocol noticed.
+class TlsException extends IOException {
+  public TlsException() {
+  }
+  public TlsException(String message) {
+    super(message)
+  }
+}
+
+// The certificate the server sent is not trusted. It is the failure a client
+// that verifies gets from a self-signed certificate, an expired one, or a chain
+// that does not reach a trust anchor, and its message carries the reason
+// OpenSSL gave, because "the certificate is not trusted" is only half an answer.
+class TlsCertificateException extends TlsException {
+  public TlsCertificateException() {
+  }
+  public TlsCertificateException(String message) {
+    super(message)
+  }
+}
+
+// The certificate is trusted but not for this name: the chain verified against
+// the anchors the client was given and the host in the URL is not one the
+// certificate covers. It is a separate class from the one above because it is a
+// separate problem with a separate fix -- the wrong URL, or a server with the
+// wrong certificate -- and because a client that reported it as "not trusted"
+// would send its user looking at the trust store.
+class TlsHostnameException extends TlsException {
+  public TlsHostnameException() {
+  }
+  public TlsHostnameException(String message) {
+    super(message)
+  }
+}
+
+// The handshake failed for something that is neither: no shared protocol
+// version or cipher, a peer that speaks another protocol entirely, a connection
+// that went away in the middle, or a record that did not authenticate.
+class TlsHandshakeException extends TlsException {
+  public TlsHandshakeException() {
+  }
+  public TlsHandshakeException(String message) {
+    super(message)
+  }
+}
+
+// The certificate or the key cannot be used at all: the file is not a PEM
+// document, or the key does not belong to the certificate. A server that cannot
+// present its certificate cannot serve, so this is raised where the pair is
+// given to it rather than on the first connection.
+class TlsConfigException extends TlsException {
+  public TlsConfigException() {
+  }
+  public TlsConfigException(String message) {
+    super(message)
+  }
+}
+
 // ---------------------------------------------------------------- the C surface
 //
 // Every `0`-suffixed method below is implemented in C, in
@@ -111,8 +183,9 @@ class EOFException extends IOException {
 // internal/codegen/emit_synth.go, which reads nativeFn.fn and ignores
 // nativeFn.proto). That is fine for every prelude class whose helper tyrt.h
 // declares, and impossible for this layer: tyrt.h is not a file this feature
-// may edit, and the driver copies exactly four runtime files into a build, so a
-// declaration of these helpers exists nowhere the generated program can see it.
+// may edit, and the runtime's files are copied into a build without a header of
+// their own, so a declaration of these helpers exists nowhere the generated
+// program can see it.
 // What the layer needs is the prototype repeated at each call site, which is
 // what nativeFn.proto is for -- and the call site takes that path only when the
 // method is not `native` and so has no generated body.
@@ -190,6 +263,69 @@ final class Net {
     throw new IllegalStateException("Net.stringFrom is implemented in C")
   }
 
+  // ---- TLS ----
+  //
+  // The C half of these is internal/runtime/src/tyrt_tls.c, which the compiler
+  // compiles into a build only when the program can reach one of them: that
+  // file is the one part of the runtime written against a library the compiler
+  // does not ship (OpenSSL), and a program that does not use TLS is not linked
+  // against it. Everything below is the same integer convention as above --
+  // negative is a code, non-negative is a handle or a count -- with four codes
+  // of TLS's own that begin below the socket layer's.
+  //
+  // A context is a certificate (server) or a trust policy (client), a session
+  // is one connection's handshake, and both are small integers the C side keeps
+  // in a table. Nothing outside this file calls any of these.
+
+  // A client context. Verification is always on: the empty string means "the
+  // system's anchors", and anything else is the PEM text of a CA file added to
+  // them. There is no call that turns verification off, and there is not going
+  // to be one: see the comment on tyrt_tls.c.
+  public static int tlsClientContext0(String caPem) {
+    throw new IllegalStateException("Net.tlsClientContext0 is implemented in C")
+  }
+  // A server context: the certificate and the key as PEM text. The pair is
+  // checked when this is called, so a server that cannot present its
+  // certificate fails where it is configured rather than at the first client.
+  public static int tlsServerContext0(String certPem, String keyPem) {
+    throw new IllegalStateException("Net.tlsServerContext0 is implemented in C")
+  }
+  public static int tlsFreeContext0(int ctx) {
+    throw new IllegalStateException("Net.tlsFreeContext0 is implemented in C")
+  }
+  // The handshakes. The client's takes the name the certificate has to be for;
+  // the server's takes no name, because it is the one presenting a certificate.
+  public static int tlsConnect0(int ctx, int fd, String host) {
+    throw new IllegalStateException("Net.tlsConnect0 is implemented in C")
+  }
+  public static int tlsAccept0(int ctx, int fd) {
+    throw new IllegalStateException("Net.tlsAccept0 is implemented in C")
+  }
+  // The stream, with the contract of read0 and write0: a read returns what the
+  // record had, 0 at the end of the stream and a negative code on failure, and
+  // a write loops until the last byte is out.
+  public static int tlsRead0(int session, byte[] b, int off, int len) {
+    throw new IllegalStateException("Net.tlsRead0 is implemented in C")
+  }
+  public static int tlsWrite0(int session, byte[] b, int off, int len) {
+    throw new IllegalStateException("Net.tlsWrite0 is implemented in C")
+  }
+  public static int tlsWriteStr0(int session, String s) {
+    throw new IllegalStateException("Net.tlsWriteStr0 is implemented in C")
+  }
+  public static int tlsClose0(int session) {
+    throw new IllegalStateException("Net.tlsClose0 is implemented in C")
+  }
+  // What the last failure on this thread was about, and which family it belongs
+  // to. Both are read straight after the call that failed, on the same thread,
+  // which is what makes the answer the right one.
+  public static String tlsDetail0() {
+    throw new IllegalStateException("Net.tlsDetail0 is implemented in C")
+  }
+  public static int tlsKind0(int code) {
+    throw new IllegalStateException("Net.tlsKind0 is implemented in C")
+  }
+
   // The exception a code from the runtime means. Returning it rather than
   // throwing it lets a caller write `throw Net.failure(...)` at the one place
   // that knows what was being attempted, and keeps the message there too: the
@@ -210,6 +346,45 @@ final class Net {
   public static int ok(int code, String what) {
     if (code < 0) {
       throw failure(code, what)
+    }
+    return code
+  }
+
+  // The same pair for the TLS layer, whose four codes are none of the ones
+  // above: a certificate that is not trusted, a certificate that is not for the
+  // name, a handshake that failed for another reason, and a certificate or key
+  // that cannot be used at all. The reason OpenSSL gave is appended, because
+  // the class says which part of the policy was not met and OpenSSL's text says
+  // what about it -- "self-signed certificate", "certificate has expired",
+  // "Hostname mismatch". A code that is not one of those four is a socket
+  // failure or a timeout, and failure() already names those.
+  public static IOException tlsFailure(int code, String what) {
+    String detail = tlsDetail0()
+    if (detail.length() == 0) {
+      detail = strerror0(code)
+    }
+    String msg = what + ": " + detail
+    int kind = tlsKind0(code)
+    if (kind == 1) {
+      return new TlsCertificateException(msg)
+    }
+    if (kind == 2) {
+      return new TlsHostnameException(msg)
+    }
+    if (kind == 3) {
+      return new TlsHandshakeException(msg)
+    }
+    if (kind == 4) {
+      return new TlsConfigException(msg)
+    }
+    return failure(code, what)
+  }
+
+  // A TLS call's answer on success, which is the shape every read and write in
+  // this file uses.
+  public static int tlsOk(int code, String what) {
+    if (code < 0) {
+      throw tlsFailure(code, what)
     }
     return code
   }
@@ -458,12 +633,7 @@ class Socket extends Object implements AutoCloseable {
   // stay in it too, so there is exactly one owner of the descriptor.
   public int read(byte[] b, int off, int len) {
     requireOpen()
-    if (b == null) {
-      throw new NullPointerException("buffer")
-    }
-    if (off < 0 || len < 0 || off + len > b.length) {
-      throw new IndexOutOfBoundsException("off=" + off + " len=" + len + " length=" + b.length)
-    }
+    checkBytes(b, off, len)
     if (len == 0) {
       return 0
     }
@@ -472,12 +642,7 @@ class Socket extends Object implements AutoCloseable {
 
   public int write(byte[] b, int off, int len) {
     requireOpen()
-    if (b == null) {
-      throw new NullPointerException("buffer")
-    }
-    if (off < 0 || len < 0 || off + len > b.length) {
-      throw new IndexOutOfBoundsException("off=" + off + " len=" + len + " length=" + b.length)
-    }
+    checkBytes(b, off, len)
     if (len == 0) {
       return 0
     }
@@ -538,10 +703,53 @@ class Socket extends Object implements AutoCloseable {
     Net.close0(f)
   }
 
-  private void requireOpen() {
+  // The three helpers a subclass needs, and no more than that. TlsSocket is a
+  // Socket -- the same object with a TLS session in front of the descriptor --
+  // so it reads and writes through the same descriptor with the same checks,
+  // and there is still exactly one owner of it: this class. A protected method
+  // is what says "this class and its subclass", which is the whole of who may
+  // ask these questions.
+  protected void requireOpen() {
     if (fd < 0 || closed) {
       throw new SocketException("socket is closed")
     }
+  }
+
+  // The argument checks of every read and write. They are one method because
+  // the TLS subclass makes the same ones, and two copies of a range check are
+  // two places for it to be off by one.
+  protected static void checkBytes(byte[] b, int off, int len) {
+    if (b == null) {
+      throw new NullPointerException("buffer")
+    }
+    if (off < 0 || len < 0 || off + len > b.length) {
+      throw new IndexOutOfBoundsException("off=" + off + " len=" + len + " length=" + b.length)
+    }
+  }
+
+  // The descriptor this socket is connected on, for the subclass that puts TLS
+  // in front of it: the handshake has to be given the connection, and this is
+  // the one place that knows the number. Handing it out is not handing it over
+  // -- TlsSocket is this object, not a second owner -- and anything that closes
+  // this socket closes the TLS connection with it.
+  protected int getDescriptor() {
+    requireOpen()
+    return fd
+  }
+
+  // This object has given its descriptor to a TlsSocket built on it, and is
+  // finished with it: the descriptor is not closed -- it is in use, by that
+  // object -- but this one neither reads, writes nor closes it any more.
+  //
+  // "Nor closes it" is the whole reason this exists. Two objects holding one
+  // descriptor number, both willing to close it, is a close of whatever was
+  // handed that number next: the TLS socket's close would close a descriptor
+  // that had already been closed and reissued to another connection. Clearing
+  // the field makes every one of the three operations answer "closed" instead,
+  // which is what this object is.
+  protected void handOverDescriptor() {
+    fd = -1
+    closed = true
   }
 
   public String toString() {
@@ -772,5 +980,248 @@ class SocketOutputStream extends Object implements AutoCloseable {
   }
 
   public void flush() {
+  }
+}
+
+// ---------------------------------------------------------------- TLS
+
+// The policy half of TLS: where the certificates come from. The stream half is
+// TlsSocket below, and the two are apart because they have different lifetimes
+// -- a context is built once and used for every connection, a session exists
+// for one connection -- and because a caller that has a certificate in hand
+// (from a keystore, an environment variable, a test's own constant) wants to
+// hand it over as text, while a caller that has a path wants to give a path.
+//
+// The names are Spring's, because the shape of the problem is the same one:
+// `server.ssl.certificate` and `server.ssl.certificate-private-key` are a path
+// to a certificate chain and a path to its private key, and `ssl(cert, key)` on
+// the server is those two properties.
+final class Tls {
+  // The client context a program that names no CA file uses, built when it is
+  // first asked for and kept for the life of the process. Building one loads
+  // the system's trust anchors; a client that built one per request would load
+  // them per request, and every request in this prelude builds a client.
+  private static int defaultClient = -1
+
+  // A client context. An empty caFile is the system's anchors and nothing else;
+  // anything else is a PEM file whose certificates are added to them, which is
+  // how a server with its own CA -- or a test's self-signed certificate -- is
+  // trusted without giving up on the anchors every other name is checked
+  // against. There is no way to ask for no verification at all.
+  public static int clientContext(String caFile) {
+    if (caFile.length() == 0) {
+      if (defaultClient < 0) {
+        defaultClient = Net.tlsOk(Net.tlsClientContext0(""), "create the TLS client context")
+      }
+      return defaultClient
+    }
+    return Net.tlsOk(Net.tlsClientContext0(pemOf(caFile)), "load " + caFile)
+  }
+
+  // A server context: the certificate chain and the key, both PEM files. Both
+  // are read here and checked against each other by the C half, so a server
+  // whose key does not belong to its certificate hears about it now.
+  public static int serverContext(String certificate, String privateKey) {
+    return Net.tlsOk(Net.tlsServerContext0(pemOf(certificate), pemOf(privateKey)),
+        "load " + certificate + " and " + privateKey)
+  }
+
+  // The PEM text of a file, which is what both the C half and the exceptions
+  // above are written in terms of. The bytes are not decoded or validated: a
+  // PEM document is ASCII, and a file that is not one is refused by the parser
+  // that reads it with the reason, which is a better message than a decoder
+  // could give.
+  public static String pemOf(String path) {
+    return Files.readString(path)
+  }
+}
+
+// ---------------------------------------------------------------- TlsSocket
+
+// A socket whose bytes go through TLS.
+//
+// It is a Socket rather than something that has one, and that is what makes the
+// rest of this file work unchanged: SocketInputStream and SocketOutputStream
+// hold a Socket and read and write through it, the server's loop reads a
+// request line off the same stream whether the connection is TLS or not, and a
+// WebSocket runs over a TLS connection without knowing it. What changes is the
+// four methods below, and nothing above them.
+//
+// A connection is made plaintext and then upgraded, which is how every TLS
+// library does it and what makes one connect path serve both: `new
+// Socket(host, port)`, setSoTimeout, then start(...). The descriptor changes
+// hands in that call and not before: until the handshake has worked the
+// plaintext socket is the one that owns it, and from then on this one is --
+// the socket it was built from is told so (handOverDescriptor) and answers
+// "closed" to everything, so there is one owner at every moment and never a
+// second close of a descriptor number that has since been reused. Everything
+// after the handshake is this class's four methods; everything above them is
+// Socket's.
+class TlsSocket extends Socket {
+  // The session, or -1 before the handshake has happened. Only the factories
+  // below set it, and each of them returns only after a handshake that worked.
+  private int session = -1
+
+  private TlsSocket(int fd) {
+    super(fd)
+  }
+
+  // The client handshake, with the system's trust anchors. The host is what the
+  // certificate has to be for: it is checked against the name in the
+  // certificate, and a certificate for another name is refused rather than
+  // accepted, which is the difference between TLS and a private conversation
+  // with whoever answered.
+  public static TlsSocket start(Socket plain, String host) {
+    return start(plain, host, "")
+  }
+
+  // The same, with a PEM file whose certificates are trusted as well.
+  public static TlsSocket start(Socket plain, String host, String caFile) {
+    if (plain == null) {
+      throw new NullPointerException("socket")
+    }
+    TlsSocket secure = new TlsSocket(plain.getDescriptor())
+    try {
+      secure.handshake(Tls.clientContext(caFile), host, false)
+    } catch (IOException e) {
+      // The connection is over, and the descriptor is the plaintext socket's to
+      // close: closing it from here as well would be the same descriptor closed
+      // twice, which on a busy process is somebody else's socket. The caller's
+      // own close() of the socket it passed in is then a no-op, because that
+      // object is the one that did it.
+      plain.close()
+      throw e
+    }
+    // From here the descriptor is this TlsSocket's: the plaintext object it was
+    // read from is finished with it, and says so, so that a later close of that
+    // object cannot close a number that has since been handed to another
+    // connection.
+    plain.handOverDescriptor()
+    return secure
+  }
+
+  // The server handshake, on a connection a listener just accepted, with the
+  // certificate and key the context was made from. There is no host to check:
+  // the certificate is ours and it is the client's business whether it accepts
+  // it.
+  public static TlsSocket accept(Socket plain, int ctx) {
+    if (plain == null) {
+      throw new NullPointerException("socket")
+    }
+    TlsSocket secure = new TlsSocket(plain.getDescriptor())
+    try {
+      secure.handshake(ctx, "", true)
+    } catch (IOException e) {
+      plain.close()
+      throw e
+    }
+    plain.handOverDescriptor()
+    return secure
+  }
+
+  private void handshake(int ctx, String host, boolean server) {
+    int h
+    if (server) {
+      h = Net.tlsAccept0(ctx, getDescriptor())
+    } else {
+      h = Net.tlsConnect0(ctx, getDescriptor(), host)
+    }
+    if (h < 0) {
+      // A handshake that failed has no session behind it, so there is nothing
+      // here to free: the factories above close the connection, and the message
+      // names the host rather than this socket's port, because the caller
+      // already knows which connection it was and a port number in a message is
+      // one more thing that differs between two runs of the same program.
+      throw Net.tlsFailure(h, server ? "TLS handshake with " + getRemoteAddress() : "TLS handshake with " + host)
+    }
+    session = h
+  }
+
+  // Whether this connection is encrypted, which is true from the moment a
+  // factory returned it.
+  public boolean isSecure() {
+    return session >= 0
+  }
+
+  public int read(byte[] b, int off, int len) {
+    requireOpen()
+    checkBytes(b, off, len)
+    if (len == 0) {
+      return 0
+    }
+    return Net.tlsOk(Net.tlsRead0(session, b, off, len), "read over TLS")
+  }
+
+  public int write(byte[] b, int off, int len) {
+    requireOpen()
+    checkBytes(b, off, len)
+    if (len == 0) {
+      return 0
+    }
+    return Net.tlsOk(Net.tlsWrite0(session, b, off, len), "write over TLS")
+  }
+
+  public int write(String s) {
+    requireOpen()
+    if (s == null) {
+      throw new NullPointerException("text")
+    }
+    return Net.tlsOk(Net.tlsWriteStr0(session, s), "write over TLS")
+  }
+
+  // The half close has no TLS equivalent and this says so rather than pretending
+  // otherwise. What ends a TLS stream is the close_notify of close(): TLS has no
+  // message for "my half is finished and yours is not", and a TCP FIN sent
+  // under a TLS session is a truncated stream that the peer reads as a
+  // connection that went away mid-record -- which is exactly the failure a
+  // caller trying to be tidy would be creating.
+  public void shutdownOutput() {
+    throw new UnsupportedOperationException(
+        "shutdownOutput is not available on a TLS socket: close() sends the close_notify that ends the stream")
+  }
+
+  // Ends the TLS session and then the descriptor. The close_notify goes out
+  // before the socket is closed, so the peer reads the end of the stream as an
+  // end rather than as a connection that broke.
+  public void close() {
+    if (session >= 0) {
+      Net.tlsClose0(session)
+      session = -1
+    }
+    super.close()
+  }
+}
+
+// ---------------------------------------------------------------- TlsServer
+
+// The certificate and the key a server presents, as the one object that owns
+// them: a context, and the connections accepted into it.
+//
+// It exists so that an HttpServer can be given a certificate without knowing
+// anything about TLS: the server holds one of these or holds nothing, and
+// whether a connection is wrapped is a question about an object rather than a
+// branch in the serving loop. It also means the certificate is read and checked
+// once, when the server is configured, rather than on every connection.
+class TlsServer {
+  private final int ctx
+
+  public TlsServer(String certificate, String privateKey) {
+    this.ctx = Tls.serverContext(certificate, privateKey)
+  }
+
+  // The handshake on a connection a listener just accepted.
+  public Socket accept(Socket plain) {
+    return TlsSocket.accept(plain, ctx)
+  }
+
+  // A context is freed when the server that owns it is closed. A caller that
+  // builds one without a server has to free it the same way; there is no
+  // finalizer here, and a context that is never freed is a copy of the
+  // certificate that lives until the process ends. A second close frees
+  // nothing -- the layer answers "no such context" and there is no context
+  // left to answer for -- which is what makes closing one safe to do from a
+  // finally block.
+  public void close() {
+    Net.tlsFreeContext0(ctx)
   }
 }

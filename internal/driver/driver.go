@@ -187,7 +187,13 @@ func Compile(paths []string, opts Options) (*Result, error) {
 	if opts.Backend == BackendLLVM {
 		return compileLLVM(prog, opts, diags)
 	}
-	csrc := codegen.Emit(prog)
+	csrc, link := codegen.Emit(prog)
+	// A program whose reachable code can call the TLS layer has to be linked
+	// against OpenSSL, and a target that has no OpenSSL for it is refused here,
+	// by name and before anything is written, rather than by the linker later.
+	if err := checkTLS(tgt, link); err != nil {
+		return nil, err
+	}
 
 	rtDir, err := os.MkdirTemp("", "teyru-rt-")
 	if err != nil {
@@ -208,7 +214,7 @@ func Compile(paths []string, opts Options) (*Result, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	rtC := writeRuntime(rtDir, tgt)
+	rtC := writeRuntime(rtDir, tgt, link)
 	if err := os.WriteFile(cfile, []byte(csrc), 0o644); err != nil {
 		return nil, err
 	}
@@ -271,6 +277,12 @@ func Compile(paths []string, opts Options) (*Result, error) {
 	// does not link at all.
 	base = append(base, tgt.ldflags...)
 	base = append(base, "-o", exe, "-lm", "-lpthread")
+	// OpenSSL, and only for a program that can reach the TLS layer. checkTLS
+	// above has already refused the program when the target has none, so
+	// tlsLibs is the target's own list here and never an empty one.
+	if link.TLS {
+		base = append(base, tgt.tlsLibs...)
+	}
 	base = append(base, opts.Link...)
 	base = append(base, opts.ExtraCC...)
 	args := append([]string{}, base...)
@@ -337,6 +349,14 @@ func compileLLVM(prog *sema.Program, opts Options, diags *source.Diagnostics) (*
 		diags.Errorf(refusal.Pos, refusal.Code, "%s", refusal.Message())
 		return res, fmt.Errorf("the llvm backend cannot compile this program")
 	}
+	// What the module can reach is what this back end wrote, so the same
+	// question the C back end's scan asks is asked of the IR -- and the same
+	// answer is used: the program is refused by name on a target with no
+	// OpenSSL, and linked against it otherwise.
+	link := codegen.LinkForIR(ir)
+	if err := checkTLS(tgt, link); err != nil {
+		return res, err
+	}
 	rtDir, err := os.MkdirTemp("", "teyru-rt-")
 	if err != nil {
 		return nil, err
@@ -354,7 +374,7 @@ func compileLLVM(prog *sema.Program, opts Options, diags *source.Diagnostics) (*
 	if err := os.MkdirAll(filepath.Dir(mfile), 0o755); err != nil {
 		return nil, err
 	}
-	rtC := writeRuntime(rtDir, tgt)
+	rtC := writeRuntime(rtDir, tgt, link)
 	if err := os.WriteFile(mfile, []byte(ir), 0o644); err != nil {
 		return nil, err
 	}
@@ -405,6 +425,9 @@ func compileLLVM(prog *sema.Program, opts Options, diags *source.Diagnostics) (*
 		exe += tgt.suffix
 	}
 	base = append(base, "-o", exe, "-lm", "-lpthread")
+	if link.TLS {
+		base = append(base, tgt.tlsLibs...)
+	}
 	base = append(base, opts.Link...)
 	base = append(base, opts.ExtraCC...)
 	args := append([]string{}, base...)
@@ -760,6 +783,15 @@ type target struct {
 	// _WIN32 rather than by a define this table hands it.
 	cflags  []string
 	ldflags []string
+	// tlsLibs are the libraries a build for this target links when the program
+	// can reach the TLS layer. Empty means this target has no TLS: a program
+	// that reaches it is refused by name (checkTLS below) instead of being
+	// linked against a library that is not there, which is a failure whose
+	// message is the linker's rather than the program author's.
+	tlsLibs []string
+	// tlsWhy is what that refusal says about the target. Empty for a target with
+	// tlsLibs.
+	tlsWhy string
 }
 
 // targets is the list of platforms this compiler knows how to build for. It is
@@ -771,12 +803,23 @@ var targets = map[string]*target{
 		name:     "linux/amd64",
 		platSrc:  "tyrt_plat_posix.c",
 		platText: tyrt.PlatPosix,
+		// OpenSSL is here, so the TLS layer is: a program that reaches it is
+		// compiled with internal/runtime/src/tyrt_tls.c and linked against
+		// these two. -lssl does not pull in -lcrypto on every platform's
+		// linker, and libssl's own symbols are not enough: the X509 and EVP
+		// calls this layer makes are libcrypto's.
+		tlsLibs: []string{"-lssl", "-lcrypto"},
 	},
 	"linux/arm64": {
 		name:     "linux/arm64",
 		cc:       "aarch64-linux-gnu-gcc",
 		platSrc:  "tyrt_plat_posix.c",
 		platText: tyrt.PlatPosix,
+		// The same two libraries, for that architecture: a cross build needs
+		// the target's OpenSSL installed, which is what the linker will say if
+		// it is not there. This compiler cannot know where a cross toolchain
+		// keeps its libraries, and guessing would be worse than the error.
+		tlsLibs: []string{"-lssl", "-lcrypto"},
 	},
 	"windows/amd64": {
 		name:     "windows/amd64",
@@ -789,6 +832,11 @@ var targets = map[string]*target{
 		// without it every program this compiler produced would need
 		// libwinpthread-1.dll next to it.
 		ldflags: []string{"-lws2_32", "-static"},
+		// mingw-w64 has no OpenSSL: there is no libssl.a or libssl.dll for the
+		// target, so the TLS layer cannot be built for it at all, and a program
+		// that can reach it is refused with this sentence rather than with an
+		// undefined reference to SSL_CTX_new.
+		tlsWhy: "mingw-w64 ships no OpenSSL, so a program built for it has no TLS library to link",
 	},
 	// The Apple targets are built by the host's own clang, which is the only
 	// compiler that has an SDK to build against: there is no cross compiler for
@@ -798,13 +846,24 @@ var targets = map[string]*target{
 		name:     "darwin/amd64",
 		platSrc:  "tyrt_plat_posix.c",
 		platText: tyrt.PlatPosix,
+		tlsWhy:   darwinTLSWhy,
 	},
 	"darwin/arm64": {
 		name:     "darwin/arm64",
 		platSrc:  "tyrt_plat_posix.c",
 		platText: tyrt.PlatPosix,
+		tlsWhy:   darwinTLSWhy,
 	},
 }
+
+// darwinTLSWhy is what a macOS build that reaches the TLS layer is told. macOS
+// does not ship OpenSSL at all -- its TLS is SecureTransport and, since 10.15,
+// Network.framework -- so a build against libssl only works from a Homebrew or
+// MacPorts prefix that the compiler would have to be told about, and the
+// relative paths such a build records are not ones a program can be shipped
+// with. Saying so is what keeps this a named refusal instead of an include
+// that does not resolve.
+const darwinTLSWhy = "macOS ships SecureTransport rather than OpenSSL, and this compiler's TLS layer is written against OpenSSL"
 
 // hostTarget is what a build with no target asked for gets: the machine this
 // compiler is running on, with the compiler it already has.
@@ -831,6 +890,10 @@ func hostTarget() *target {
 		name:     name,
 		platSrc:  platSrcFor(runtime.GOOS),
 		platText: platTextFor(runtime.GOOS),
+		// A platform this table does not know is one whose OpenSSL this
+		// compiler has never been told about, so TLS is refused by name rather
+		// than attempted and failed at the link.
+		tlsWhy: "this compiler knows of no OpenSSL for " + name,
 	}
 }
 
@@ -879,7 +942,7 @@ func resolveTarget(name string) (*target, error) {
 }
 
 // writeRuntime materialises the C runtime next to the generated program.
-func writeRuntime(dir string, tgt *target) string {
+func writeRuntime(dir string, tgt *target, link codegen.Link) string {
 	// The header only has to exist next to the sources: it is found through the
 	// -I on the command line, so it is written but never reported back.
 	must(os.WriteFile(filepath.Join(dir, "tyrt.h"), []byte(tyrt.Header), 0o644))
@@ -902,7 +965,57 @@ func writeRuntime(dir string, tgt *target) string {
 	// business rather than the C compiler's.
 	c6 := filepath.Join(dir, tgt.platSrc)
 	must(os.WriteFile(c6, []byte(tgt.platText), 0o644))
-	return c1 + " " + c2 + " " + c3 + " " + c4 + " " + c5 + " " + c6
+	files := c1 + " " + c2 + " " + c3 + " " + c4 + " " + c5 + " " + c6
+	// The TLS file is the one part of the runtime a build may leave out, and
+	// leaving it out is the whole point of it being a file: it includes
+	// OpenSSL's headers and calls OpenSSL's functions, so a translation unit
+	// holding it makes the link need -lssl whether or not the program can reach
+	// one of its helpers. A program that cannot does not pay for it -- not the
+	// dependency, not the compile, not the bytes.
+	if link.TLS {
+		c7 := filepath.Join(dir, "tyrt_tls.c")
+		must(os.WriteFile(c7, []byte(tyrt.TLS), 0o644))
+		files += " " + c7
+	}
+	return files
+}
+
+// checkTLS refuses a program that can reach the TLS layer when the target it is
+// being built for has no OpenSSL for it.
+//
+// Refusing rather than ignoring is the point: the compiler cannot produce a
+// working TLS call for such a target, and the alternative it would be trading
+// this for is a link that ends in "undefined reference to SSL_CTX_new" -- a
+// message that names a symbol in a library the program's author never mentioned.
+// The message below names the target, the feature, the reason and a way out.
+//
+// "Can reach" is the emitted C's own reachability (see codegen.Link), and it is
+// a superset of what the program will run: a program that reflects carries the
+// table that names every class, so a reflecting program reaches the TLS layer
+// whether or not it means to. Saying so here rather than linking and failing at
+// run time is the same choice the rest of this compiler makes -- the language
+// refuses what it cannot do, rather than doing something else (AGENTS.md §5).
+func checkTLS(tgt *target, link codegen.Link) error {
+	if !link.TLS || tgt.tlsLibs != nil {
+		return nil
+	}
+	return fmt.Errorf("TLS is not available for %s: %s. The program's reachable code calls the TLS layer, "+
+		"so it cannot be built for that target as it is; build it for %s instead, or take the TLS path out of it",
+		tgt.name, tgt.tlsWhy, tlsTargets())
+}
+
+// tlsTargets names the targets a program that uses TLS can be built for, for the
+// message above. It is read from the table rather than written out, so a target
+// that gains the libraries gains the sentence too.
+func tlsTargets() string {
+	names := make([]string, 0, len(targets))
+	for _, t := range targets {
+		if t.tlsLibs != nil {
+			names = append(names, t.name)
+		}
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 func must(err error) {
