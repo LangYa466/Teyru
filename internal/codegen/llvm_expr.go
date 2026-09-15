@@ -409,34 +409,42 @@ func (e *llvmEmitter) coerce(f *fb, v lval, dst ast.Type) lval {
 // boxValue boxes a primitive into the wrapper class, which is what a primitive
 // handed to an Object parameter is.
 func (e *llvmEmitter) boxValue(f *fb, v lval, sp *ast.PrimType, dst ast.Type) lval {
-	fn := boxFn(sp.Kind)
-	if fn == "" {
-		e.refuse(noPos, "boxing a %s: the llvm back end has no wrapper for it", sp.String())
+	cl := e.boxClassOf(sp.Kind)
+	m := e.cEmitter().wrapperStatic(sp.Kind, "valueOf")
+	if cl == nil || m == nil {
+		e.refuse(noPos, "boxing a %s: the program has no wrapper for it", sp.String())
 	}
 	e.boxUsed[sp.Kind] = true
-	if cl := e.boxClassOf(sp.Kind); cl != nil {
-		e.instantiate(cl)
-	}
-	return e.rtCall(f, fn, dst, []lval{v})
+	// The wrapper builds its own instances now (lib/04_boxing.teyru), so the
+	// class, its vtable slots and the body of valueOf all come into the module:
+	// the runtime helper the module used to call is gone.
+	e.instantiate(cl)
+	e.clinitIfNeeded(f, cl)
+	return value(e.directCall(f, m, "", []lval{v}).v, dst)
 }
 
 // unboxValue opens a box. The helper is chosen by the type the program converts
-// to, exactly as the C back end chooses it: `(long) someInteger` reads the value
-// as a long whatever the box holds, which is what Java's narrowing conversions
-// between the wrapper types mean here.
+// off the box, exactly as the C back end does it: the accessor of the wrapper's
+// own kind reads the payload -- intValue, longValue, ... -- and a destination
+// of another primitive type is the conversion from that value. Java's unboxing
+// is that call and then that conversion, which is why `double d = someInteger`
+// is 11.0 and not a look at the integer's four bytes as a double.
 func (e *llvmEmitter) unboxValue(f *fb, v lval, src ast.Type, dp *ast.PrimType) lval {
 	ct, ok := src.(*ast.ClassType)
 	if !ok {
 		e.refuse(noPos, "reading a %s out of a %s: the llvm back end does not lower this conversion", dp.String(), src.String())
 	}
-	if _, isBox := e.p.Builtins.Unbox[ct.Class]; !isBox {
+	kind, isBox := e.p.Builtins.Unbox[ct.Class]
+	box := ct.Class
+	if !isBox {
 		// A reference that is not a wrapper is narrowed to the wrapper first,
 		// which is the checkcast javac puts in front of the same conversion:
 		// `(int) someObject` is `((Integer) someObject).intValue()`.
-		box := e.boxClassOf(dp.Kind)
+		box = e.boxClassOf(dp.Kind)
 		if box == nil {
 			e.refuse(noPos, "reading a %s out of a %s: this program has no wrapper for it", dp.String(), ct.Class.Full)
 		}
+		kind = dp.Kind
 		e.needClass(box)
 		e.markExn("TY_CCE", e.p.Builtins.CCE)
 		narrowed := e.rtCall(f, "ty_checkcast", e.classType(box), []lval{
@@ -445,24 +453,19 @@ func (e *llvmEmitter) unboxValue(f *fb, v lval, src ast.Type, dp *ast.PrimType) 
 		})
 		v = value(narrowed.v, e.classType(box))
 	}
-	fn := "ty_unbox_int"
-	switch dp.Kind {
-	case ast.Boolean:
-		fn = "ty_unbox_bool"
-	case ast.Byte:
-		fn = "ty_unbox_byte"
-	case ast.Short:
-		fn = "ty_unbox_short"
-	case ast.Char:
-		fn = "ty_unbox_char"
-	case ast.Long:
-		fn = "ty_unbox_long"
-	case ast.Float:
-		fn = "ty_unbox_float"
-	case ast.Double:
-		fn = "ty_unbox_double"
+	m := e.cEmitter().unboxAccessor(box, kind)
+	if m == nil {
+		e.refuse(noPos, "reading a %s out of a %s: the wrapper has no accessor for its own value", dp.String(), box.Full)
 	}
-	return e.rtCall(f, fn, dp, []lval{v})
+	e.boxUsed[kind] = true
+	// The accessor reads its own field, so a null reference throws here, where
+	// Java throws it and where ty_unbox_int used to.
+	e.nullCheck(f, v.v)
+	res := e.directCall(f, m, v.v, nil)
+	if kind == dp.Kind {
+		return value(res.v, dp)
+	}
+	return value(e.convertTo(f, res, e.llvmType(dp)), dp)
 }
 
 // convertTo converts a lowered value to the LLVM type a prototype declares,
@@ -663,9 +666,25 @@ func (e *llvmEmitter) unary(f *fb, v *ast.Unary) lval {
 	}
 	switch v.Op {
 	case "+":
-		return e.expr(f, v.X)
+		x := e.expr(f, v.X)
+		if p, ok := t.(*ast.PrimType); ok {
+			if ct, isBox := e.asBox(x.t); isBox {
+				// a boxed operand is unboxed and promoted, which is the type
+				// the checker gave the expression
+				return e.unboxValue(f, x, ct, p)
+			}
+		}
+		return x
 	case "-":
 		x := e.expr(f, v.X)
+		if ct, isBox := e.asBox(x.t); isBox {
+			// As in the C back end: the operand is read through the wrapper's
+			// own accessor and negated in the promoted type, so `-someByte` is
+			// an int and `-someLong` a long.
+			if p, ok := t.(*ast.PrimType); ok {
+				x = e.unboxValue(f, x, ct, p)
+			}
+		}
 		if p, ok := t.(*ast.PrimType); ok && p.IsIntegral() {
 			// Negating the most negative value is undefined in C and defined in
 			// Java, so it is a subtraction from zero, which wraps the way Java
@@ -702,6 +721,9 @@ func (e *llvmEmitter) unary(f *fb, v *ast.Unary) lval {
 func (e *llvmEmitter) incDec(f *fb, v *ast.Unary) lval {
 	ptr, t := e.addr(f, v.X)
 	old := e.load(f, ptr, t)
+	if ct, isBox := e.asBox(t); isBox {
+		return e.boxedIncDec(f, v, ptr, ct, old)
+	}
 	if !e.isRef(t) {
 		if _, ok := e.p.Erased(t).(*ast.PrimType); !ok {
 			e.refuse(v.GetPos(), "an update of a %s", t.String())
@@ -732,6 +754,69 @@ func (e *llvmEmitter) incDec(f *fb, v *ast.Unary) lval {
 	}
 	next := value(r, t)
 	e.store(f, ptr, t, next)
+	if v.Postfix {
+		return old
+	}
+	return next
+}
+
+// asBox is the wrapper class of a value's static type, when it is one of the
+// eight wrappers: the operand of a unary operator, or the target of an update.
+func (e *llvmEmitter) asBox(t ast.Type) (*ast.ClassType, bool) {
+	ct, ok := e.p.Erased(t).(*ast.ClassType)
+	if !ok || ct.Class == nil {
+		return nil, false
+	}
+	if _, isBox := e.p.Builtins.Unbox[ct.Class]; !isBox {
+		return nil, false
+	}
+	return ct, true
+}
+
+// boxedIncDec is `++` and `--` on a wrapper. Java unboxes the variable's
+// wrapper, does the arithmetic in the promoted type and boxes the result into a
+// *new* wrapper -- a wrapper is immutable, so another variable holding the old
+// one must not see the change -- and stores that back. The value of the
+// expression is the new wrapper for a prefix update and the old one for a
+// postfix update.
+func (e *llvmEmitter) boxedIncDec(f *fb, v *ast.Unary, ptr string, ct *ast.ClassType, old lval) lval {
+	k, ok := e.p.Builtins.Unbox[ct.Class]
+	if !ok {
+		e.refuse(v.GetPos(), "an update of a %s", ct.Class.Full)
+	}
+	m := e.cEmitter().wrapperStatic(k, "valueOf")
+	if m == nil {
+		e.refuse(v.GetPos(), "an update of a %s: the program has no valueOf for it", ct.Class.Full)
+	}
+	promoted := promoteOf(k)
+	// The read is unboxValue's: it tests the wrapper, so a null one raises
+	// NullPointerException here rather than being dereferenced.
+	val := e.unboxValue(f, old, ct, promoted)
+	one := value("1", ast.TInt)
+	switch promoted.Kind {
+	case ast.Long:
+		one = value("1", ast.TLong)
+	case ast.Float:
+		one = value("1.0e+00", ast.TFloat)
+	case ast.Double:
+		one = value("1.0e+00", ast.TDouble)
+	}
+	y := e.coerce(f, one, promoted)
+	r := f.reg()
+	op := "add"
+	if v.Op == "--" {
+		op = "sub"
+	}
+	if isFloatLLVM(e.llvmType(promoted)) {
+		op = "f" + op
+	}
+	f.ins(fmt.Sprintf("%s = %s %s %s, %s", r, op, e.llvmType(promoted), val.v, y.v))
+	sum := value(r, promoted)
+	own := &ast.PrimType{Kind: k}
+	narrowed := value(e.convertTo(f, sum, e.llvmType(own)), own)
+	e.clinitIfNeeded(f, ct.Class)
+	next := e.directCall(f, m, "", []lval{narrowed})
+	e.store(f, ptr, ct, next)
 	if v.Postfix {
 		return old
 	}

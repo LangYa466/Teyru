@@ -39,9 +39,8 @@ func (e *llvmEmitter) rtCall(f *fb, name string, result ast.Type, args []lval) l
 		e.refuse(noPos, "the runtime helper %s: internal/runtime/src/tyrt.h does not declare it, so the module cannot call it with the right types", name)
 	}
 	if len(proto.params) != len(args) {
-		e.refuse(noPos, "the runtime helper %s: the module would pass %d arguments to a helper that takes %d", name, len(args), len(proto.params))
+		e.refuse(noPos, "the runtime helper %s: the module would pass %d arguments to a helper that takes %d", name, len(proto.params), len(args))
 	}
-	e.markBoxHelper(name)
 	vals := make([]string, len(args))
 	saved := e.rtCtx
 	e.rtCtx = name
@@ -56,35 +55,6 @@ func (e *llvmEmitter) rtCall(f *fb, name string, result ast.Type, args []lval) l
 	}
 	reg := e.emitCall(f, name, proto.ret, vals)
 	return e.convertFrom(f, reg, proto.ret, result)
-}
-
-// boxHelperKind is the wrapper a `ty_box_*` or `ty_unbox_*` helper belongs to.
-var boxHelperKind = map[string]ast.PrimKind{
-	"bool": ast.Boolean, "byte": ast.Byte, "short": ast.Short, "char": ast.Char,
-	"int": ast.Int, "long": ast.Long, "float": ast.Float, "double": ast.Double,
-}
-
-// markBoxHelper brings in the wrapper a boxing helper hands back. The runtime
-// reads the class out of TY_BOX, so a program that reaches one of these helpers
-// -- `Integer.valueOf(5)` is `ty_box_int` through a synthesized wrapper -- needs
-// the class installed even though no conversion in the program's own code asked
-// for a box.
-func (e *llvmEmitter) markBoxHelper(name string) {
-	rest, ok := strings.CutPrefix(name, "ty_box_")
-	if !ok {
-		rest, ok = strings.CutPrefix(name, "ty_unbox_")
-	}
-	if !ok {
-		return
-	}
-	kind, ok := boxHelperKind[rest]
-	if !ok {
-		return
-	}
-	e.boxUsed[kind] = true
-	if cl := e.boxClassOf(kind); cl != nil {
-		e.instantiate(cl)
-	}
 }
 
 // rtVoid calls a helper whose result the expression does not want.
@@ -150,8 +120,21 @@ func (e *llvmEmitter) callExpr(f *fb, c *ast.Call) lval {
 	case c.Static || m.IsStatic() || c.Super:
 		return e.directCall(f, m, recv, args)
 	case c.Recv == nil && m.VIndex >= 0:
+		if directBind(m) {
+			// A class the program never extends has one implementation per
+			// slot, so the slot can be skipped -- the C back end's own rule,
+			// applied at this back end's call sites.
+			return e.directCall(f, m, recv, args)
+		}
 		return e.virtualCall(f, m, value(recv, e.refType()), args)
 	case c.Recv != nil && m.VIndex >= 0 && !m.Mods.Has(ast.ModPrivate):
+		if directBind(m) {
+			// The test the vtable lookup would have made: the callee reads its
+			// own fields, so a null receiver has to raise NullPointerException
+			// here rather than dereference it.
+			e.nullCheck(f, recv)
+			return e.directCall(f, m, recv, args)
+		}
 		return e.virtualCall(f, m, value(recv, c.Recv.GetType()), args)
 	}
 	return e.directCall(f, m, recv, args)

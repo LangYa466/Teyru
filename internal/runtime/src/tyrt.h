@@ -586,23 +586,15 @@ void *ty_arr_ptr(tyarr *a, int64_t i);
 void *ty_arr_slot_ref(tyarr *a, int64_t i);
 void *ty_arr_ref(tyarr *a, int64_t i);
 
-/* ---- boxing ----------------------------------------------------------- */
-void *ty_box_int(int32_t v);
-void *ty_box_long(int64_t v);
-void *ty_box_double(double v);
-void *ty_box_float(float v);
-void *ty_box_short(int16_t v);
-void *ty_box_byte(int8_t v);
-void *ty_box_char(uint16_t v);
-void *ty_box_bool(int32_t v);
-int32_t ty_unbox_int(void *o);
-int64_t ty_unbox_long(void *o);
-double ty_unbox_double(void *o);
-float ty_unbox_float(void *o);
-int16_t ty_unbox_short(void *o);
-int8_t ty_unbox_byte(void *o);
-uint16_t ty_unbox_char(void *o);
-int32_t ty_unbox_bool(void *o);
+/* ---- boxing -----------------------------------------------------------
+   Boxing, unboxing, the six Number conversions, the wrappers' hashing,
+   equality, ordering and text forms are Teyru: lib/04_boxing.teyru holds them
+   as methods of the wrapper classes, and the compiler calls those methods
+   where it used to call a helper here. What stays in C is what the language
+   cannot state -- the box's memory (the tyintbox..tyshortbox structs at the
+   end of this file, which the reflection path reads through a raw pointer)
+   and the bit views of a float and a double (ty_double_bits, ty_float_bits
+   and the raw forms beside them). */
 
 /* Primitive type patterns (JEP 507). ty_prim_match reports whether the operand
    matches the requested primitive kind and stores the converted value through
@@ -785,45 +777,6 @@ int64_t ty_str_tolong(tystr *s);
 double ty_str_todouble(tystr *s);
 float ty_str_tofloat(tystr *s);
 int32_t ty_str_tobool(tystr *s);
-tystr *ty_int_tostr(void *o);
-tystr *ty_byte_tostr(void *o);
-tystr *ty_short_tostr(void *o);
-tystr *ty_bool_tostr(void *o);
-tystr *ty_char_tostr(void *o);
-tystr *ty_long_tostr(void *o);
-tystr *ty_double_tostr(void *o);
-tystr *ty_float_tostr(void *o);
-int32_t ty_int_equals(void *a, void *b);
-int32_t ty_long_equals(void *a, void *b);
-int32_t ty_double_equals(void *a, void *b);
-int32_t ty_bool_equals(void *a, void *b);
-int32_t ty_int_compare(void *a, void *b);
-int32_t ty_long_compare(int64_t a, int64_t b);
-int32_t ty_prim_cmp_int(int32_t a, int32_t b);
-int32_t ty_prim_cmp_long(int64_t a, int64_t b);
-int32_t ty_prim_cmp_double(double a, double b);
-int32_t ty_double_compare(double a, double b);
-int32_t ty_long_compare_obj(void *a, void *b);
-int32_t ty_double_compare_obj(void *a, void *b);
-int32_t ty_float_compare_obj(void *a, void *b);
-int32_t ty_char_compare_obj(void *a, void *b);
-int32_t ty_float_equals(void *a, void *b);
-int32_t ty_char_equals(void *a, void *b);
-int32_t ty_float_compare(float a, float b);
-int32_t ty_float_hash(void *o);
-int32_t ty_char_hash(void *o);
-int32_t ty_long_hash(void *o);
-int32_t ty_double_hash(void *o);
-int32_t ty_long_toint(void *o);
-int32_t ty_dhash_bits(double d);
-int32_t ty_fhash_bits(float f);
-/* the six java.lang.Number conversions, for any boxed numeric receiver */
-int32_t ty_num_int(void *o);
-int64_t ty_num_long(void *o);
-double ty_num_double(void *o);
-float ty_num_float(void *o);
-int8_t ty_num_byte(void *o);
-int16_t ty_num_short(void *o);
 int32_t ty_abs_int(int32_t v);
 int64_t ty_abs_long(int64_t v);
 double ty_abs_double(double v);
@@ -871,6 +824,21 @@ typedef struct { tyobj obj; uint16_t v; } tycharbox;
 typedef struct { tyobj obj; int32_t v; } tyboolbox;
 typedef struct { tyobj obj; int8_t v; } tybytebox;
 typedef struct { tyobj obj; int16_t v; } tyshortbox;
+/* Every box is a header and a payload of at most eight bytes, which is what
+   lets the reflection path open one with a single width-sized copy
+   (tyrt_reflect.c) while each wrapper class holds its value in a field of its
+   own (lib/04_boxing.teyru). The compiler asserts the same shape of the classes
+   it emits, field by field (emit.go's structOf), so a wrapper whose value grew
+   would stop both builds here rather than at the first reflection call that
+   read or wrote past the end of one. */
+_Static_assert(sizeof(tyboolbox) == sizeof(tyobj) + 8, "a box is a header and a payload");
+_Static_assert(sizeof(tybytebox) == sizeof(tyobj) + 8, "a box is a header and a payload");
+_Static_assert(sizeof(tyshortbox) == sizeof(tyobj) + 8, "a box is a header and a payload");
+_Static_assert(sizeof(tycharbox) == sizeof(tyobj) + 8, "a box is a header and a payload");
+_Static_assert(sizeof(tyintbox) == sizeof(tyobj) + 8, "a box is a header and a payload");
+_Static_assert(sizeof(tylongbox) == sizeof(tyobj) + 8, "a box is a header and a payload");
+_Static_assert(sizeof(tyfloatbox) == sizeof(tyobj) + 8, "a box is a header and a payload");
+_Static_assert(sizeof(tydoublebox) == sizeof(tyobj) + 8, "a box is a header and a payload");
 typedef struct { tyobj obj; int32_t ordinal; tystr *name; } tyEnumBase;
 typedef struct { tyobj obj; int64_t len, cap; char *buf; } tySB;
 
@@ -945,7 +913,6 @@ int32_t ty_char_upper(uint16_t c);
 int32_t ty_char_lower(uint16_t c);
 int32_t ty_char_numeric(uint16_t c);
 int32_t ty_char_digit(uint16_t c, int32_t radix);
-int32_t ty_char_compare(uint16_t a, uint16_t b);
 
 /* The wrappers: parsing, radix formatting and the bit twiddling Integer and
    Long expose. A parse either succeeds or throws, which is why each type has a
@@ -960,9 +927,6 @@ tystr *ty_radix_string_int(int32_t v, int32_t radix);
 tystr *ty_radix_string_long(int64_t v, int32_t radix);
 tystr *ty_unsigned_string_int(int32_t v, int32_t radix);
 tystr *ty_unsigned_string_long(int64_t v, int32_t radix);
-tystr *ty_byte_tostr_val(int32_t v);
-tystr *ty_short_tostr_val(int32_t v);
-tystr *ty_float_tostr_val(float v);
 float ty_str_tofloat_val(tystr *s);
 double ty_str_todouble_val(tystr *s);
 int32_t ty_int_bit_count(int32_t v);
@@ -1002,18 +966,7 @@ int32_t ty_float_is_finite(float v);
 int32_t ty_float_isnan(float v);
 int64_t ty_double_raw_bits(double v);
 int32_t ty_float_raw_bits(float v);
-int32_t ty_bool_compare(int32_t a, int32_t b);
-int32_t ty_box_equals(void *a, void *b);
 double ty_math_cbrt(double x);
-int32_t ty_byte_hash_val(int32_t v);
-int32_t ty_short_hash_val(int32_t v);
-int32_t ty_char_hash_val(uint16_t c);
-int32_t ty_int_hash_val(int32_t v);
-int32_t ty_long_hash_val(int64_t v);
-int32_t ty_bool_hash_val(int32_t v);
-int32_t ty_bool_hash_box(void *o);
-int32_t ty_double_hash_val(double v);
-tystr *ty_char_tostr_val(uint16_t c);
 /* System.identityHashCode: the Object hash without dispatching to an override,
    and 0 for a null, which is what Java answers. */
 int32_t ty_identity_hash(void *o);

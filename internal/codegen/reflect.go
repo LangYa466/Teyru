@@ -365,7 +365,10 @@ func (e *Emitter) emitInvokerBody(name string, m *ast.Method, call string) {
 	}
 	if kind := primKindOf(m.Result); kind != 0 {
 		fmt.Fprintf(&e.meta, "  %s r = %s;\n", e.ctype(m.Result), call)
-		fmt.Fprintf(&e.meta, "  return %s(r);\n}\n\n", boxFn(ast.PrimKind(kind)))
+		// The invoker hands the runtime an object, so a primitive result is
+		// boxed here -- through the wrapper's valueOf, the same call an
+		// autoboxing site in the program makes.
+		fmt.Fprintf(&e.meta, "  return (void*)(%s);\n}\n\n", e.boxedValue(ast.PrimKind(kind), "r"))
 		return
 	}
 	fmt.Fprintf(&e.meta, "  return (void*)(%s);\n}\n\n", call)

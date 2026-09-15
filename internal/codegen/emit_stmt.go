@@ -1173,8 +1173,8 @@ func (e *Emitter) bindComponents(p *ast.Param, recv string) {
 // pointer (a switch on a long with `case int i` segfaulted).
 func (e *Emitter) switchSelectorValue(id int) string {
 	if p, ok := e.switchSel.(*ast.PrimType); ok && p.Kind != ast.Void {
-		if fn := boxFn(p.Kind); fn != "" {
-			return fn + fmt.Sprintf("(_s%d)", id)
+		if call := e.boxedValue(p.Kind, fmt.Sprintf("_s%d", id)); call != "" {
+			return call
 		}
 	}
 	return fmt.Sprintf("_s%d", id)
@@ -1610,24 +1610,11 @@ func (e *Emitter) boxedLabelCond(sel ast.Type, l ast.Expr, id int) (string, bool
 	if !ok {
 		return "", false
 	}
-	fn := "ty_unbox_int"
-	switch kind {
-	case ast.Boolean:
-		fn = "ty_unbox_bool"
-	case ast.Byte:
-		fn = "ty_unbox_byte"
-	case ast.Short:
-		fn = "ty_unbox_short"
-	case ast.Char:
-		fn = "ty_unbox_char"
-	case ast.Long:
-		fn = "ty_unbox_long"
-	case ast.Float:
-		fn = "ty_unbox_float"
-	case ast.Double:
-		fn = "ty_unbox_double"
+	m := e.unboxAccessor(ct.Class, kind)
+	if m == nil {
+		return "", false
 	}
-	return fmt.Sprintf("(_s%d != NULL && %s((void*)_s%d) == %s)", id, fn, id, e.constInt(l)), true
+	return fmt.Sprintf("(_s%d != NULL && %s((%s*)_s%d) == %s)", id, e.cfunc(m), cname(ct.Class), id, e.constInt(l)), true
 }
 
 // isStringSelector reports whether a selector has the String type, the only

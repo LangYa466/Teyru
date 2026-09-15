@@ -36,6 +36,42 @@ static int64_t H(const void *p) { return (int64_t)(intptr_t)p; }
 
 static void *builtin_ex(tyclass *k, const char *msg) { return ty_make_ex(k, msg); }
 
+/* ------------------------------------------------------------- the box
+
+   Reflection reads a primitive out of a field's raw storage and has to hand
+   back the matching wrapper, and it puts one back the other way. The wrapper
+   classes build their own instances in Teyru -- `Integer.valueOf(5)` is
+   `new Integer(5)` and `intValue()` reads the class's own field
+   (lib/04_boxing.teyru) -- but a runtime helper cannot call a method of the
+   program it was linked into, so the two things a box is, beyond its class,
+   are written out here: the allocation, and a payload at offset sizeof(tyobj)
+   that is never wider than eight bytes. tyrt.h asserts that shape of every box
+   struct and the compiler asserts the class it emits for each wrapper against
+   it, so one pair of functions speaks for all eight kinds.
+
+   The kind is the caller's business: a field's own type says which wrapper to
+   build (ty_field_get), and an invoked argument was already checked against the
+   parameter's type (checked_box). Neither this file nor the prelude re-reads a
+   box that could be the wrong one. */
+
+/* box_alloc builds the wrapper of class c around the width bytes at payload,
+   which is the allocation and the store a constructor does. */
+static void *box_alloc(tyclass *c, const void *payload, size_t width) {
+  tyobj *o = (tyobj *)ty_alloc(sizeof(tyobj) + sizeof(int64_t));
+  o->cls = c;
+  memcpy((char *)o + sizeof(tyobj), payload, width);
+  return o;
+}
+
+/* box_take is the other direction: the payload of o into dst, which the caller
+   has typed. A null reference is the NullPointerException an unboxing
+   conversion raises -- ty_rv_* never gets here with one, since checked_box
+   answers IllegalArgumentException first. */
+static void box_take(void *o, void *dst, size_t width) {
+  if (!o) ty_npe();
+  memcpy(dst, (char *)o + sizeof(tyobj), width);
+}
+
 /* named builds the message Java's reflection uses, "X.y" style, without a
    formatted-string call for every failure path. */
 static char *describe(const char *a, const char *b) {
@@ -556,21 +592,21 @@ void *ty_field_get(int64_t cm, int32_t declared, int32_t i, void *self) {
   void *p = field_addr(f, self);
   switch (f->prim) {
   case 1:
-    return ty_box_bool(*(int32_t *)p);
+    return box_alloc(TY_BOX[1], p, sizeof(int32_t));
   case 2:
-    return ty_box_byte(*(int8_t *)p);
+    return box_alloc(TY_BOX[2], p, sizeof(int8_t));
   case 3:
-    return ty_box_short(*(int16_t *)p);
+    return box_alloc(TY_BOX[3], p, sizeof(int16_t));
   case 4:
-    return ty_box_char(*(uint16_t *)p);
+    return box_alloc(TY_BOX[4], p, sizeof(uint16_t));
   case 5:
-    return ty_box_int(*(int32_t *)p);
+    return box_alloc(TY_BOX[5], p, sizeof(int32_t));
   case 6:
-    return ty_box_long(*(int64_t *)p);
+    return box_alloc(TY_BOX[6], p, sizeof(int64_t));
   case 7:
-    return ty_box_float(*(float *)p);
+    return box_alloc(TY_BOX[7], p, sizeof(float));
   case 8:
-    return ty_box_double(*(double *)p);
+    return box_alloc(TY_BOX[8], p, sizeof(double));
   }
   return *(void **)p;
 }
@@ -594,28 +630,28 @@ void ty_field_set(int64_t cm, int32_t declared, int32_t i, void *self, void *v, 
   void *p = field_addr(f, self);
   switch (f->prim) {
   case 1:
-    *(int32_t *)p = ty_unbox_bool(v);
+    box_take(v, p, sizeof(int32_t));
     return;
   case 2:
-    *(int8_t *)p = ty_unbox_byte(v);
+    box_take(v, p, sizeof(int8_t));
     return;
   case 3:
-    *(int16_t *)p = ty_unbox_short(v);
+    box_take(v, p, sizeof(int16_t));
     return;
   case 4:
-    *(uint16_t *)p = ty_unbox_char(v);
+    box_take(v, p, sizeof(uint16_t));
     return;
   case 5:
-    *(int32_t *)p = ty_unbox_int(v);
+    box_take(v, p, sizeof(int32_t));
     return;
   case 6:
-    *(int64_t *)p = ty_unbox_long(v);
+    box_take(v, p, sizeof(int64_t));
     return;
   case 7:
-    *(float *)p = ty_unbox_float(v);
+    box_take(v, p, sizeof(float));
     return;
   case 8:
-    *(double *)p = ty_unbox_double(v);
+    box_take(v, p, sizeof(double));
     return;
   }
   *(void **)p = v;
@@ -760,21 +796,21 @@ void *ty_reflect_array_get(void *o, int32_t i) {
   if (a->refs) return ((void **)a->data)[i];
   switch (kind) {
   case 1:
-    return ty_box_bool(((int32_t *)a->data)[i]);
+    return box_alloc(TY_BOX[1], &((int32_t *)a->data)[i], sizeof(int32_t));
   case 2:
-    return ty_box_byte(((int8_t *)a->data)[i]);
+    return box_alloc(TY_BOX[2], &((int8_t *)a->data)[i], sizeof(int8_t));
   case 3:
-    return ty_box_short(((int16_t *)a->data)[i]);
+    return box_alloc(TY_BOX[3], &((int16_t *)a->data)[i], sizeof(int16_t));
   case 4:
-    return ty_box_char(((uint16_t *)a->data)[i]);
+    return box_alloc(TY_BOX[4], &((uint16_t *)a->data)[i], sizeof(uint16_t));
   case 5:
-    return ty_box_int(((int32_t *)a->data)[i]);
+    return box_alloc(TY_BOX[5], &((int32_t *)a->data)[i], sizeof(int32_t));
   case 6:
-    return ty_box_long(((int64_t *)a->data)[i]);
+    return box_alloc(TY_BOX[6], &((int64_t *)a->data)[i], sizeof(int64_t));
   case 7:
-    return ty_box_float(((float *)a->data)[i]);
+    return box_alloc(TY_BOX[7], &((float *)a->data)[i], sizeof(float));
   case 8:
-    return ty_box_double(((double *)a->data)[i]);
+    return box_alloc(TY_BOX[8], &((double *)a->data)[i], sizeof(double));
   }
   /* An array that predates the promise, or one built by the runtime, still has
      to answer: the element size says how wide the slot is, and 4 and 8 are
@@ -783,13 +819,13 @@ void *ty_reflect_array_get(void *o, int32_t i) {
      case of an array the program never created through this API. */
   switch (a->esize) {
   case 1:
-    return ty_box_byte(((int8_t *)a->data)[i]);
+    return box_alloc(TY_BOX[2], &((int8_t *)a->data)[i], sizeof(int8_t));
   case 2:
-    return ty_box_short(((int16_t *)a->data)[i]);
+    return box_alloc(TY_BOX[3], &((int16_t *)a->data)[i], sizeof(int16_t));
   case 4:
-    return ty_box_int(((int32_t *)a->data)[i]);
+    return box_alloc(TY_BOX[5], &((int32_t *)a->data)[i], sizeof(int32_t));
   default:
-    return ty_box_long(((int64_t *)a->data)[i]);
+    return box_alloc(TY_BOX[6], &((int64_t *)a->data)[i], sizeof(int64_t));
   }
 }
 
@@ -807,42 +843,50 @@ void ty_reflect_array_set(void *o, int32_t i, void *v) {
   }
   switch (kind) {
   case 1:
-    ((int32_t *)a->data)[i] = ty_unbox_bool(v);
+    box_take(v, &((int32_t *)a->data)[i], sizeof(int32_t));
     return;
   case 2:
-    ((int8_t *)a->data)[i] = ty_unbox_byte(v);
+    box_take(v, &((int8_t *)a->data)[i], sizeof(int8_t));
     return;
   case 3:
-    ((int16_t *)a->data)[i] = ty_unbox_short(v);
+    box_take(v, &((int16_t *)a->data)[i], sizeof(int16_t));
     return;
   case 4:
-    ((uint16_t *)a->data)[i] = ty_unbox_char(v);
+    box_take(v, &((uint16_t *)a->data)[i], sizeof(uint16_t));
     return;
   case 5:
-    ((int32_t *)a->data)[i] = ty_unbox_int(v);
+    box_take(v, &((int32_t *)a->data)[i], sizeof(int32_t));
     return;
   case 6:
-    ((int64_t *)a->data)[i] = ty_unbox_long(v);
+    box_take(v, &((int64_t *)a->data)[i], sizeof(int64_t));
     return;
   case 7:
-    ((float *)a->data)[i] = ty_unbox_float(v);
+    box_take(v, &((float *)a->data)[i], sizeof(float));
     return;
   case 8:
-    ((double *)a->data)[i] = ty_unbox_double(v);
+    box_take(v, &((double *)a->data)[i], sizeof(double));
     return;
   }
   switch (a->esize) {
   case 1:
-    ((int8_t *)a->data)[i] = (int8_t)ty_unbox_int(v);
+    {
+      int32_t x;
+      box_take(v, &x, sizeof x);
+      ((int8_t *)a->data)[i] = (int8_t)x;
+    }
     return;
   case 2:
-    ((int16_t *)a->data)[i] = (int16_t)ty_unbox_int(v);
+    {
+      int32_t x;
+      box_take(v, &x, sizeof x);
+      ((int16_t *)a->data)[i] = (int16_t)x;
+    }
     return;
   case 4:
-    ((int32_t *)a->data)[i] = ty_unbox_int(v);
+    box_take(v, &((int32_t *)a->data)[i], sizeof(int32_t));
     return;
   default:
-    ((int64_t *)a->data)[i] = ty_unbox_long(v);
+    box_take(v, &((int64_t *)a->data)[i], sizeof(int64_t));
     return;
   }
 }
@@ -860,14 +904,14 @@ static void *checked_box(void *o, int32_t kind) {
   return o;
 }
 
-int32_t ty_rv_int(void *o) { return ty_unbox_int(checked_box(o, 5)); }
-int64_t ty_rv_long(void *o) { return ty_unbox_long(checked_box(o, 6)); }
-double ty_rv_double(void *o) { return ty_unbox_double(checked_box(o, 8)); }
-float ty_rv_float(void *o) { return ty_unbox_float(checked_box(o, 7)); }
-int16_t ty_rv_short(void *o) { return ty_unbox_short(checked_box(o, 3)); }
-int8_t ty_rv_byte(void *o) { return ty_unbox_byte(checked_box(o, 2)); }
-uint16_t ty_rv_char(void *o) { return ty_unbox_char(checked_box(o, 4)); }
-int32_t ty_rv_bool(void *o) { return ty_unbox_bool(checked_box(o, 1)); }
+int32_t ty_rv_int(void *o) { int32_t v; box_take(checked_box(o, 5), &v, sizeof v); return v; }
+int64_t ty_rv_long(void *o) { int64_t v; box_take(checked_box(o, 6), &v, sizeof v); return v; }
+double ty_rv_double(void *o) { double v; box_take(checked_box(o, 8), &v, sizeof v); return v; }
+float ty_rv_float(void *o) { float v; box_take(checked_box(o, 7), &v, sizeof v); return v; }
+int16_t ty_rv_short(void *o) { int16_t v; box_take(checked_box(o, 3), &v, sizeof v); return v; }
+int8_t ty_rv_byte(void *o) { int8_t v; box_take(checked_box(o, 2), &v, sizeof v); return v; }
+uint16_t ty_rv_char(void *o) { uint16_t v; box_take(checked_box(o, 4), &v, sizeof v); return v; }
+int32_t ty_rv_bool(void *o) { int32_t v; box_take(checked_box(o, 1), &v, sizeof v); return v; }
 
 void *ty_rv_ref(void *o, tyclass *want) {
   if (o && want && !ty_instanceof(o, want)) {
