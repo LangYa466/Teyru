@@ -455,12 +455,21 @@ func (e *llvmEmitter) switchSelector(f *fb, s *ast.Switch, caseLabels []string) 
 		cur := e.loadRaw(f, "i32", idx, 4)
 		return switchSel{ty: "i32 " + cur, cases: joinLines(lines)}
 	}
-	ty := e.llvmType(s.X.GetType())
+	// An enum selector is its ordinal: the runtime reads the ordinal out of the
+	// enum base the prelude declares, and every case label is the ordinal of the
+	// constant it names, which is what the checker folds an enum constant to.
+	selType := s.X.GetType()
+	if ct, ok := e.p.Erased(selType).(*ast.ClassType); ok && ct.Class != nil && ct.Class.Kind == ast.KindEnum {
+		e.instantiate(ct.Class)
+		sel = e.rtCall(f, "ty_enum_ordinal", ast.TInt, []lval{value(sel.v, selType)})
+		selType = ast.TInt
+	}
+	ty := e.llvmType(selType)
 	if !isIntLLVM(ty) {
-		e.refuse(noPos, "a switch on a %s: the llvm back end lowers only integral and String selectors", s.X.GetType().String())
+		e.refuse(noPos, "a switch on a %s: the llvm back end lowers integral, String and enum selectors", selType.String())
 	}
 	op := "sext"
-	if isUnsigned(s.X.GetType()) {
+	if isUnsigned(selType) {
 		op = "zext"
 	}
 	wide := f.reg()
@@ -742,6 +751,17 @@ func (e *llvmEmitter) ctorBody(f *fb, cl *ast.Class, m *ast.Method, body *ast.Bl
 		}
 	}
 	switch {
+	case m.SynthKind == "anon-ctor" && m.Forward != nil:
+		// An anonymous or enum-constant subclass's constructor forwards its own
+		// parameters to the constructor it was declared against -- for an enum
+		// constant that is the enum's own constructor, which is where the
+		// constant's arguments (ADD(1)'s 1) are used. Chaining to a no-argument
+		// constructor here instead was what dropped them.
+		args := make([]lval, 0, len(m.Params))
+		for i, p := range m.Params {
+			args = append(args, value(fmt.Sprintf("%%a%d", i), p))
+		}
+		e.directCall(f, m.Forward, "%this", args)
 	case idx >= 0:
 		// the explicit call is emitted with the rest of the body
 	case cl.Super == nil || cl.Super.Class == e.p.Builtins.Object:
@@ -760,6 +780,16 @@ func (e *llvmEmitter) ctorBody(f *fb, cl *ast.Class, m *ast.Method, body *ast.Bl
 		for _, st := range stmts {
 			e.stmt(f, st)
 		}
+	}
+	// A record's components are assigned where the C back end assigns them:
+	// after a compact constructor's body, which is the by-hand validation Java
+	// gives a record, and after the body of the canonical one.
+	if m.Decl != nil && m.Decl.Compact {
+		e.recordAssign(f, cl, m)
+		return
+	}
+	if m.SynthKind == "record-ctor" {
+		e.recordAssign(f, cl, m)
 	}
 }
 

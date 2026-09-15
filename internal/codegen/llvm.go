@@ -471,9 +471,10 @@ func (e *llvmEmitter) needClass(cl *ast.Class) {
 	if cl == nil || e.classes[cl] {
 		return
 	}
-	switch cl.Kind {
-	case ast.KindEnum, ast.KindRecord, ast.KindAnnotation:
-		e.refuse(noPos, "a %s (%s): the llvm back end does not synthesize the members an enum, record or annotation carries", kindName(cl.Kind), cl.Full)
+	if cl.Kind == ast.KindAnnotation {
+		// annotations need the tables reflection reads, which this back end
+		// does not write; an enum or a record needs members, which it does
+		e.refuse(noPos, "an annotation (%s): the llvm back end does not write the annotation tables its members are read from", cl.Full)
 	}
 	if len(cl.CapFields) > 0 {
 		e.refuse(noPos, "a class that captures enclosing variables (%s): the llvm back end has no closure layout", cl.Full)
@@ -600,6 +601,13 @@ func (e *llvmEmitter) useArray() *ast.Class {
 	if cl != nil {
 		e.arrays = true
 		e.needClass(cl)
+		// The runtime builds every array, and it calls an array's own
+		// toString/hashCode/equals through TY_ARRAY's vtable as freely as it
+		// calls any object's: an array handed to println(Object) or compared
+		// for identity goes through those slots.
+		if !e.inst[cl] {
+			e.instantiate(cl)
+		}
 	}
 	return cl
 }
@@ -689,8 +697,31 @@ func (e *llvmEmitter) structType(cl *ast.Class) string {
 // util.FieldOffsets, which is what the C back end allocates with and what the
 // collector walks.
 func (e *llvmEmitter) classSize(cl *ast.Class) int64 {
+	if cl.Special == "sb" {
+		// A builder's state is the runtime's own struct (tySB: the header, the
+		// length, the capacity and the buffer), not a list of Teyru fields --
+		// the class declares none, so the field walk would answer eight bytes
+		// and the constructor would write its buffer pointer past the end of the
+		// object.
+		return rtStructSize(tySBLayout)
+	}
 	_, size := util.FieldLayout(cl.InstFields, nil)
 	return size
+}
+
+// rtStructSize is the size of one of the runtime's own structs, from the table
+// that describes it: the end of its last field, rounded up the way the C
+// compiler rounds a struct.
+func rtStructSize(layout []rtField) int64 {
+	cur := int64(0)
+	for _, f := range layout {
+		cur = util.Align(cur, sizeOfLLVM(f.ty))
+		if f.off > cur {
+			cur = f.off
+		}
+		cur += sizeOfLLVM(f.ty)
+	}
+	return util.Align(cur, 8)
 }
 
 // classStruct is the layout of a class's instances as an emitted struct type,
@@ -962,6 +993,8 @@ func (e *llvmEmitter) emitBody(f *fb, m *ast.Method) {
 	case body != nil:
 		e.block(f, body)
 		e.finishBody(f)
+	case m.SynthKind != "" && e.synthBody(f, m, m.SynthKind):
+		// the member is written above; a synthesized body returns for itself
 	case m.Accessor != nil:
 		e.accessorBody(f, m)
 	case m.Mods.Has(ast.ModNative):
@@ -1058,6 +1091,7 @@ func (e *llvmEmitter) clinitBody(f *fb, cl *ast.Class) {
 			}
 		}
 	}
+	e.enumInit(f, cl)
 	// the initializers of synthesized fields
 	for _, fld := range cl.Fields {
 		if fld.InitExpr == nil || !fld.Mods.Has(ast.ModStatic) || (fld.Decl != nil && fld.Decl.Init != nil) {
