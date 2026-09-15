@@ -1,0 +1,1247 @@
+package teyru
+
+/* java.io, the part a program over a socket or a file actually uses.
+ *
+ * What is here is the byte layer and the character layer over it: OutputStream
+ * and the prelude's InputStream (lib/03_io.teyru) as the two types a stream is
+ * held by, Reader and Writer for text, the two array-backed streams
+ * (ByteArrayInputStream, ByteArrayOutputStream), the two data streams
+ * (DataInputStream, DataOutputStream), BufferedReader and PrintWriter.
+ *
+ * Nothing here is native. Every method is arithmetic over a byte[], and the
+ * runtime was left alone: the C surface in lib/15_net.teyru and
+ * lib/16_file.teyru is what moves bytes off a socket or a file, and the classes
+ * here compose with it instead of duplicating it. SocketInputStream extends the
+ * prelude's InputStream, so a DataInputStream can be put over a socket stream.
+ * A SocketOutputStream is NOT an OutputStream -- that class is another file's to
+ * edit and it predates this interface -- so a DataOutputStream over a socket
+ * needs a caller-written OutputStream around the socket's write(byte[],int,int).
+ * That is written down here rather than left to be discovered by failing to
+ * compile.
+ *
+ * A Teyru string is UTF-8 bytes: String.length() and String.charAt() are
+ * byte-oriented and Net.stringFrom turns bytes into a string without decoding
+ * anything. That one fact decides the shape of this file. A byte and a character
+ * are the same thing, which is why the array-backed stream is both an
+ * InputStream and a Reader, and why the two data streams are Readers as well;
+ * and it is why the one place that has to be Java-exact about text -- modified
+ * UTF-8 in writeUTF and readUTF -- walks the UTF-8 form a byte at a time (see
+ * ModifiedUtf8).
+ *
+ * What is not here, and is not pretended to be: ObjectInputStream and
+ * serialization, streams over a file (lib/16_file.teyru owns the disk),
+ * character-set machinery (there is one encoding and it is the string's),
+ * Java's FilterInputStream/FilterOutputStream/PushbackReader family, the
+ * deprecated DataInputStream.readLine, and the Writer methods that take a
+ * char[] (a char[] here is bytes, and every caller that has one has a String or
+ * a byte[] instead). BufferedReader keeps Java's name and Java's readLine
+ * contract but not a buffer of its own: the sources it wraps already read in
+ * blocks -- a socket in 8 KiB, a file in one readBytes0 -- so a second buffer
+ * would be a copy of the data and not a saving, and skip/mark/read(char[])
+ * are the methods that would have needed it.
+ */
+
+// ---------------------------------------------------------------- exceptions
+
+/* java.io.UTFDataFormatException, raised by writeUTF for a string whose encoded
+   form does not fit the unsigned-short length that precedes it and by readUTF
+   for bytes that are not modified UTF-8. It extends IOException because it is
+   raised by the same calls as an I/O failure and is handled the same way. */
+class UTFDataFormatException extends IOException {
+  public UTFDataFormatException() {
+  }
+  public UTFDataFormatException(String message) {
+    super(message)
+  }
+}
+
+// ---------------------------------------------------------------- the interfaces
+
+/* java.io.OutputStream, Reader and Writer, cut to the methods the classes in
+   this file implement.
+
+   OutputStream is an interface here and not Java's abstract class: it is a
+   shape a caller supplies -- a socket writer, a file, a buffer -- and nothing
+   in it is inherited. Java's two convenience overloads, write(byte[]) and
+   write(String), are not declared, because a class that has one can have them
+   without the interface promising them.
+
+   Reader declares read() and close() only. Java also declares
+   read(char[],int,int) abstract; here one byte is one character, so a buffer
+   read is a loop of read() calls and every source that can do better (a
+   ByteArrayInputStream over an array) offers it as its own method.
+
+   Writer is the text sink PrintWriter writes into. Java's Writer takes char[]
+   and String with offsets; a String is what every caller in this library has,
+   and a byte at a time is what a Writer over a byte stream can honestly do. */
+interface OutputStream extends AutoCloseable {
+  void write(int b)
+  void write(byte[] b, int off, int len)
+  void flush()
+  void close()
+}
+
+interface Reader extends AutoCloseable {
+  int read()
+  void close()
+}
+
+interface Writer extends AutoCloseable {
+  void write(String s)
+  void write(int c)
+  void flush()
+  void close()
+}
+
+// ---------------------------------------------------------------- lines
+
+/* Java's line grammar, in one copy.
+ *
+ * BufferedReader.readLine is the Java-defined user of it; the other two are the
+ * readln() that ByteArrayInputStream and DataInputStream have to override,
+ * because the prelude's InputStream.readln() reads the console and a stream that
+ * inherited it would compile, run, and read the terminal instead of its own
+ * bytes (the trap lib/15_net.teyru's SocketInputStream documents).
+ *
+ * A line ends at LF, CRLF or a lone CR, as java.io says. That last one is why
+ * this is an object with state rather than a loop: after a CR there is one more
+ * byte to look at (to tell CR from CRLF) and that byte belongs to the NEXT line,
+ * so it has to be held back. A scan that only looked for LF would need no state
+ * at all and would disagree with Java on "a\rb" -- which is the socket reader's
+ * behaviour in lib/15_net.teyru, and is correct there, where a lone CR is part
+ * of a protocol's data as often as it is a terminator. */
+final class LineScanner {
+  /* Nothing is held back. Not -1, which is a real answer (the end of the
+     stream), and not any byte value, which is a real answer too. */
+  public static final int NONE = -2
+
+  private final Reader in
+  private int pending = NONE
+
+  public LineScanner(Reader in) {
+    this.in = in
+  }
+
+  /* The held-back byte, or NONE. The stream that owns this scanner asks for it
+     before it reads, so that the byte a CR made it read past the end of a line
+     is not thrown away. */
+  public int take() {
+    int v = pending
+    pending = NONE
+    return v
+  }
+
+  private int next() {
+    if (pending != NONE) {
+      return take()
+    }
+    return in.read()
+  }
+
+  /* One line, without its terminator; null at the end of the stream when no
+     character was read, and "" for an empty line -- Java's three-way answer,
+     which is why this is not an exception on the end. */
+  public String readLine() {
+    StringBuilder sb = null
+    while (true) {
+      int c = next()
+      if (c < 0) {
+        if (sb == null) {
+          return null
+        }
+        return sb.toString()
+      }
+      if (c == 10) {
+        break
+      }
+      if (c == 13) {
+        int after = next()
+        if (after >= 0 && after != 10) {
+          /* a lone CR: the byte after it is the next line's first */
+          pending = after
+        }
+        break
+      }
+      if (sb == null) {
+        sb = new StringBuilder()
+      }
+      sb.append((char) c)
+    }
+    if (sb == null) {
+      return ""
+    }
+    return sb.toString()
+  }
+}
+
+// ---------------------------------------------------------------- byte arrays
+
+/* java.io.ByteArrayInputStream: a stream over a byte[] that is already in
+ * memory.
+ *
+ * It extends the prelude's InputStream so it can be handed to anything that
+ * takes one -- DataInputStream first of all -- and it implements this file's
+ * Reader as well, because one byte is one character here: that is what makes it
+ * a source a BufferedReader can read lines from, and it is the same reading
+ * String.charAt and String.length give.
+ *
+ * mark/reset are implemented rather than omitted. They are two ints, Java's
+ * contract is that markSupported() answers true, and a parser that has to try a
+ * record and back up has nowhere else to go. */
+class ByteArrayInputStream extends InputStream implements Reader {
+  private final byte[] buf
+  private int pos
+  private int mark
+  private int count
+  /* Built the first time readln() is called, over this stream, and only then:
+     a stream that never reads a line never has a scanner, and the scanner needs
+     the object it reads from, which does not exist inside a constructor. */
+  private LineScanner scanner = null
+
+  public ByteArrayInputStream(byte[] buf) {
+    this.buf = buf
+    this.pos = 0
+    this.mark = 0
+    this.count = buf.length
+  }
+
+  /* Java's second constructor stores its arguments and clamps the end to the
+     array; it does not check the offset, and a caller that passes a negative
+     one gets an exception from the read that uses it. Copied as it is, because
+     the clamping is load-bearing: a caller that passes offset+length past the
+     end is a caller Java accepts. */
+  public ByteArrayInputStream(byte[] buf, int offset, int length) {
+    this.buf = buf
+    this.pos = offset
+    this.mark = offset
+    this.count = Math.min(offset + length, buf.length)
+  }
+
+  // Java's contract: the next byte as 0..255, or -1 at the end.
+  public int read() {
+    if (scanner != null) {
+      int held = scanner.take()
+      if (held != LineScanner.NONE) {
+        return held
+      }
+    }
+    if (pos >= count) {
+      return -1
+    }
+    int v = buf[pos]
+    pos++
+    return v & 255
+  }
+
+  public int read(byte[] b, int off, int len) {
+    if (b == null) {
+      throw new NullPointerException("b")
+    }
+    if (off < 0 || len < 0 || off + len > b.length) {
+      throw new IndexOutOfBoundsException("off=" + off + " len=" + len + " length=" + b.length)
+    }
+    if (len == 0) {
+      return 0
+    }
+    int first = read()
+    if (first < 0) {
+      return -1
+    }
+    b[off] = (byte) first
+    int have = 1
+    /* Everything that is left, up to len. A byte array is not a socket: there is
+       no such thing as a short read here that is not the end of the stream. */
+    while (have < len && pos < count) {
+      b[off + have] = buf[pos]
+      pos++
+      have++
+    }
+    return have
+  }
+
+  public int read(byte[] b) {
+    return read(b, 0, b.length)
+  }
+
+  /* readln() over this stream's own bytes: the prelude's reads the console, and
+     a stream that answered from there would be reading the wrong thing. */
+  public String readln() {
+    if (scanner == null) {
+      scanner = new LineScanner(this)
+    }
+    return scanner.readLine()
+  }
+
+  public long skip(long n) {
+    long left = count - pos
+    if (n < left) {
+      left = n < 0 ? 0 : n
+    }
+    pos = pos + (int) left
+    return left
+  }
+
+  public int available() {
+    return count - pos
+  }
+
+  public boolean markSupported() {
+    return true
+  }
+
+  /* Java's mark does not check its argument and does not read ahead. */
+  public void mark(int readAheadLimit) {
+    mark = pos
+  }
+
+  public void reset() {
+    pos = mark
+  }
+
+  /* Nothing to release, as in Java: closing an array stream does not stop it
+     from being read, and readln() after a close is still a line. */
+  public void close() {
+  }
+}
+
+/* java.io.ByteArrayOutputStream: the writer half, a byte[] that grows.
+ *
+ * It implements both of this file's output shapes, because one byte is one
+ * character: an OutputStream for the data streams to write into, and a Writer so
+ * that PrintWriter has a text sink that is in this library and not in the
+ * caller's program.
+ *
+ * toByteArray() copies, as Java's does. Handing out the internal array would be
+ * faster and would break the first program that wrote to the stream after
+ * reading the array -- and the compiler could not catch it. */
+class ByteArrayOutputStream extends Object implements OutputStream, Writer {
+  /* Java's initial capacity and its doubling rule. A buffer that is exactly big
+     enough each time is indistinguishable in a test and quadratic in a loop of
+     write(int) calls, which is the loop a data stream's writeInt is. */
+  private byte[] buf
+  private int count = 0
+
+  public ByteArrayOutputStream() {
+    buf = new byte[32]
+  }
+
+  public ByteArrayOutputStream(int size) {
+    if (size < 0) {
+      throw new IllegalArgumentException("Negative initial size: " + size)
+    }
+    buf = new byte[size]
+  }
+
+  private void grow(int need) {
+    int want = buf.length << 1
+    if (want < need) {
+      want = need
+    }
+    if (want < 0) {
+      // past what an array can be; the allocation below is what says so
+      want = need
+    }
+    byte[] bigger = new byte[want]
+    System.arraycopy(buf, 0, bigger, 0, count)
+    buf = bigger
+  }
+
+  private void ensure(int extra) {
+    if (count + extra > buf.length) {
+      grow(count + extra)
+    }
+  }
+
+  // Java's OutputStream.write(int): the low eight bits, and nothing else.
+  public void write(int b) {
+    ensure(1)
+    buf[count] = (byte) b
+    count = count + 1
+  }
+
+  public void write(byte[] b, int off, int len) {
+    if (b == null) {
+      throw new NullPointerException("b")
+    }
+    if (off < 0 || len < 0 || off + len > b.length) {
+      throw new IndexOutOfBoundsException("off=" + off + " len=" + len + " length=" + b.length)
+    }
+    ensure(len)
+    System.arraycopy(b, off, buf, count, len)
+    count = count + len
+  }
+
+  public void write(byte[] b) {
+    write(b, 0, b.length)
+  }
+
+  /* The Writer half: the string's own bytes, which is the identity and not a
+     conversion -- a Teyru string IS UTF-8 bytes. */
+  public void write(String s) {
+    byte[] b = s.getBytes()
+    write(b, 0, b.length)
+  }
+
+  public void writeTo(OutputStream out) {
+    if (out == null) {
+      throw new NullPointerException("out")
+    }
+    out.write(buf, 0, count)
+  }
+
+  public void reset() {
+    count = 0
+  }
+
+  public byte[] toByteArray() {
+    byte[] copy = new byte[count]
+    System.arraycopy(buf, 0, copy, 0, count)
+    return copy
+  }
+
+  public int size() {
+    return count
+  }
+
+  /* Java's toString() decodes the bytes with the default charset, which is UTF-8
+     and, here, is the bytes themselves. */
+  public String toString() {
+    return Net.stringFrom(buf, 0, count)
+  }
+
+  // There is no buffer between this and the bytes it holds, so there is nothing
+  // for either of these to push out or release.
+  public void flush() {
+  }
+
+  public void close() {
+  }
+}
+
+// ---------------------------------------------------------------- modified UTF-8
+
+/* Java's modified UTF-8, in the one place both directions agree on it.
+ *
+ * writeUTF and readUTF are the two methods in the data streams that do not hand
+ * a number straight to the stream, and the encoding they use is the JVM's and
+ * not UTF-8's: U+0000 is two bytes (0xC0 0x80) rather than one, and a character
+ * above the BMP is the two three-byte halves of its surrogate pair rather than
+ * the one four-byte sequence UTF-8 would use. A stream that got this wrong would
+ * still round-trip against itself, which is why the test for it is a hex dump of
+ * the bytes on both sides and an expectation taken from javac.
+ *
+ * The reverse direction has one answer this dialect cannot give. Java keeps a
+ * lone surrogate as a surrogate; a Teyru string is UTF-8, where a lone surrogate
+ * has no spelling at all, so it becomes U+FFFD -- the same substitution
+ * lib/10_json.teyru makes when it escapes one. Text that is not valid UTF-8 at
+ * all reads as the bytes it is made of, which is the convention String.charAt
+ * already keeps.
+ *
+ * The length check is Java's, message included: the count in front of the bytes
+ * is an unsigned short, and a string that does not fit it is an exception rather
+ * than a truncated frame. */
+final class ModifiedUtf8 {
+  public static byte[] encode(String s) {
+    if (s == null) {
+      throw new NullPointerException("s")
+    }
+    byte[] in = s.getBytes()
+    ByteArrayOutputStream out = new ByteArrayOutputStream(in.length + 4)
+    int i = 0
+    while (i < in.length) {
+      int c = in[i] & 255
+      int cp = c
+      int size = 1
+      /* One character at a time. A truncated sequence at the end of the string
+         is one character, which is what String.charAt would say about it. */
+      if (c >= 0xC0 && c < 0xE0 && i + 1 < in.length) {
+        cp = ((c & 0x1F) << 6) | (in[i + 1] & 0x3F)
+        size = 2
+      } else if (c >= 0xE0 && c < 0xF0 && i + 2 < in.length) {
+        cp = ((c & 0x0F) << 12) | ((in[i + 1] & 0x3F) << 6) | (in[i + 2] & 0x3F)
+        size = 3
+      } else if (c >= 0xF0 && i + 3 < in.length) {
+        cp = ((c & 0x07) << 18) | ((in[i + 1] & 0x3F) << 12) | ((in[i + 2] & 0x3F) << 6) |
+          (in[i + 3] & 0x3F)
+        size = 4
+      }
+      i = i + size
+      if (cp == 0) {
+        out.write(0xC0)
+        out.write(0x80)
+      } else if (cp < 0x80) {
+        out.write(cp)
+      } else if (cp < 0x800) {
+        two(out, cp)
+      } else if (cp < 0x10000) {
+        three(out, cp)
+      } else {
+        /* Above the BMP: two surrogate halves, each of them three bytes, which
+           is six bytes where UTF-8 would spend four. */
+        int v = cp - 0x10000
+        three(out, 0xD800 + (v >> 10))
+        three(out, 0xDC00 + (v & 0x3FF))
+      }
+    }
+    if (out.size() > 65535) {
+      throw new UTFDataFormatException(tooLong(s, out.size()))
+    }
+    return out.toByteArray()
+  }
+
+  /* Java's message, which names the string and not only the length: its
+     tooLongMsg puts the first and last eight characters of the value in the
+     text, so a program that reads this exception out of a log knows which
+     field overflowed without a debugger. The ends are eight BYTES here and
+     eight UTF-16 code units there, which is the same eight characters for the
+     ASCII text this message is normally read over. A string short enough that
+     the two ends would overlap cannot reach this call at all: every byte of a
+     string is at most three encoded bytes, so more than 65535 of them is more
+     than 21,845 characters. */
+  private static String tooLong(String s, int bytes) {
+    int length = s.length()
+    return "encoded string (" + s.substring(0, 8) + "..." + s.substring(length - 8, length) +
+      ") too long: " + bytes + " bytes"
+  }
+
+  /* len bytes of modified UTF-8 from b[off], as a Teyru string. Java's
+     structural checks are made with Java's messages, because they are what keeps
+     a truncated frame from being read as text: a lead byte without its
+     continuations, a continuation that is not 10xxxxxx, and a byte above 0xF0
+     that begins no sequence this encoding has. */
+  public static String decode(byte[] b, int off, int len) {
+    if (b == null) {
+      throw new NullPointerException("b")
+    }
+    ByteArrayOutputStream out = new ByteArrayOutputStream(len)
+    int i = 0
+    while (i < len) {
+      int c = b[off + i] & 255
+      if (c < 0x80) {
+        out.write(c)
+        i = i + 1
+      } else if ((c & 0xE0) == 0xC0) {
+        int c2 = at(b, off, len, i + 1)
+        if ((c2 & 0xC0) != 0x80) {
+          throw malformed(i + 2)
+        }
+        int unit = ((c & 0x1F) << 6) | (c2 & 0x3F)
+        if (unit < 0x80) {
+          out.write(unit)
+        } else {
+          two(out, unit)
+        }
+        i = i + 2
+      } else if ((c & 0xF0) == 0xE0) {
+        int c2 = at(b, off, len, i + 1)
+        int c3 = at(b, off, len, i + 2)
+        if ((c2 & 0xC0) != 0x80 || (c3 & 0xC0) != 0x80) {
+          /* Java's index here is (count - 1) with count advanced by three, so
+             it points at the second continuation byte; for the two-byte form
+             it is count, the first. Both are i + 2 from the start of the
+             sequence, which is why they read differently in the source. */
+          throw malformed(i + 2)
+        }
+        int unit = ((c & 0x0F) << 12) | ((c2 & 0x3F) << 6) | (c3 & 0x3F)
+        if (unit >= 0xD800 && unit <= 0xDBFF) {
+          int low = lowSurrogateAt(b, off, len, i + 3)
+          if (low < 0) {
+            lone(out)
+            i = i + 3
+          } else {
+            int cp = 0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00)
+            four(out, cp)
+            i = i + 6
+          }
+        } else if (unit >= 0xDC00 && unit <= 0xDFFF) {
+          lone(out)
+          i = i + 3
+        } else {
+          three(out, unit)
+          i = i + 3
+        }
+      } else {
+        /* Java reports this one at the lead byte, not after it: its count is
+           only advanced by the branches that know how long the sequence is. */
+        throw malformed(i)
+      }
+    }
+    return Net.stringFrom(out.toByteArray())
+  }
+
+  private static UTFDataFormatException malformed(int at) {
+    return new UTFDataFormatException("malformed input around byte " + at)
+  }
+
+  private static int at(byte[] b, int off, int len, int index) {
+    if (index >= len) {
+      throw new UTFDataFormatException("malformed input: partial character at end")
+    }
+    return b[off + index] & 255
+  }
+
+  /* The low half of a surrogate pair, or -1 when the next three bytes are not
+     one. This pair is the only place a well-formed string that arrived from Java
+     is encoded differently from UTF-8, so it is the only place this decoder has
+     to look at more than the character in hand. */
+  private static int lowSurrogateAt(byte[] b, int off, int len, int index) {
+    if (index + 2 >= len) {
+      return -1
+    }
+    int c1 = b[off + index] & 255
+    int c2 = b[off + index + 1] & 255
+    int c3 = b[off + index + 2] & 255
+    if ((c1 & 0xF0) != 0xE0 || (c2 & 0xC0) != 0x80 || (c3 & 0xC0) != 0x80) {
+      return -1
+    }
+    int unit = ((c1 & 0x0F) << 12) | ((c2 & 0x3F) << 6) | (c3 & 0x3F)
+    if (unit < 0xDC00 || unit > 0xDFFF) {
+      return -1
+    }
+    return unit
+  }
+
+  // U+FFFD, for a surrogate that has no partner and so no UTF-8 spelling.
+  private static void lone(ByteArrayOutputStream out) {
+    three(out, 0xFFFD)
+  }
+
+  private static void two(ByteArrayOutputStream out, int cp) {
+    out.write(0xC0 | (cp >> 6))
+    out.write(0x80 | (cp & 0x3F))
+  }
+
+  private static void three(ByteArrayOutputStream out, int cp) {
+    out.write(0xE0 | (cp >> 12))
+    out.write(0x80 | ((cp >> 6) & 0x3F))
+    out.write(0x80 | (cp & 0x3F))
+  }
+
+  private static void four(ByteArrayOutputStream out, int cp) {
+    out.write(0xF0 | (cp >> 18))
+    out.write(0x80 | ((cp >> 12) & 0x3F))
+    out.write(0x80 | ((cp >> 6) & 0x3F))
+    out.write(0x80 | (cp & 0x3F))
+  }
+}
+
+// ---------------------------------------------------------------- the data streams
+
+/* java.io.DataOutputStream: fixed-width, big-endian values, one after another,
+ * which is what every length-prefixed protocol is made of.
+ *
+ * The byte order is Java's and not the machine's, and it is written out here
+ * rather than taken from the host: a value in this stream has to be readable by
+ * the Java program at the other end, and on a little-endian machine the
+ * difference is invisible until something else reads it. writeFloat and
+ * writeDouble go through Float.floatToIntBits and Double.doubleToLongBits, as
+ * Java's do, so a NaN is written as Java's canonical NaN and not as whatever
+ * bits arrived.
+ *
+ * writeBytes and writeChars, Java's two String writers that are defined on
+ * UTF-16 code units, are not here. writeChars has no UTF-16 to write and
+ * writeBytes would silently drop the high bits of a character that is more than
+ * one byte here; writeUTF is the String writer this dialect can do exactly.
+ *
+ * The wrapped stream is this file's OutputStream. Anything that can write bytes
+ * -- a ByteArrayOutputStream, a caller's own adapter over a socket or a file --
+ * can be under this. */
+class DataOutputStream extends Object implements OutputStream {
+  private final OutputStream out
+  private int written = 0
+
+  public DataOutputStream(OutputStream out) {
+    if (out == null) {
+      throw new NullPointerException("out")
+    }
+    this.out = out
+  }
+
+  public void write(int b) {
+    out.write(b)
+    written = written + 1
+  }
+
+  public void write(byte[] b, int off, int len) {
+    if (b == null) {
+      throw new NullPointerException("b")
+    }
+    if (off < 0 || len < 0 || off + len > b.length) {
+      throw new IndexOutOfBoundsException("off=" + off + " len=" + len + " length=" + b.length)
+    }
+    out.write(b, off, len)
+    written = written + len
+  }
+
+  public void write(byte[] b) {
+    write(b, 0, b.length)
+  }
+
+  // Java's counter: the bytes this stream has written, which is not the same as
+  // the size of a buffer underneath it that the caller may also be writing to.
+  public int size() {
+    return written
+  }
+
+  public void flush() {
+    out.flush()
+  }
+
+  public void close() {
+    out.close()
+  }
+
+  public void writeBoolean(boolean v) {
+    write(v ? 1 : 0)
+  }
+
+  // Java's writeByte takes an int and writes its low eight bits: a caller
+  // writing a signed byte passes it through unchanged.
+  public void writeByte(int v) {
+    write(v)
+  }
+
+  public void writeShort(int v) {
+    write((v >>> 8) & 0xFF)
+    write(v & 0xFF)
+  }
+
+  public void writeChar(int v) {
+    writeShort(v)
+  }
+
+  public void writeInt(int v) {
+    write((v >>> 24) & 0xFF)
+    write((v >>> 16) & 0xFF)
+    write((v >>> 8) & 0xFF)
+    write(v & 0xFF)
+  }
+
+  public void writeLong(long v) {
+    write((int) (v >>> 56) & 0xFF)
+    write((int) (v >>> 48) & 0xFF)
+    write((int) (v >>> 40) & 0xFF)
+    write((int) (v >>> 32) & 0xFF)
+    write((int) (v >>> 24) & 0xFF)
+    write((int) (v >>> 16) & 0xFF)
+    write((int) (v >>> 8) & 0xFF)
+    write((int) v & 0xFF)
+  }
+
+  public void writeFloat(float v) {
+    writeInt(Float.floatToIntBits(v))
+  }
+
+  public void writeDouble(double v) {
+    writeLong(Double.doubleToLongBits(v))
+  }
+
+  /* Java's writeUTF: an unsigned short count and then the bytes. The count is
+     checked by the encoder, before anything is written, so a string that does
+     not fit leaves the stream exactly as it was -- which is what Java does and
+     what lets a caller that catches the exception carry on with the frame it was
+     writing. */
+  public void writeUTF(String s) {
+    byte[] body = ModifiedUtf8.encode(s)
+    writeShort(body.length)
+    write(body, 0, body.length)
+  }
+}
+
+/* java.io.DataInputStream: the reading half of the same layout.
+ *
+ * It extends the prelude's InputStream so it can be put over anything that is
+ * one -- a ByteArrayInputStream, a socket's SocketInputStream -- and it
+ * implements this file's Reader for the same reason ByteArrayInputStream does:
+ * a byte is a character here, so a data stream can be the source of a
+ * BufferedReader.
+ *
+ * There is no read(byte[],int,int) here. The prelude's InputStream declares
+ * read() and readln() and nothing else, so a buffer read would be a loop of
+ * read() calls that blocks until the buffer is full -- which is readFully's
+ * contract and not Java's read(byte[],int,int) contract, where a short read is
+ * normal and a protocol that waits for more than the peer has sent is a
+ * deadlock. The honest thing is to offer only the one that is true, and that is
+ * readFully; a caller that wants a short read calls read() in a loop and decides
+ * for itself. */
+class DataInputStream extends InputStream implements Reader {
+  private final InputStream in
+  private LineScanner scanner = null
+
+  public DataInputStream(InputStream in) {
+    if (in == null) {
+      throw new NullPointerException("in")
+    }
+    this.in = in
+  }
+
+  public int read() {
+    if (scanner != null) {
+      int held = scanner.take()
+      if (held != LineScanner.NONE) {
+        return held
+      }
+    }
+    return in.read()
+  }
+
+  public String readln() {
+    if (scanner == null) {
+      scanner = new LineScanner(this)
+    }
+    return scanner.readLine()
+  }
+
+  /* Java's DataInputStream.close closes the stream it wraps; this one cannot.
+     The prelude's InputStream declares read() and readln() and no close(), and
+     a socket stream's close() belongs to SocketInputStream and not to the type
+     this field holds, so there is nothing to call from here. It is a no-op
+     rather than an exception, which is exactly what Java's close() is when the
+     stream underneath is a ByteArrayInputStream; a caller that wants the socket
+     closed closes the socket. */
+  public void close() {
+  }
+
+  /* Exactly len bytes, or an exception naming how many arrived before the end.
+     This is the shape a length-prefixed frame needs: a short read here is a
+     truncated frame and not a slow peer. */
+  public void readFully(byte[] b, int off, int len) {
+    if (b == null) {
+      throw new NullPointerException("b")
+    }
+    if (off < 0 || len < 0 || off + len > b.length) {
+      throw new IndexOutOfBoundsException("off=" + off + " len=" + len + " length=" + b.length)
+    }
+    int have = 0
+    while (have < len) {
+      int v = read()
+      if (v < 0) {
+        throw new EOFException("end of stream after " + have + " of " + len + " bytes")
+      }
+      b[off + have] = (byte) v
+      have = have + 1
+    }
+  }
+
+  public void readFully(byte[] b) {
+    readFully(b, 0, b.length)
+  }
+
+  /* The one-byte reads. Each of them answers -1 for the end of the stream and
+     each of the others is Java's arithmetic on those bytes; the exception for an
+     end in the middle of a value is IOException's subclass EOFException, which
+     is what Java raises and what tells a truncated stream from a closed one. */
+  private int nextByte() {
+    int v = read()
+    if (v < 0) {
+      throw new EOFException("end of stream")
+    }
+    return v
+  }
+
+  public boolean readBoolean() {
+    return nextByte() != 0
+  }
+
+  public byte readByte() {
+    return (byte) nextByte()
+  }
+
+  public int readUnsignedByte() {
+    return nextByte()
+  }
+
+  public short readShort() {
+    int hi = nextByte()
+    int lo = nextByte()
+    return (short) ((hi << 8) | lo)
+  }
+
+  public int readUnsignedShort() {
+    int hi = nextByte()
+    int lo = nextByte()
+    return (hi << 8) | lo
+  }
+
+  public char readChar() {
+    return (char) readUnsignedShort()
+  }
+
+  public int readInt() {
+    int b1 = nextByte()
+    int b2 = nextByte()
+    int b3 = nextByte()
+    int b4 = nextByte()
+    return (b1 << 24) | (b2 << 16) | (b3 << 8) | b4
+  }
+
+  public long readLong() {
+    long hi = readInt() & 0xFFFFFFFFL
+    long lo = readInt() & 0xFFFFFFFFL
+    return (hi << 32) | lo
+  }
+
+  public float readFloat() {
+    return Float.intBitsToFloat(readInt())
+  }
+
+  public double readDouble() {
+    return Double.longBitsToDouble(readLong())
+  }
+
+  /* Java's readUTF: read the count, read that many bytes, decode. The bytes are
+     held in one array and not fed to the decoder a byte at a time because the
+     decoder's job is to look at the sequence, and because a truncated frame has
+     to fail as a readFully and not as a decode of half a character. */
+  public String readUTF() {
+    int len = readUnsignedShort()
+    byte[] body = new byte[len]
+    readFully(body, 0, len)
+    return ModifiedUtf8.decode(body, 0, len)
+  }
+}
+
+// ---------------------------------------------------------------- text
+
+/* java.io.BufferedReader (java/io/BufferedReader), cut to the call a program
+ * makes: readLine, read and close.
+ *
+ * It can be built from a Reader or from a String, which is Java's
+ * BufferedReader over a StringReader with the reader left out: a program that
+ * has a String in hand and wants its lines should not have to be handed a class
+ * to hold it when the class would be this one's own field. Java's char[]
+ * methods, skip, mark and reset are not here -- a buffer is what they need and
+ * this class has none (see the note at the top of this file) -- and neither is
+ * ready(). */
+class BufferedReader extends Object implements Reader {
+  private final Reader in
+  private final String source
+  private final LineScanner scanner
+  private int at = 0
+  private boolean closed = false
+
+  public BufferedReader(Reader in) {
+    if (in == null) {
+      throw new NullPointerException("in")
+    }
+    this.in = in
+    this.source = null
+    this.scanner = new LineScanner(in)
+  }
+
+  public BufferedReader(String source) {
+    if (source == null) {
+      throw new NullPointerException("source")
+    }
+    this.in = null
+    this.source = source
+    this.scanner = new LineScanner(this)
+  }
+
+  private void requireOpen() {
+    if (closed) {
+      throw new IOException("Stream closed")
+    }
+  }
+
+  /* One character, as 0..255, or -1 at the end. A Teyru char is one byte of a
+     UTF-8 string, so reading a line from a String is the same walk as reading
+     one from a buffer, and neither of them decides anything about multi-byte
+     characters -- which is what String.charAt does too. */
+  public int read() {
+    requireOpen()
+    int held = scanner.take()
+    if (held != LineScanner.NONE) {
+      return held
+    }
+    if (source != null) {
+      if (at >= source.length()) {
+        return -1
+      }
+      int v = source.charAt(at)
+      at = at + 1
+      return v & 255
+    }
+    return in.read()
+  }
+
+  /* One line, without its terminator: null at the end of the stream when nothing
+     was read, "" for an empty line. See LineScanner for the grammar, which is
+     java.io's. */
+  public String readLine() {
+    requireOpen()
+    return scanner.readLine()
+  }
+
+  // Java's: closing a BufferedReader closes the reader under it, and a String is
+  // not a resource so there is nothing behind this one to close.
+  public void close() {
+    closed = true
+    if (in != null) {
+      in.close()
+    }
+  }
+}
+
+/* java.io.PrintWriter: text out, with Java's rule that a write never throws.
+ *
+ * The rule is the whole point of the class and it is why every method below goes
+ * through one private emit(): a failure sets a flag that checkError() reports
+ * instead of unwinding out of a println. Java's PrintWriter also swallows the
+ * I/O exception because it is built for the end of a program's output path,
+ * where "the pipe is gone" is not something the caller can do anything about.
+ *
+ * Two backends, because Java has two constructors and both are worth having
+ * here: a Writer (a ByteArrayOutputStream is one, in this file) and an
+ * OutputStream, which Java's constructor wraps in a BufferedWriter around an
+ * OutputStreamWriter with the default charset. The two behave differently and
+ * the difference is observable: text printed into a Writer reaches it at once,
+ * text printed into an OutputStream is held until a flush, a close or an
+ * autoFlush. Both halves are here, with the charset conversion left out because
+ * a Teyru string's bytes are already UTF-8 and the buffer left in because a
+ * program that prints a prompt and then reads a line depends on it.
+ *
+ * autoFlush is Java's: it flushes on println, printf and format and not on
+ * print, which is the detail that decides whether a prompt with no newline
+ * reaches a terminal before the program blocks on input. */
+class PrintWriter extends Object implements AutoCloseable {
+  private final Writer out
+  private final OutputStream stream
+  private final boolean autoFlush
+  /* The bytes-side buffer: the text printed since the last flush, for the
+     OutputStream constructor only. A Writer is not buffered here, and in Java
+     it is not buffered either -- PrintWriter(Writer) adds nothing, and a caller
+     that wants a buffer wraps a BufferedWriter around it. */
+  private StringBuilder pending = null
+  private boolean closed = false
+  private boolean trouble = false
+
+  public PrintWriter(Writer out) {
+    this(out, false)
+  }
+
+  public PrintWriter(Writer out, boolean autoFlush) {
+    if (out == null) {
+      throw new NullPointerException("out")
+    }
+    this.out = out
+    this.stream = null
+    this.autoFlush = autoFlush
+  }
+
+  public PrintWriter(OutputStream out) {
+    this(out, false)
+  }
+
+  public PrintWriter(OutputStream out, boolean autoFlush) {
+    if (out == null) {
+      throw new NullPointerException("out")
+    }
+    this.out = null
+    this.stream = out
+    this.autoFlush = autoFlush
+  }
+
+  /* Java's line separator, read where the rest of the library reads it: there is
+     one place that knows it and this is not it. */
+  private static String lineSeparator() {
+    return System.lineSeparator()
+  }
+
+  private void emit(String s) {
+    if (closed) {
+      /* Java's PrintWriter drops its writer on close, so every method after
+         that fails at ensureOpen, is caught, and sets the flag. A write after a
+         close is therefore both dropped and an error, which is what lets a
+         program that closes early find out by checking. */
+      trouble = true
+      return
+    }
+    try {
+      if (out != null) {
+        out.write(s)
+      } else {
+        if (pending == null) {
+          pending = new StringBuilder()
+        }
+        pending.append(s)
+      }
+    } catch (IOException e) {
+      trouble = true
+    }
+  }
+
+  /* The held-back text, out as bytes. Only flush and close call this, which is
+     where Java's BufferedWriter calls its own. */
+  private void pushPending() {
+    if (pending != null && pending.length() > 0) {
+      byte[] b = pending.toString().getBytes()
+      stream.write(b, 0, b.length)
+      pending.delete(0, pending.length())
+    }
+  }
+
+  private void autoFlushIfSet() {
+    if (autoFlush) {
+      flush()
+    }
+  }
+
+  public void write(int c) {
+    emit(String.valueOf((char) c))
+  }
+
+  /* Java's PrintWriter.write(String) is not print(String): a null is a
+     NullPointerException here and the word "null" there. On the Writer path the
+     writer underneath throws it; on the byte path there is no writer to throw
+     it, so the check is here -- and it has to be here rather than left to
+     StringBuilder.append, which writes the word "null" for a null and would
+     give this method print(String)'s behaviour instead of its own. */
+  public void write(String s) {
+    if (s == null) {
+      throw new NullPointerException("s")
+    }
+    emit(s)
+  }
+
+  public void print(boolean v) {
+    emit(String.valueOf(v))
+  }
+
+  public void print(char v) {
+    emit(String.valueOf(v))
+  }
+
+  public void print(int v) {
+    emit(String.valueOf(v))
+  }
+
+  public void print(long v) {
+    emit(String.valueOf(v))
+  }
+
+  public void print(float v) {
+    emit(String.valueOf(v))
+  }
+
+  public void print(double v) {
+    emit(String.valueOf(v))
+  }
+
+  public void print(String s) {
+    emit(String.valueOf(s))
+  }
+
+  public void print(Object o) {
+    emit(String.valueOf(o))
+  }
+
+  /* Java's println is print followed by a newline as two separate writes to the
+     sink, not one write of a String with a terminator in it. The difference is
+     visible to a Writer that counts calls -- and it is the right shape anyway,
+     since the newline is the only part that autoFlush acts on. */
+  private void newLine() {
+    emit(lineSeparator())
+    autoFlushIfSet()
+  }
+
+  public void println() {
+    newLine()
+  }
+
+  public void println(boolean v) {
+    println(String.valueOf(v))
+  }
+
+  public void println(char v) {
+    println(String.valueOf(v))
+  }
+
+  public void println(int v) {
+    println(String.valueOf(v))
+  }
+
+  public void println(long v) {
+    println(String.valueOf(v))
+  }
+
+  public void println(float v) {
+    println(String.valueOf(v))
+  }
+
+  public void println(double v) {
+    println(String.valueOf(v))
+  }
+
+  public void println(String s) {
+    emit(String.valueOf(s))
+    newLine()
+  }
+
+  public void println(Object o) {
+    println(String.valueOf(o))
+  }
+
+  /* printf and format are one method under two names, as in Java, and both
+     format through String.format -- which is the prelude's, and is
+     PrintStream.printf's, so the two streams cannot disagree about what %d
+     means. args is passed through as the array it already is: a varargs method
+     that forwards its array is the one place this language does not copy it. */
+  public PrintWriter printf(String fmt, Object... args) {
+    return format(fmt, args)
+  }
+
+  public PrintWriter format(String fmt, Object... args) {
+    emit(String.format(fmt, args))
+    autoFlushIfSet()
+    return this
+  }
+
+  public void flush() {
+    if (closed) {
+      trouble = true
+      return
+    }
+    try {
+      if (out != null) {
+        out.flush()
+      } else {
+        pushPending()
+        stream.flush()
+      }
+    } catch (IOException e) {
+      trouble = true
+    }
+  }
+
+  /* Java's close, which does not flush through the PrintWriter's own flush():
+     it closes what is underneath, and for the buffered byte side that close is
+     what pushes the held text out (a BufferedWriter flushes as it closes). The
+     flag is set after the close returns, so a close that failed leaves the
+     stream open, which is Java's behaviour too. */
+  public void close() {
+    if (closed) {
+      return
+    }
+    try {
+      if (out != null) {
+        out.close()
+      } else {
+        pushPending()
+        stream.close()
+      }
+    } catch (IOException e) {
+      trouble = true
+    }
+    closed = true
+  }
+
+  // Java's checkError flushes first: an error that a buffer was holding has not
+  // happened yet as far as this flag is concerned.
+  public boolean checkError() {
+    if (!closed) {
+      flush()
+    }
+    return trouble
+  }
+}

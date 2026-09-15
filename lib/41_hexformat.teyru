@@ -1,0 +1,298 @@
+package teyru
+
+/* java.util.HexFormat, the JDK's own answer to "print these bytes as hex, and
+   read them back". It is here because a digest is the class of value nobody
+   prints in its native form: 40_digest.teyru computes MessageDigest.get around a
+   byte[], and the first thing every caller of one does is turn those bytes into
+   hex. Java puts that job in java.util.HexFormat -- a formatter object rather
+   than a static toHexString, because the delimiter, the prefix and the case are
+   what callers actually vary -- and this is that class.
+
+   What is here: the two factories (of, ofDelimiter), the four ways to change a
+   formatter (withDelimiter, withPrefix, withSuffix, withUpperCase and its
+   withLowerCase inverse), the three accessors, formatHex over an array and over
+   a range of one, parseHex over a string and over a range of a char[], the
+   digit conversions (toHexDigits for the five widths, toHighHexDigit,
+   toLowHexDigit, fromHexDigit) and the isHexDigit predicate.
+
+   What is not here. The ByteBuffer and Appendable overloads of formatHex, and
+   parseHex(CharSequence, int, int), are absent because there is no ByteBuffer
+   and no Appendable in this library and because Teyru's String is the only
+   sequence type a caller has -- parseHex(String) and parseHex(char[], int, int)
+   are the two ways in that a program can actually use. toString, equals and
+   hashCode are not overridden: Java's toString of one of these is a generated
+   record-ish dump that names the class and the flag, which is not a string a
+   program has any use for, and nothing in Java's contract fixes a hash.
+
+   How this file is verified. tests/programs/t175_hexformat.teyru is the same
+   program as the javac 21 program in its .java.ref, whose output is
+   tests/programs/t175_hexformat.expected: the formatting of an empty array, of
+   one byte, of a range that is empty at both ends, of a formatter carrying a
+   delimiter, a prefix, a suffix and uppercase; the parsing of a bare run of
+   digits, of a formatted one in each of those shapes, and of a char[] range;
+   both failure modes of a parse (a character that is not a hexadecimal digit
+   and a length that is not even) with the JDK's own messages; the range
+   failure of a format; and the digit conversions at every width. Every string
+   and every message printed there is the JDK's answer. */
+
+class HexFormat {
+  /* The two digit tables Java builds from the same two string literals; which
+     one a formatter carries is what isUpperCase() reports. */
+  private static final String UPPERCASE_DIGITS = "0123456789ABCDEF"
+  private static final String LOWERCASE_DIGITS = "0123456789abcdef"
+
+  private final String delimiter
+  private final String prefix
+  private final String suffix
+  private final String digits
+
+  private HexFormat(String delimiter, String prefix, String suffix, String digits) {
+    this.delimiter = delimiter
+    this.prefix = prefix
+    this.suffix = suffix
+    this.digits = digits
+  }
+
+  public static HexFormat of() {
+    return new HexFormat("", "", "", LOWERCASE_DIGITS)
+  }
+
+  public static HexFormat ofDelimiter(String delimiter) {
+    if (delimiter == null) {
+      throw new NullPointerException("delimiter")
+    }
+    return new HexFormat(delimiter, "", "", LOWERCASE_DIGITS)
+  }
+
+  public HexFormat withDelimiter(String delimiter) {
+    if (delimiter == null) {
+      throw new NullPointerException("delimiter")
+    }
+    return new HexFormat(delimiter, this.prefix, this.suffix, digits)
+  }
+
+  public HexFormat withPrefix(String prefix) {
+    if (prefix == null) {
+      throw new NullPointerException("prefix")
+    }
+    return new HexFormat(this.delimiter, prefix, this.suffix, digits)
+  }
+
+  public HexFormat withSuffix(String suffix) {
+    if (suffix == null) {
+      throw new NullPointerException("suffix")
+    }
+    return new HexFormat(this.delimiter, this.prefix, suffix, digits)
+  }
+
+  public HexFormat withUpperCase() {
+    return new HexFormat(delimiter, prefix, suffix, UPPERCASE_DIGITS)
+  }
+
+  public HexFormat withLowerCase() {
+    return new HexFormat(delimiter, prefix, suffix, LOWERCASE_DIGITS)
+  }
+
+  public boolean isUpperCase() {
+    return digits.equals(UPPERCASE_DIGITS)
+  }
+
+  public String delimiter() {
+    return delimiter
+  }
+  public String prefix() {
+    return prefix
+  }
+  public String suffix() {
+    return suffix
+  }
+
+  /* ------------------------------------------------------------ formatting */
+
+  public String formatHex(byte[] bytes) {
+    return formatHex(bytes, 0, bytes.length)
+  }
+
+  public String formatHex(byte[] bytes, int fromIndex, int toIndex) {
+    if (bytes == null) {
+      throw new NullPointerException("bytes")
+    }
+    if (fromIndex < 0 || toIndex < 0 || fromIndex > toIndex || toIndex > bytes.length) {
+      throw new IndexOutOfBoundsException("Range [" + fromIndex + ", " + toIndex +
+        ") out of bounds for length " + bytes.length)
+    }
+    StringBuilder out = new StringBuilder()
+    for (int i = fromIndex : i < toIndex : i++) {
+      if (i > fromIndex) {
+        out.append(delimiter)
+      }
+      out.append(prefix)
+      out.append(digit(digits, (bytes[i] >> 4) & 0xF))
+      out.append(digit(digits, bytes[i] & 0xF))
+      out.append(suffix)
+    }
+    return out.toString()
+  }
+
+  /* --------------------------------------------------------------- parsing */
+
+  /* A formatter with no delimiter, prefix or suffix reads a bare run of digits,
+     and that is the only shape whose length is fixed; anything else is a
+     sequence of `prefix + two digits + suffix` joined by the delimiter, which
+     is what the stride test below measures. Both of Java's failure modes for a
+     shaped string are here, message for message:
+     IllegalArgumentException for a length that does not divide into that
+     pattern, and NumberFormatException, from fromHexDigit, for a character that
+     is not a digit at all. */
+  public byte[] parseHex(String string) {
+    if (string == null) {
+      throw new NullPointerException("string")
+    }
+    if (string.length() == 0) {
+      return new byte[0]
+    }
+    if (delimiter.length() == 0 && prefix.length() == 0 && suffix.length() == 0) {
+      return parseNoDelimiter(string)
+    }
+    int valueChars = prefix.length() + 2 + suffix.length()
+    int stride = valueChars + delimiter.length()
+    if ((string.length() - valueChars) % stride != 0) {
+      throw new IllegalArgumentException("extra or missing delimiters " +
+        "or values consisting of prefix, two hexadecimal digits, and suffix")
+    }
+    checkLiteral(string, 0, prefix)
+    checkLiteral(string, string.length() - suffix.length(), suffix)
+    String between = suffix + delimiter + prefix
+    int len = (string.length() - valueChars) / stride + 1
+    byte[] bytes = new byte[len]
+    int offset = prefix.length()
+    for (int i = 0 : i < len : i++) {
+      bytes[i] = (byte) fromHexDigits(string, offset)
+      if (i < len - 1) {
+        checkLiteral(string, offset + 2, between)
+        offset = offset + 2 + between.length()
+      }
+    }
+    return bytes
+  }
+
+  public byte[] parseHex(char[] chars, int fromIndex, int toIndex) {
+    if (chars == null) {
+      throw new NullPointerException("chars")
+    }
+    if (fromIndex < 0 || toIndex < 0 || fromIndex > toIndex || toIndex > chars.length) {
+      throw new IndexOutOfBoundsException("Range [" + fromIndex + ", " + toIndex +
+        ") out of bounds for length " + chars.length)
+    }
+    StringBuilder sb = new StringBuilder()
+    for (int i = fromIndex : i < toIndex : i++) {
+      sb.append(chars[i])
+    }
+    return parseHex(sb.toString())
+  }
+
+  private byte[] parseNoDelimiter(String string) {
+    if ((string.length() & 1) != 0) {
+      throw new IllegalArgumentException("string length not even: " + string.length())
+    }
+    byte[] bytes = new byte[string.length() / 2]
+    for (int i = 0 : i < bytes.length : i++) {
+      bytes[i] = (byte) fromHexDigits(string, i * 2)
+    }
+    return bytes
+  }
+
+  private static int fromHexDigits(String string, int index) {
+    return (HexFormat.fromHexDigit(string.charAt(index)) << 4) |
+           HexFormat.fromHexDigit(string.charAt(index + 1))
+  }
+
+  /* Java's message for a literal that is not where it should be, down to the
+     escaped newlines: a structured parse that finds the wrong prefix, suffix or
+     delimiter says which slice it found, which literal it wanted, where, and
+     which character ended the comparison. */
+  private static void checkLiteral(String string, int index, String literal) {
+    if (literal.length() == 0) {
+      return
+    }
+    if (literal.length() == 1 && literal.charAt(0) == string.charAt(index)) {
+      return
+    }
+    for (int i = 0 : i < literal.length() : i++) {
+      if (string.charAt(index + i) != literal.charAt(i)) {
+        throw new IllegalArgumentException(escapeNL("found: \"" +
+          string.substring(index, index + literal.length()) +
+          "\", expected: \"" + literal + "\", index: " + index +
+          " ch: " + (int) string.charAt(index + i)))
+      }
+    }
+  }
+
+  private static String escapeNL(String string) {
+    return string.replace("\n", "\\n").replace("\r", "\\r")
+  }
+
+  /* ------------------------------------------------------------ the digits */
+
+  public static boolean isHexDigit(int ch) {
+    return (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'F') || (ch >= 'a' && ch <= 'f')
+  }
+
+  public static int fromHexDigit(int ch) {
+    if (ch >= '0' && ch <= '9') {
+      return ch - '0'
+    }
+    if (ch >= 'A' && ch <= 'F') {
+      return ch - 'A' + 10
+    }
+    if (ch >= 'a' && ch <= 'f') {
+      return ch - 'a' + 10
+    }
+    throw new NumberFormatException("not a hexadecimal digit: \"" + (char) ch + "\" = " + ch)
+  }
+
+  private static char digit(String table, int value) {
+    return table.charAt(value & 0xF)
+  }
+
+  public char toHighHexDigit(int value) {
+    return digit(digits, value >> 4)
+  }
+
+  public char toLowHexDigit(int value) {
+    return digit(digits, value)
+  }
+
+  public String toHexDigits(byte value) {
+    return toHexDigits(value, 2)
+  }
+  public String toHexDigits(short value) {
+    return toHexDigits(value, 4)
+  }
+  public String toHexDigits(char value) {
+    return toHexDigits(value, 4)
+  }
+  public String toHexDigits(int value) {
+    return toHexDigits(value, 8)
+  }
+  public String toHexDigits(long value) {
+    return toHexDigits(value, 16)
+  }
+
+  /* Java's own two-argument form: the low `digits` hexadecimal digits of the
+     value, which is why the width of the overloads above is the whole of their
+     difference -- the value is taken as a bit pattern and never as a number. */
+  public String toHexDigits(long value, int digits) {
+    if (digits < 0 || digits > 16) {
+      throw new IllegalArgumentException("number of digits: " + digits)
+    }
+    if (digits == 0) {
+      return ""
+    }
+    StringBuilder out = new StringBuilder()
+    for (int i = digits - 1 : i >= 0 : i--) {
+      out.append(digit(this.digits, (int) (value >>> (4 * i))))
+    }
+    return out.toString()
+  }
+}

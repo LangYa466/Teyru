@@ -1,0 +1,282 @@
+package teyru
+
+/* java.util's remaining odds: what a program expects from java.util and this
+ * library did not have yet.
+ *
+ * Most of the list is already in the library, and the answer is a pointer and
+ * not a second implementation -- a second UUID would be two answers to "what is
+ * this identifier", which is the one thing a UUID may never have:
+ *
+ *   - UUID is lib/25_util_misc.teyru's: randomUUID (drawn from that file's
+ *     Random, so the bits are uniform but not unpredictable -- documented
+ *     there), fromString, getMostSignificantBits, getLeastSignificantBits,
+ *     version, variant, toString, equals, hashCode and compareTo.
+ *   - Optional and StringJoiner are lib/14_util_objects.teyru's: Optional with
+ *     Java's contract (of/ofNullable/empty/get/isPresent/filter/map/flatMap/
+ *     or/orElse/orElseGet/orElseThrow/equals/hashCode/toString), StringJoiner
+ *     with delimiter, prefix, suffix, add, merge, setEmptyValue, length and
+ *     toString.
+ *   - Properties-lite is lib/33_spring.teyru's PropertiesFile: `key=value`
+ *     lines, `#` and `!` comments, blank lines, and no continuations, escapes or
+ *     unicode escapes -- which is what it says it is.
+ *
+ * What was missing is in this file: Scanner and the exception it throws. */
+
+/* java.util.InputMismatchException: there was a token and it was not a number.
+   It extends NoSuchElementException, as Java's does, so a caller that only
+   cares that nothing usable was there can catch the supertype. */
+class InputMismatchException extends NoSuchElementException {
+  public InputMismatchException() {
+  }
+  public InputMismatchException(String message) {
+    super(message)
+  }
+}
+
+/* java.util.Scanner over a String, cut down to reading fields out of a line of
+ * text.
+ *
+ * Tokenisation is Java's: the default delimiter is \p{javaWhitespace}+, so a
+ * token is a maximal run of non-whitespace and the delimiter a read stops at is
+ * not consumed. nextLine() is where that shows, and it is the call that trips
+ * people up: it returns the rest of the current line from wherever the position
+ * is, so after nextInt() on "42 hello" the next nextLine() is " hello", space
+ * and all, and not "hello".
+ *
+ * The hasNext/next pairs share the position the way Java's do: hasNextX looks at
+ * the token and leaves the position alone, nextX takes it, and nextX is the one
+ * that throws -- NoSuchElementException when there is no token at all,
+ * InputMismatchException when there is one and it does not parse. A nextX that
+ * threw leaves the buffer exactly where it was, so the token that did not parse
+ * is still there for a next(); without that, `catch (InputMismatchException e) {
+ * in.next() }` -- the only way to skip a field that is not a number -- would
+ * have nothing left to skip.
+ *
+ * The numeric tests are the parse itself and not a regular expression: a token
+ * is an int here when Integer.parseInt accepts it, a long when Long.parseLong
+ * does, a double when Double.parseDouble does. Java matches the token against a
+ * pattern first and then parses it; on the tokens a program actually feeds a
+ * scanner -- an optional sign, decimal digits, an exponent, the words NaN and
+ * Infinity -- the two answers agree, including the overflow case, where both
+ * answer no to hasNextInt and refuse nextInt. They can differ only on spellings
+ * that one side accepts and the other does not, and that is said here rather
+ * than papered over: the tests in tests/programs compare this class against
+ * javac's Scanner line for line, and every case they contain was checked
+ * against javac before it was written down.
+ *
+ * What is not here: useDelimiter, the radix overloads of the numeric methods,
+ * nextShort/nextFloat/nextBigInteger, the hasNext(Pattern)/findInLine/
+ * findWithinHorizon family, locale-sensitive number formats, and a constructor
+ * from a stream (a console program has the prelude's InputStream.readln(), and
+ * a String is what this class reads). close() is Java's: the scanner is marked
+ * closed and every method after that throws IllegalStateException("Scanner
+ * closed"). */
+class Scanner extends Object implements AutoCloseable {
+  private final String input
+  private int pos = 0
+  private boolean closed = false
+
+  public Scanner(String source) {
+    if (source == null) {
+      throw new NullPointerException("source")
+    }
+    this.input = source
+  }
+
+  /* \p{javaWhitespace} for the bytes this reads: the six ASCII whitespace
+     characters and the four control separators Character.isWhitespace also
+     counts. A character above them is not whitespace here, and that is the
+     honest answer for a byte-oriented string: a Teyru char is one byte of
+     UTF-8, so this is a test on bytes and never a Unicode property lookup. */
+  private static boolean isWhitespace(int c) {
+    if (c == 32 || c == 9 || c == 10 || c == 11 || c == 12 || c == 13) {
+      return true
+    }
+    return c >= 0x1C && c <= 0x1F
+  }
+
+  private void requireOpen() {
+    if (closed) {
+      throw new IllegalStateException("Scanner closed")
+    }
+  }
+
+  private void skipDelimiters() {
+    while (pos < input.length() && isWhitespace(input.charAt(pos) & 255)) {
+      pos = pos + 1
+    }
+  }
+
+  /* The next token with the position moved past it, or null with the position
+     left at the end. The delimiter that follows the token is not consumed, which
+     is what makes nextLine() after a token read return the rest of the line. */
+  private String take() {
+    skipDelimiters()
+    if (pos >= input.length()) {
+      return null
+    }
+    int start = pos
+    while (pos < input.length() && !isWhitespace(input.charAt(pos) & 255)) {
+      pos = pos + 1
+    }
+    return input.substring(start, pos)
+  }
+
+  /* The token without taking it. Java reaches for a save/restore pair for the
+     same reason: `while (sc.hasNextInt()) sc.nextInt()` is the loop the pair
+     exists for, and it only works if asking does not consume. */
+  private String peek() {
+    int save = pos
+    String token = take()
+    pos = save
+    return token
+  }
+
+  public boolean hasNext() {
+    requireOpen()
+    return peek() != null
+  }
+
+  public String next() {
+    requireOpen()
+    String token = take()
+    if (token == null) {
+      throw new NoSuchElementException()
+    }
+    return token
+  }
+
+  public boolean hasNextInt() {
+    requireOpen()
+    String token = peek()
+    return token != null && parsesInt(token)
+  }
+
+  public int nextInt() {
+    requireOpen()
+    int save = pos
+    String token = take()
+    if (token == null) {
+      throw new NoSuchElementException()
+    }
+    try {
+      return Integer.parseInt(token)
+    } catch (NumberFormatException e) {
+      pos = save
+      throw new InputMismatchException()
+    }
+  }
+
+  public boolean hasNextLong() {
+    requireOpen()
+    String token = peek()
+    return token != null && parsesLong(token)
+  }
+
+  public long nextLong() {
+    requireOpen()
+    int save = pos
+    String token = take()
+    if (token == null) {
+      throw new NoSuchElementException()
+    }
+    try {
+      return Long.parseLong(token)
+    } catch (NumberFormatException e) {
+      pos = save
+      throw new InputMismatchException()
+    }
+  }
+
+  public boolean hasNextDouble() {
+    requireOpen()
+    String token = peek()
+    return token != null && parsesDouble(token)
+  }
+
+  public double nextDouble() {
+    requireOpen()
+    int save = pos
+    String token = take()
+    if (token == null) {
+      throw new NoSuchElementException()
+    }
+    try {
+      return Double.parseDouble(token)
+    } catch (NumberFormatException e) {
+      pos = save
+      throw new InputMismatchException()
+    }
+  }
+
+  /* Java's hasNextLine is "is there a line here", and a line here is anything
+     left at all: at the end of the input there is none, and a position on a
+     separator is one empty line -- which is why this is not hasNext(). */
+  public boolean hasNextLine() {
+    requireOpen()
+    return pos < input.length()
+  }
+
+  /* The rest of the current line, terminator and all consumed; the separators
+     are LF, CRLF and a lone CR, as java.io's readers and this library's
+     LineScanner read them. U+2028, U+2029 and U+0085 are line separators to
+     Java's Scanner and are not treated as ones here: in a UTF-8 string they are
+     two-byte sequences, and a byte-oriented reader that split on them would be
+     splitting on bytes that also occur inside other characters. */
+  public String nextLine() {
+    requireOpen()
+    if (pos >= input.length()) {
+      throw new NoSuchElementException("No line found")
+    }
+    int start = pos
+    while (pos < input.length()) {
+      int c = input.charAt(pos) & 255
+      if (c == 10) {
+        String line = input.substring(start, pos)
+        pos = pos + 1
+        return line
+      }
+      if (c == 13) {
+        String line = input.substring(start, pos)
+        pos = pos + 1
+        if (pos < input.length() && (input.charAt(pos) & 255) == 10) {
+          pos = pos + 1
+        }
+        return line
+      }
+      pos = pos + 1
+    }
+    return input.substring(start, pos)
+  }
+
+  public void close() {
+    closed = true
+  }
+
+  private static boolean parsesInt(String token) {
+    try {
+      Integer.parseInt(token)
+      return true
+    } catch (NumberFormatException e) {
+      return false
+    }
+  }
+
+  private static boolean parsesLong(String token) {
+    try {
+      Long.parseLong(token)
+      return true
+    } catch (NumberFormatException e) {
+      return false
+    }
+  }
+
+  private static boolean parsesDouble(String token) {
+    try {
+      Double.parseDouble(token)
+      return true
+    } catch (NumberFormatException e) {
+      return false
+    }
+  }
+}
