@@ -1615,6 +1615,16 @@ type fb struct {
 	n    int
 
 	locals        map[*ast.Var]string
+	// slots are the function's own stack slots. Once a try statement has opened
+	// a frame in this function, every access to one of them is volatile: a
+	// setjmp's second return can arrive with the memory of the frame but not
+	// with whatever the optimiser kept in a register or proved dead, and C's own
+	// rule for a local changed between setjmp and longjmp is exactly this.
+	// Without it a local assigned inside a try and read in its catch reads the
+	// value it had at the setjmp, which is what a wrong answer at -O1 and above
+	// looked like.
+	slots    map[string]bool
+	volatile bool
 	swType        map[string]ast.Type
 	retT          ast.Type
 	loops         []loopFrame
@@ -1650,6 +1660,7 @@ func newFB(e *llvmEmitter, m *ast.Method, ret string) *fb {
 		fn:     m,
 		ret:    ret,
 		locals: map[*ast.Var]string{},
+		slots:  map[string]bool{},
 		swType: map[string]ast.Type{},
 		labels: map[string]int{},
 	}
@@ -1729,6 +1740,7 @@ func (f *fb) localSlot(v *ast.Var) string {
 	slot := fmt.Sprintf("%%v%d_%s", v.ID, util.Mangle(v.Name))
 	fmt.Fprintf(&f.head, "  %s = alloca %s, align %d\n", slot, f.e.llvmType(v.Type), alignOf(v.Type, f.e))
 	f.locals[v] = slot
+	f.slots[slot] = true
 	return slot
 }
 
@@ -1740,6 +1752,7 @@ func (f *fb) tempSlot(t ast.Type, name string) string {
 	slot := fmt.Sprintf("%%s%d_%s", f.n, util.Mangle(name))
 	f.swType[slot] = t
 	fmt.Fprintf(&f.head, "  %s = alloca %s, align %d\n", slot, f.e.llvmType(t), alignOf(t, f.e))
+	f.slots[slot] = true
 	return slot
 }
 
