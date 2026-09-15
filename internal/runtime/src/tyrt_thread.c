@@ -1,4 +1,3 @@
-#define _GNU_SOURCE 1
 /* tyrt_thread.c - threads, monitors and the stop-the-world protocol.
  *
  * This file is what makes the runtime multi-threaded. It owns four things, and
@@ -65,12 +64,12 @@
  * begins with __builtin_unwind_init(), which makes the compiler spill the
  * callee-saved registers into the frame that is about to stop, above the point
  * the thread records, where the scan finds them. The one place this cannot reach
- * is the frame of the function that blocks *inside libc* (pthread_cond_wait,
- * nanosleep): its saves are below the recorded point, so the collector starts
- * its scan a fixed margin lower (TY_PARK_MARGIN in tyrt.c), scanning a few
- * hundred extra bytes conservatively. Everything the runtime itself holds across
- * such a wait it holds on its shadow stack, which is exact and needs none of
- * this.
+ * is the frame of the function that blocks *inside the platform layer*
+ * (typlat_cond_wait, typlat_sleep_ns): its saves are below the recorded point,
+ * so the collector starts its scan a fixed margin lower (TY_PARK_MARGIN in
+ * tyrt.c), scanning a few hundred extra bytes conservatively. Everything the
+ * runtime itself holds across such a wait it holds on its shadow stack, which is
+ * exact and needs none of this.
  *
  * ---------------------------------------------------------------- monitors
  *
@@ -108,12 +107,9 @@
 
 #include "tyrt.h"
 
-#include <errno.h>
-#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
-#include <unistd.h>
+#include <string.h>
 
 /* ------------------------------------------------------------------- state */
 
@@ -151,8 +147,8 @@ static int32_t n_stopped = 0;
    collection must still be able to take this one. Nothing that runs under the
    heap lock ever takes a monitor, and nothing that runs under this lock takes
    the heap lock, so the two cannot deadlock against each other. */
-static pthread_mutex_t world_mtx = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t world_cv = PTHREAD_COND_INITIALIZER;
+static typlat_mutex world_mtx = TYPLAT_MUTEX_INITIALIZER;
+static typlat_cond world_cv = TYPLAT_COND_INITIALIZER;
 
 int32_t ty_stw_request = 0;
 
@@ -192,7 +188,7 @@ static void park_point(char *anchor) {
 /* Take the calling thread out of the set a collection waits for. Called before
    the wait, never after: a thread is stopped from the moment it says so. */
 static void stopped_begin(int32_t kind) {
-  pthread_mutex_lock(&world_mtx);
+  typlat_mutex_lock(&world_mtx);
   if (ty_self->stop_depth == 0 && ty_self->state == TY_TH_RUNNING) {
     ty_self->state = kind;
     n_stopped++;
@@ -203,8 +199,8 @@ static void stopped_begin(int32_t kind) {
      under this lock, so its first check sees this stop anyway. Waking every
      monitor wait's stop instead costs a broadcast per synchronized block that
      has to wait, which is most of what a contended program does. */
-  if (__atomic_load_n(&ty_stw_request, __ATOMIC_ACQUIRE)) pthread_cond_broadcast(&world_cv);
-  pthread_mutex_unlock(&world_mtx);
+  if (__atomic_load_n(&ty_stw_request, __ATOMIC_ACQUIRE)) typlat_cond_broadcast(&world_cv);
+  typlat_mutex_unlock(&world_mtx);
 }
 
 /* Put it back, once it may run again. A collection that started while the thread
@@ -212,16 +208,16 @@ static void stopped_begin(int32_t kind) {
    still while the collector scans it: the request is cleared only after the
    scan, the trace and the sweep are over. */
 static void stopped_end(void) {
-  pthread_mutex_lock(&world_mtx);
+  typlat_mutex_lock(&world_mtx);
   if (--ty_self->stop_depth == 0 && ty_self->state != TY_TH_RUNNING &&
       ty_self->state != TY_TH_DONE) {
     while (__atomic_load_n(&ty_stw_request, __ATOMIC_ACQUIRE)) {
-      pthread_cond_wait(&world_cv, &world_mtx);
+      typlat_cond_wait(&world_cv, &world_mtx);
     }
     ty_self->state = TY_TH_RUNNING;
     n_stopped--;
   }
-  pthread_mutex_unlock(&world_mtx);
+  typlat_mutex_unlock(&world_mtx);
 }
 
 void ty_thread_stopped_begin(void) {
@@ -240,29 +236,29 @@ void ty_safepoint_slow(void) {
 }
 
 void ty_gc_stop_world(void) {
-  pthread_mutex_lock(&world_mtx);
+  typlat_mutex_lock(&world_mtx);
   /* A collection started from a thread that is itself stopped (it holds the heap
      lock, which counts as stopped) must not count itself among the threads it is
      waiting for. */
   int32_t was_stopped = ty_self->state != TY_TH_RUNNING;
   if (was_stopped) n_stopped--;
   __atomic_store_n(&ty_stw_request, 1, __ATOMIC_RELEASE);
-  pthread_cond_broadcast(&world_cv);
+  typlat_cond_broadcast(&world_cv);
   while (n_stopped < n_live - 1) {
-    pthread_cond_wait(&world_cv, &world_mtx);
+    typlat_cond_wait(&world_cv, &world_mtx);
   }
-  pthread_mutex_unlock(&world_mtx);
+  typlat_mutex_unlock(&world_mtx);
   /* The world stays stopped without this lock being held: every other thread is
      inside a stop point waiting for the request to clear. */
   ty_self->was_stopped_for_gc = was_stopped;
 }
 
 void ty_gc_resume_world(void) {
-  pthread_mutex_lock(&world_mtx);
+  typlat_mutex_lock(&world_mtx);
   if (ty_self->was_stopped_for_gc) n_stopped++;
   __atomic_store_n(&ty_stw_request, 0, __ATOMIC_RELEASE);
-  pthread_cond_broadcast(&world_cv);
-  pthread_mutex_unlock(&world_mtx);
+  typlat_cond_broadcast(&world_cv);
+  typlat_mutex_unlock(&world_mtx);
 }
 
 /* --------------------------------------------------------------- the registry */
@@ -275,23 +271,23 @@ tythread *ty_thread_list(void) {
    published, and readers walk the list with an acquire load, so the list can be
    walked without the lock -- which is what the collector does. */
 static void registry_add(tythread *t) {
-  pthread_mutex_lock(&world_mtx);
+  typlat_mutex_lock(&world_mtx);
   t->next = __atomic_load_n(&threads, __ATOMIC_RELAXED);
   __atomic_store_n(&threads, t, __ATOMIC_RELEASE);
   n_live++;
-  pthread_mutex_unlock(&world_mtx);
+  typlat_mutex_unlock(&world_mtx);
 }
 
 /* The thread is finished: it is no longer running, no longer stopped, and no
    longer of interest to a collection. Announced on world_cv because joining is
    waiting on n_live. */
 static void registry_finish(tythread *t) {
-  pthread_mutex_lock(&world_mtx);
+  typlat_mutex_lock(&world_mtx);
   if (t->state != TY_TH_RUNNING && t->state != TY_TH_DONE) n_stopped--;
   t->state = TY_TH_DONE;
   n_live--;
-  pthread_cond_broadcast(&world_cv);
-  pthread_mutex_unlock(&world_mtx);
+  typlat_cond_broadcast(&world_cv);
+  typlat_mutex_unlock(&world_mtx);
 }
 
 static tythread *registry_find(int64_t id) {
@@ -302,38 +298,29 @@ static tythread *registry_find(int64_t id) {
 }
 
 void ty_thread_init(void) {
-  main_thread.tid = pthread_self();
+  main_thread.tid = typlat_thread_self();
   /* The main thread's stack bounds are what ty_gc_init used to read for the one
      thread there was; they are now part of the thread's state, because a
      collection scans a different stack for every thread. */
-  pthread_attr_t attr;
-  if (pthread_getattr_np(pthread_self(), &attr) == 0) {
-    void *base = NULL;
-    size_t size = 0;
-    if (pthread_attr_getstack(&attr, &base, &size) == 0) {
-      main_thread.stack_base = (char *)base;
-      main_thread.stack_top = (char *)base + size;
-    }
-    pthread_attr_destroy(&attr);
-  }
+  typlat_thread_stack_bounds(&main_thread.stack_base, &main_thread.stack_top);
   registry_add(&main_thread);
 }
 
 /* ------------------------------------------------------------------ threads */
 
-/* What pthread_create is handed: the thread's registry entry, and the function
-   the caller wanted run on it. */
+/* What typlat_thread_begin is handed: the thread's registry entry, and the
+   function the caller wanted run on it. */
 typedef struct {
   tythread *t;
   void *(*fn)(void *);
   void *arg;
 } spawn_packet;
 
-/* The body of a spawned thread. pthread_create cannot be given the same function
-   as the documented entry point, because the entry point is handed the caller's
-   argument and this one has to be handed the runtime's bookkeeping: the packet
-   is freed here, so that nothing the new thread runs touches memory the spawner
-   owns. */
+/* The body of a spawned thread. typlat_thread_begin cannot be given the same
+   function as the documented entry point, because the entry point is handed the
+   caller's argument and this one has to be handed the runtime's bookkeeping: the
+   packet is freed here, so that nothing the new thread runs touches memory the
+   spawner owns. */
 static void *thread_trampoline(void *p) {
   spawn_packet k = *(spawn_packet *)p;
   free(p);
@@ -349,7 +336,7 @@ void *ty_thread_start(void *(*fn)(void *), void *arg) {
   t->roots = (void **)malloc(TY_SHADOW_THREAD * sizeof(void *));
   if (!t->roots) abort();
   t->sp = 0;
-  t->tid = pthread_self();
+  t->tid = typlat_thread_self();
   t->state = TY_TH_RUNNING;
   t->stop_depth = 0;
   t->park_sp = NULL;
@@ -364,16 +351,7 @@ void *ty_thread_start(void *(*fn)(void *), void *arg) {
      that the collector can scan the whole of it, and stop once, so that a
      collection already in progress does not start tracing while this thread is
      still setting itself up. */
-  pthread_attr_t attr;
-  if (pthread_getattr_np(pthread_self(), &attr) == 0) {
-    void *base = NULL;
-    size_t size = 0;
-    if (pthread_attr_getstack(&attr, &base, &size) == 0) {
-      t->stack_base = (char *)base;
-      t->stack_top = (char *)base + size;
-    }
-    pthread_attr_destroy(&attr);
-  }
+  typlat_thread_stack_bounds(&t->stack_base, &t->stack_top);
   ty_safepoint();
 
   /* An exception that leaves run() is this thread's business, not the
@@ -407,10 +385,10 @@ void *ty_thread_start(void *(*fn)(void *), void *arg) {
   t->roots = NULL;
   /* Ring the joiner without holding the world lock: join() wakes on this, and
      the entry it wakes on is not part of the world protocol. */
-  pthread_mutex_lock(&t->mtx);
+  typlat_mutex_lock(&t->mtx);
   t->finished = 1;
-  pthread_cond_broadcast(&t->cv);
-  pthread_mutex_unlock(&t->mtx);
+  typlat_cond_broadcast(&t->cv);
+  typlat_mutex_unlock(&t->mtx);
   return NULL;
 }
 
@@ -418,8 +396,8 @@ int64_t ty_thread_spawn(void *(*fn)(void *), void *arg, void *obj, int64_t id, t
   tythread *t = (tythread *)calloc(1, sizeof(tythread));
   spawn_packet *k = (spawn_packet *)malloc(sizeof(spawn_packet));
   if (!t || !k) abort();
-  pthread_mutex_init(&t->mtx, NULL);
-  pthread_cond_init(&t->cv, NULL);
+  typlat_mutex_init(&t->mtx);
+  typlat_cond_init(&t->cv);
   t->id = id;
   t->obj = obj;
   t->name = name;
@@ -437,11 +415,7 @@ int64_t ty_thread_spawn(void *(*fn)(void *), void *arg, void *obj, int64_t id, t
   /* A detached thread releases its own stack when it returns: nothing in the
      language waits for a thread to leave the operating system, and one that is
      never joined must not keep its stack until the program ends. */
-  pthread_attr_t attr;
-  pthread_attr_init(&attr);
-  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-  int err = pthread_create(&t->tid, &attr, thread_trampoline, k);
-  pthread_attr_destroy(&attr);
+  int err = typlat_thread_begin(&t->tid, thread_trampoline, k);
   if (err != 0) {
     /* A thread that cannot be created is a failure the program has to see: a
        Thread object whose start() silently did nothing would leave isAlive()
@@ -459,9 +433,9 @@ int64_t ty_thread_spawn(void *(*fn)(void *), void *arg, void *obj, int64_t id, t
 
 int64_t ty_thread_next_id(void) {
   int64_t id;
-  pthread_mutex_lock(&world_mtx);
+  typlat_mutex_lock(&world_mtx);
   id = ++thread_seq;
-  pthread_mutex_unlock(&world_mtx);
+  typlat_mutex_unlock(&world_mtx);
   return id;
 }
 
@@ -470,9 +444,9 @@ void ty_thread_join(int64_t id) {
   if (!t) return; /* never started: java.lang.Thread.join returns at once */
   TY_PARK_BEGIN();
   stopped_begin(TY_TH_BLOCKED);
-  pthread_mutex_lock(&t->mtx);
-  while (!t->finished) pthread_cond_wait(&t->cv, &t->mtx);
-  pthread_mutex_unlock(&t->mtx);
+  typlat_mutex_lock(&t->mtx);
+  while (!t->finished) typlat_cond_wait(&t->cv, &t->mtx);
+  typlat_mutex_unlock(&t->mtx);
   stopped_end();
 }
 
@@ -489,16 +463,12 @@ void ty_thread_sleep_ms(int64_t millis) {
     ty_thread_yield();
     return;
   }
-  struct timespec ts;
-  ts.tv_sec = (time_t)(millis / 1000);
-  ts.tv_nsec = (long)((millis % 1000) * 1000000);
   TY_PARK_BEGIN();
   stopped_begin(TY_TH_BLOCKED);
-  /* nanosleep, not sleep: a millisecond argument is normal here, and a signal
-     in the middle restarts the wait rather than truncating it, which is what
-     Java's Thread.sleep promises. */
-  while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
-  }
+  /* The wait itself is the platform layer's: a millisecond argument is normal
+     here, and the whole duration is what Java's Thread.sleep promises, so the
+     layer restarts it after a signal rather than truncating it. */
+  typlat_sleep_ns(millis * 1000000);
   stopped_end();
 }
 
@@ -507,7 +477,7 @@ int64_t ty_thread_current_id(void) { return ty_self->id; }
 void ty_thread_yield(void) {
   /* A yield is a good place to notice a collection, and it costs a load. */
   ty_safepoint();
-  sched_yield();
+  typlat_yield();
 }
 
 void *ty_thread_current_obj(void) { return ty_self->obj; }
@@ -517,11 +487,11 @@ void ty_thread_bind(void *obj) { ty_self->obj = obj; }
 void ty_thread_join_all(void) {
   TY_PARK_BEGIN();
   stopped_begin(TY_TH_BLOCKED);
-  pthread_mutex_lock(&world_mtx);
+  typlat_mutex_lock(&world_mtx);
   /* Every thread but this one. A thread that is started while this waits is
      counted when it is registered, so the condition covers it too. */
-  while (n_live > 1) pthread_cond_wait(&world_cv, &world_mtx);
-  pthread_mutex_unlock(&world_mtx);
+  while (n_live > 1) typlat_cond_wait(&world_cv, &world_mtx);
+  typlat_mutex_unlock(&world_mtx);
   stopped_end();
 }
 
@@ -561,7 +531,7 @@ int64_t ty_thread_start0(void *obj, int64_t id, tystr *name, int32_t sel) {
 
 typedef struct tymon {
   void *key; /* the object, never NULL for a live entry */
-  pthread_mutex_t mtx;
+  typlat_mutex mtx;
   /* Two condition variables, because the entry has two different sets of
      sleepers and one variable cannot tell them apart. cv carries "the monitor
      is free": everybody waiting to enter it, and everybody that gave it up in
@@ -575,9 +545,9 @@ typedef struct tymon {
      thread the notification was for was never woken -- and a notification is
      not repeated, so a program that hands a value over with notify() and then
      waits with no timeout never ran again. */
-  pthread_cond_t cv;
-  pthread_cond_t wcv;
-  pthread_t owner;
+  typlat_cond cv;
+  typlat_cond wcv;
+  typlat_thread owner;
   int32_t owned;
   int32_t count;   /* recursion depth */
   int32_t waiters; /* threads inside wait() */
@@ -610,15 +580,14 @@ static uint32_t mon_bucket(void *obj) {
 static tymon *mon_make(void *obj) {
   tymon *m = (tymon *)calloc(1, sizeof(tymon));
   if (!m) abort();
-  pthread_mutex_init(&m->mtx, NULL);
-  pthread_condattr_t ca;
-  pthread_condattr_init(&ca);
+  typlat_mutex_init(&m->mtx);
   /* Java's wait has a relative timeout, and a relative timeout needs a clock
-     that does not jump: ty_nanos (tyrt2.c) reads the same one. */
-  pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
-  pthread_cond_init(&m->cv, &ca);
-  pthread_cond_init(&m->wcv, &ca);
-  pthread_condattr_destroy(&ca);
+     that does not jump. Which clock these two variables are built on is the
+     platform layer's answer, and the layer is also what converts the duration
+     below into a deadline on it -- on Windows that is not the monotonic clock
+     at all. */
+  typlat_cond_init(&m->cv);
+  typlat_cond_init(&m->wcv);
   m->key = obj;
   return m;
 }
@@ -659,50 +628,50 @@ static tymon *mon_get(void *obj) {
     }
     /* Somebody inserted an entry -- for this object or any other -- first: use
        the list as it is now. Nothing has seen this one, so it can go. */
-    pthread_mutex_destroy(&m->mtx);
-    pthread_cond_destroy(&m->cv);
-    pthread_cond_destroy(&m->wcv);
+    typlat_mutex_destroy(&m->mtx);
+    typlat_cond_destroy(&m->cv);
+    typlat_cond_destroy(&m->wcv);
     free(m);
   }
 }
 
 void ty_sync_enter(void *obj) {
   tymon *m = mon_get(obj);
-  pthread_mutex_lock(&m->mtx);
-  while (m->owned && !pthread_equal(m->owner, pthread_self())) {
+  typlat_mutex_lock(&m->mtx);
+  while (m->owned && !typlat_thread_same(m->owner, typlat_thread_self())) {
     /* Waiting for a monitor is waiting: a collection must not wait for this
        thread, and while it is in the wait its stack does not change. */
     ty_thread_stopped_begin();
-    pthread_cond_wait(&m->cv, &m->mtx);
+    typlat_cond_wait(&m->cv, &m->mtx);
     ty_thread_stopped_end();
   }
   m->owned = 1;
-  m->owner = pthread_self();
+  m->owner = typlat_thread_self();
   m->count++;
-  pthread_mutex_unlock(&m->mtx);
+  typlat_mutex_unlock(&m->mtx);
 }
 
 void ty_sync_exit(void *obj) {
   tymon *m = mon_get(obj);
-  pthread_mutex_lock(&m->mtx);
-  if (!m->owned || !pthread_equal(m->owner, pthread_self())) {
-    pthread_mutex_unlock(&m->mtx);
+  typlat_mutex_lock(&m->mtx);
+  if (!m->owned || !typlat_thread_same(m->owner, typlat_thread_self())) {
+    typlat_mutex_unlock(&m->mtx);
     ty_throw(ty_make_ex(TY_ILLMON, "current thread is not owner"));
   }
   if (--m->count == 0) {
     m->owned = 0;
     /* The monitor is free: one waiter may take it. Which one is up to the
        operating system, as it is in Java. */
-    pthread_cond_broadcast(&m->cv);
+    typlat_cond_broadcast(&m->cv);
   }
-  pthread_mutex_unlock(&m->mtx);
+  typlat_mutex_unlock(&m->mtx);
 }
 
 void ty_mon_wait(void *obj, int64_t millis) {
   tymon *m = mon_get(obj);
-  pthread_mutex_lock(&m->mtx);
-  if (!m->owned || !pthread_equal(m->owner, pthread_self())) {
-    pthread_mutex_unlock(&m->mtx);
+  typlat_mutex_lock(&m->mtx);
+  if (!m->owned || !typlat_thread_same(m->owner, typlat_thread_self())) {
+    typlat_mutex_unlock(&m->mtx);
     ty_throw(ty_make_ex(TY_ILLMON, "current thread is not owner"));
   }
   /* wait() gives the monitor up: the notification can only arrive from another
@@ -719,54 +688,52 @@ void ty_mon_wait(void *obj, int64_t millis) {
   /* The monitor is free now, and everybody waiting to enter it -- or to take it
      back after a wait of their own -- has to be told, because that is a
      different wait from this one. */
-  pthread_cond_broadcast(&m->cv);
+  typlat_cond_broadcast(&m->cv);
   /* The object stays a root while this thread waits on it: notify() has to be
      able to find the monitor, and the monitor is keyed by the object's address.
      The root is exact rather than conservative because the runtime holds it in a
      register whose spill the scan of this stopped thread may not reach. */
   TY_ROOT_PUSH(obj);
+  /* The deadline is on the monotonic clock, which is what a duration has to be
+     measured against, and what is handed to the wait below is the part of it
+     that is left. The layer turns that duration into a deadline on whatever
+     clock the condition variable actually uses -- on Linux the same monotonic
+     one, on Windows the wall clock winpthreads insists on -- so the two clocks
+     never have to be reconciled here. */
   int64_t deadline = millis < 0 ? -1 : ty_nanos() + millis * 1000000;
   while (m->notified == mine) {
     if (deadline < 0) {
       ty_thread_stopped_begin();
-      pthread_cond_wait(&m->wcv, &m->mtx);
+      typlat_cond_wait(&m->wcv, &m->mtx);
       ty_thread_stopped_end();
     } else {
-      if (ty_nanos() >= deadline) break;
-      /* pthread_cond_timedwait takes the time to wake at, not the time to wait
-         for: the deadline computed above is already on the clock the condition
-         variable is set to (CLOCK_MONOTONIC, the one ty_nanos reads), so it goes
-         in as it is. Handing it the remaining duration made every wait return
-         at once on a machine whose monotonic clock is past that many
-         nanoseconds since boot. */
-      struct timespec ts;
-      ts.tv_sec = (time_t)(deadline / 1000000000);
-      ts.tv_nsec = (long)(deadline % 1000000000);
+      int64_t left = deadline - ty_nanos();
+      if (left <= 0) break;
       ty_thread_stopped_begin();
-      int rc = pthread_cond_timedwait(&m->wcv, &m->mtx, &ts);
+      int timed_out = typlat_cond_timedwait(&m->wcv, &m->mtx, left);
       ty_thread_stopped_end();
-      if (rc == ETIMEDOUT) break;
+      if (timed_out) break;
     }
   }
   m->waiters--;
   TY_ROOT_POP();
   /* Take the monitor back, exactly as entering it does. */
-  while (m->owned && !pthread_equal(m->owner, pthread_self())) {
+  while (m->owned && !typlat_thread_same(m->owner, typlat_thread_self())) {
     ty_thread_stopped_begin();
-    pthread_cond_wait(&m->cv, &m->mtx);
+    typlat_cond_wait(&m->cv, &m->mtx);
     ty_thread_stopped_end();
   }
   m->owned = 1;
-  m->owner = pthread_self();
+  m->owner = typlat_thread_self();
   m->count = saved;
-  pthread_mutex_unlock(&m->mtx);
+  typlat_mutex_unlock(&m->mtx);
 }
 
 void ty_mon_notify(void *obj) {
   tymon *m = mon_get(obj);
-  pthread_mutex_lock(&m->mtx);
-  if (!m->owned || !pthread_equal(m->owner, pthread_self())) {
-    pthread_mutex_unlock(&m->mtx);
+  typlat_mutex_lock(&m->mtx);
+  if (!m->owned || !typlat_thread_same(m->owner, typlat_thread_self())) {
+    typlat_mutex_unlock(&m->mtx);
     ty_throw(ty_make_ex(TY_ILLMON, "current thread is not owner"));
   }
   /* One notification, and one sleeper on wcv is woken. A notify with nobody
@@ -779,23 +746,23 @@ void ty_mon_notify(void *obj) {
      loop with its condition re-tested. */
   if (m->waiters > 0) {
     m->notified++;
-    pthread_cond_signal(&m->wcv);
+    typlat_cond_signal(&m->wcv);
   }
-  pthread_mutex_unlock(&m->mtx);
+  typlat_mutex_unlock(&m->mtx);
 }
 
 void ty_mon_notify_all(void *obj) {
   tymon *m = mon_get(obj);
-  pthread_mutex_lock(&m->mtx);
-  if (!m->owned || !pthread_equal(m->owner, pthread_self())) {
-    pthread_mutex_unlock(&m->mtx);
+  typlat_mutex_lock(&m->mtx);
+  if (!m->owned || !typlat_thread_same(m->owner, typlat_thread_self())) {
+    typlat_mutex_unlock(&m->mtx);
     ty_throw(ty_make_ex(TY_ILLMON, "current thread is not owner"));
   }
   if (m->waiters > 0) {
     /* Every thread that is waiting now is waiting for the counter as it was
        before this line, so one move of it releases all of them. */
     m->notified++;
-    pthread_cond_broadcast(&m->wcv);
+    typlat_cond_broadcast(&m->wcv);
   }
-  pthread_mutex_unlock(&m->mtx);
+  typlat_mutex_unlock(&m->mtx);
 }

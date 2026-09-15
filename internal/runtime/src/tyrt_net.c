@@ -1,4 +1,4 @@
-/* tyrt_net.c - sockets and files, in POSIX calls and nothing else.
+/* tyrt_net.c - sockets and files.
  *
  * The language has no threads, so none of this is written for concurrency: a
  * descriptor is an int, a server is a loop, and every helper here is a
@@ -29,11 +29,21 @@
  * and the errno that explains the failure, and because a program that answers
  * requests cannot afford a stdio lock. open/read/write/stat/opendir are the
  * whole of it -- no shell, no system(), no path ever reaching a command line.
+ *
+ * Neither half names an operating system. The socket calls below are the
+ * platform layer's (tyrt_plat.h): the BSD calls on POSIX and Winsock on
+ * Windows, with the differences -- a handle rather than a descriptor, a Winsock
+ * error code rather than errno, an ioctl rather than fcntl, a millisecond DWORD
+ * rather than a timeval -- settled inside that layer. The file calls are
+ * POSIX-shaped on both, because mingw's CRT is: what differs is which flags a
+ * binary file needs, how many arguments mkdir takes and where temporary names
+ * go, and those four are layer calls.
  */
 
-#define _GNU_SOURCE /* accept4, MSG_NOSIGNAL: both are Linux's, and this file is
-                       compiled on its own, so the feature macro is its own
-                       business rather than a flag the whole program carries */
+/* Including <winsock2.h> is not free -- it brings <windows.h> and its macros
+   with it -- so the socket half of the platform layer is behind this macro and
+   only this file and the two platform implementations define it. */
+#define TYPLAT_WANT_SOCKETS 1
 
 /* tyrt.h and not tyrt_net.h, which is the header this file has but cannot use.
    The driver copies exactly one networking file into the directory it builds
@@ -45,20 +55,11 @@
    the compiler checks the two agree rather than trusting that they do. */
 #include "tyrt.h"
 
-#include <arpa/inet.h>
 #include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/time.h>
-#include <unistd.h>
 
 /* The largest name getaddrinfo is handed from this file. A host name longer
    than this is not a name any resolver can use. */
@@ -72,6 +73,12 @@
 /* The most of a path this file will build out of a prefix, so that a
    pathological prefix cannot run the template past PATH_MAX. */
 #define TY_PREFIX_MAX 64
+
+/* How long the directory a temporary name is made in may be. A Windows
+   temporary directory is a user profile path and can be long; a path that does
+   not fit is refused by the layer rather than truncated into a different
+   directory. */
+#define TY_TEMP_ROOT_MAX 512
 
 /* The result a read, an accept or a connect gives when it ran out of time. It
    is -EAGAIN because that is what the kernel reports when SO_RCVTIMEO expires
@@ -132,29 +139,28 @@ static void ty_set_err(tyarr *err, int32_t v) {
 
 int32_t ty_net_listen(int32_t port, int32_t backlog, int32_t reuse) {
   if (port < 0 || port > 65535) return -EINVAL;
-  int fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0) return -errno;
+  int32_t fd = typlat_socket_open(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return fd;
   if (reuse) {
-    int on = 1;
     /* A failure here is not fatal: without it the bind may still succeed, and
        refusing to listen because the option was rejected would turn a
        convenience into a requirement. */
-    (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
+    (void)typlat_socket_reuse(fd, 1);
   }
   struct sockaddr_in a;
   memset(&a, 0, sizeof a);
   a.sin_family = AF_INET;
   a.sin_addr.s_addr = htonl(INADDR_ANY);
   a.sin_port = htons((uint16_t)port);
-  if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) {
-    int e = errno;
-    (void)close(fd);
-    return -e;
+  int r = typlat_socket_bind(fd, (const struct sockaddr *)&a, (int)sizeof a);
+  if (r < 0) {
+    (void)typlat_socket_close(fd);
+    return r;
   }
-  if (listen(fd, backlog > 0 ? backlog : TY_BACKLOG_DEFAULT) < 0) {
-    int e = errno;
-    (void)close(fd);
-    return -e;
+  r = typlat_socket_listen(fd, backlog > 0 ? backlog : TY_BACKLOG_DEFAULT);
+  if (r < 0) {
+    (void)typlat_socket_close(fd);
+    return r;
   }
   return fd;
 }
@@ -164,39 +170,34 @@ int32_t ty_net_listen(int32_t port, int32_t backlog, int32_t reuse) {
    turns an unbounded wait in the kernel into a wait this code can bound, and it
    is the only way connect can be given a deadline at all. */
 static int32_t ty_connect_one(const struct addrinfo *r, int32_t timeout_ms) {
-  int fd = socket(r->ai_family, r->ai_socktype, r->ai_protocol);
-  if (fd < 0) return -errno;
-  int flags = fcntl(fd, F_GETFL, 0);
-  if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-    int e = errno;
-    (void)close(fd);
-    return -e;
+  int32_t fd = typlat_socket_open(r->ai_family, r->ai_socktype, r->ai_protocol);
+  if (fd < 0) return fd;
+  int e = typlat_socket_nonblocking(fd, 1);
+  if (e < 0) {
+    (void)typlat_socket_close(fd);
+    return e;
   }
-  if (connect(fd, r->ai_addr, r->ai_addrlen) < 0) {
-    /* EINTR leaves the connect running rather than aborting it, which is why
-       it takes the same path as EINPROGRESS instead of being an error. */
-    if (errno != EINPROGRESS && errno != EINTR) {
-      int e = errno;
-      (void)close(fd);
-      return -e;
+  e = typlat_socket_connect(fd, r->ai_addr, (int)r->ai_addrlen);
+  if (e != 0) {
+    /* -EINPROGRESS is a connect that is running rather than one that failed,
+       and an interrupted connect is one of those: the layer reports both the
+       same way, because a signal does not abort the attempt. */
+    if (e != -EINPROGRESS) {
+      (void)typlat_socket_close(fd);
+      return e;
     }
-    struct pollfd p;
-    p.fd = fd;
-    p.events = POLLOUT;
-    p.revents = 0;
     for (;;) {
-      int pr = poll(&p, 1, timeout_ms < 0 ? -1 : timeout_ms);
+      int pr = typlat_socket_wait(fd, 1, timeout_ms < 0 ? -1 : timeout_ms);
       if (pr < 0) {
-        if (errno == EINTR) continue; /* a signal is not a deadline */
-        int e = errno;
-        (void)close(fd);
-        return -e;
+        if (pr == -EINTR) continue; /* a signal is not a deadline */
+        (void)typlat_socket_close(fd);
+        return pr;
       }
       if (pr == 0) {
         /* The deadline passed with the connection still in flight. The socket
            is closed rather than handed on: a connection that completes later
            would otherwise arrive with nobody waiting for it. */
-        (void)close(fd);
+        (void)typlat_socket_close(fd);
         return TY_NET_TIMEOUT;
       }
       break;
@@ -204,24 +205,18 @@ static int32_t ty_connect_one(const struct addrinfo *r, int32_t timeout_ms) {
     /* Pollable for writing is not the same as connected: the answer is in
        SO_ERROR, which is where the kernel reports a refused or unreachable
        connection that the non-blocking connect could not return directly. */
-    int soerr = 0;
-    socklen_t slen = sizeof soerr;
-    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &slen) < 0) {
-      int e = errno;
-      (void)close(fd);
-      return -e;
-    }
-    if (soerr != 0) {
-      (void)close(fd);
-      return -soerr;
+    e = typlat_socket_connected(fd);
+    if (e < 0) {
+      (void)typlat_socket_close(fd);
+      return e;
     }
   }
   /* Every read and write in this file assumes a blocking socket, so the flag
      goes back the way it was found. */
-  if (fcntl(fd, F_SETFL, flags) < 0) {
-    int e = errno;
-    (void)close(fd);
-    return -e;
+  e = typlat_socket_nonblocking(fd, 0);
+  if (e < 0) {
+    (void)typlat_socket_close(fd);
+    return e;
   }
   return fd;
 }
@@ -270,32 +265,28 @@ int32_t ty_net_accept(int32_t fd, int32_t timeout_ms) {
          is documented for reads and its effect on accept differs between
          kernels -- so the wait happens first and the accept is then known to
          return rather than block. */
-      struct pollfd p;
-      p.fd = fd;
-      p.events = POLLIN;
-      p.revents = 0;
-      int pr = poll(&p, 1, timeout_ms);
+      int pr = typlat_socket_wait(fd, 0, timeout_ms);
       if (pr < 0) {
-        if (errno == EINTR) continue;
-        return -errno;
+        if (pr == -EINTR) continue;
+        return pr;
       }
       if (pr == 0) return TY_NET_TIMEOUT;
     }
-    int c = accept4(fd, NULL, NULL, SOCK_CLOEXEC);
+    int32_t c = typlat_socket_accept(fd);
     if (c >= 0) return c;
-    if (errno == EINTR) continue;
+    if (c == -EINTR) continue;
     /* A client that gave up between the poll and the accept is not a failure of
        this server: the connection it abandoned is dropped and the next one is
        taken. */
-    if (errno == ECONNABORTED) continue;
+    if (c == -ECONNABORTED) continue;
     /* Readiness that was already consumed by the time accept ran. With a
        timeout the poll is re-entered (and will report the deadline); without
        one there is nothing to wait for, so the accept simply runs again. */
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+    if (c == -EAGAIN || c == -EWOULDBLOCK) {
       if (timeout_ms >= 0) continue;
       continue;
     }
-    return -errno;
+    return c;
   }
 }
 
@@ -306,11 +297,11 @@ int32_t ty_net_read(int32_t fd, tyarr *buf, int32_t off, int32_t len) {
   if (len == 0) return 0; /* read(2) of nothing returns 0, which would read as
                              end of file: answer it here instead */
   for (;;) {
-    ssize_t n = read(fd, buf->data + off, (size_t)len);
+    int64_t n = typlat_socket_recv(fd, buf->data + off, len);
     if (n >= 0) return (int32_t)n; /* short is not an error: it is the answer */
-    if (errno == EINTR) continue;
-    return -errno; /* -EAGAIN when SO_RCVTIMEO fired, which the prelude turns
-                      into a timeout rather than into end of file */
+    if (n == -EINTR) continue;
+    return (int32_t)n; /* -EAGAIN when SO_RCVTIMEO fired, which the prelude
+                          turns into a timeout rather than into end of file */
   }
 }
 
@@ -321,10 +312,10 @@ int32_t ty_net_write_all(int32_t fd, tyarr *buf, int32_t off, int32_t len) {
   const char *p = buf->data + off;
   int32_t done = 0;
   while (done < len) {
-    ssize_t n = send(fd, p + done, (size_t)(len - done), MSG_NOSIGNAL);
+    int64_t n = typlat_socket_send(fd, p + done, len - done);
     if (n < 0) {
-      if (errno == EINTR) continue;
-      return -errno;
+      if (n == -EINTR) continue;
+      return (int32_t)n;
     }
     if (n == 0) {
       /* send returning 0 on a stream socket means the peer is gone; reporting
@@ -345,10 +336,10 @@ int32_t ty_net_write_str(int32_t fd, tystr *s) {
   const char *p = s->data;
   int32_t done = 0;
   while (done < (int32_t)len) {
-    ssize_t n = send(fd, p + done, (size_t)((int32_t)len - done), MSG_NOSIGNAL);
+    int64_t n = typlat_socket_send(fd, p + done, (int32_t)len - done);
     if (n < 0) {
-      if (errno == EINTR) continue;
-      return -errno;
+      if (n == -EINTR) continue;
+      return (int32_t)n;
     }
     if (n == 0) return -EPIPE;
     done += (int32_t)n;
@@ -358,8 +349,7 @@ int32_t ty_net_write_str(int32_t fd, tystr *s) {
 
 int32_t ty_net_shutdown_write(int32_t fd) {
   if (fd < 0) return -EINVAL;
-  if (shutdown(fd, SHUT_WR) < 0) return -errno;
-  return 0;
+  return typlat_socket_shutdown_write(fd);
 }
 
 int32_t ty_net_close(int32_t fd) {
@@ -369,32 +359,17 @@ int32_t ty_net_close(int32_t fd) {
      descriptor by the time a retry ran, so the second close would close
      somebody else's. Reporting the failure and forgetting the descriptor is
      the only safe pair of actions. */
-  if (close(fd) < 0) return -errno;
-  return 0;
+  return typlat_socket_close(fd);
 }
 
 int32_t ty_net_set_timeout(int32_t fd, int32_t ms) {
   if (fd < 0) return -EINVAL;
-  struct timeval tv;
-  tv.tv_sec = 0;
-  tv.tv_usec = 0;
-  if (ms > 0) {
-    tv.tv_sec = ms / 1000;
-    tv.tv_usec = (ms % 1000) * 1000;
-    /* A whole zero timeval means "no timeout" to the kernel, so a request for
-       less than a millisecond would silently become an infinite wait. One
-       millisecond is the floor instead. */
-    if (tv.tv_sec == 0 && tv.tv_usec == 0) tv.tv_usec = 1000;
-  }
-  if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) < 0) return -errno;
-  return 0;
+  return typlat_socket_timeout_ms(fd, ms);
 }
 
 int32_t ty_net_set_reuse(int32_t fd, int32_t on) {
   if (fd < 0) return -EINVAL;
-  int v = on ? 1 : 0;
-  if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &v, sizeof v) < 0) return -errno;
-  return 0;
+  return typlat_socket_reuse(fd, on != 0);
 }
 
 /* Fills buf with "address:port" for the local (peer == 0) or the remote end.
@@ -402,25 +377,25 @@ int32_t ty_net_set_reuse(int32_t fd, int32_t on) {
    always rendered the same way. */
 static int ty_addr_text(int32_t fd, int peer, char *buf, size_t n) {
   struct sockaddr_in a;
-  socklen_t len = sizeof a;
+  int len = (int)sizeof a;
   memset(&a, 0, sizeof a);
-  if (peer) {
-    if (getpeername(fd, (struct sockaddr *)&a, &len) < 0) return -errno;
-  } else {
-    if (getsockname(fd, (struct sockaddr *)&a, &len) < 0) return -errno;
-  }
+  int r = typlat_socket_name(fd, peer, (struct sockaddr *)&a, &len);
+  if (r < 0) return r;
   char ip[INET_ADDRSTRLEN];
-  if (!inet_ntop(AF_INET, &a.sin_addr, ip, sizeof ip)) return -errno;
+  /* inet_ntop is the one socket call that is the same function on both
+     platforms, so it is called directly rather than through the layer. */
+  if (!inet_ntop(AF_INET, &a.sin_addr, ip, sizeof ip)) return -EIO;
   snprintf(buf, n, "%s:%u", ip, (unsigned)ntohs(a.sin_port));
   return 0;
 }
 
 int32_t ty_net_local_port(int32_t fd) {
   struct sockaddr_in a;
-  socklen_t len = sizeof a;
+  int len = (int)sizeof a;
   memset(&a, 0, sizeof a);
   if (fd < 0) return -EINVAL;
-  if (getsockname(fd, (struct sockaddr *)&a, &len) < 0) return -errno;
+  int r = typlat_socket_name(fd, 0, (struct sockaddr *)&a, &len);
+  if (r < 0) return r;
   return (int32_t)ntohs(a.sin_port);
 }
 
@@ -446,11 +421,11 @@ tystr *ty_net_strerror(int32_t code) {
   } else if (code == TY_NET_UNKNOWN_HOST) {
     snprintf(buf, sizeof buf, "name does not resolve");
   } else if (code < 0) {
-    const char *m = strerror(-code);
-    if (!m || !*m) m = "unknown error";
-    /* The number goes in because the text is localized on some systems and
-       because two failures can share a description; the number cannot. */
-    snprintf(buf, sizeof buf, "%s (errno %d)", m, -code);
+    /* The layer's text, because the code it describes is the layer's: an errno
+       on POSIX and a Winsock error on Windows. It carries the number for the
+       same reason it always did -- the text is localized and two failures can
+       share a description, while the number cannot. */
+    typlat_error_text(-code, buf, sizeof buf);
   } else {
     snprintf(buf, sizeof buf, "no error");
   }
@@ -532,7 +507,10 @@ int32_t ty_file_mkdirs(tystr *path) {
       int last = (*q == 0);
       char save = *q;
       *q = 0;
-      if (mkdir(buf, 0777) < 0 && errno != EEXIST) {
+      /* One directory at a time, through the layer: POSIX takes a mode here and
+         this CRT does not. What the separators are is the caller's business and
+         both platforms take a slash. */
+      if (typlat_mkdir(buf) < 0 && errno != EEXIST) {
         int e = errno;
         free(buf);
         return -e;
@@ -642,7 +620,7 @@ tyarr *ty_file_read_bytes(tystr *path, tyarr *err) {
     ty_set_err(err, EINVAL);
     return NULL;
   }
-  int fd = open(p, O_RDONLY);
+  int fd = typlat_open_read(p);
   if (fd < 0) {
     ty_set_err(err, errno);
     return NULL;
@@ -718,8 +696,10 @@ int32_t ty_file_write_bytes(tystr *path, tyarr *buf, int32_t off, int32_t len,
   if (!p || !*p) return -EINVAL;
   if (!ty_is_bytes(buf)) return -EINVAL;
   if (off < 0 || len < 0 || (int64_t)off + len > buf->len) return -EINVAL;
-  int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
-  int fd = open(p, flags, 0666);
+  /* The layer's open, not open(): this CRT translates a CRLF pair and stops at
+     a 0x1A in the default text mode, which would corrupt every byte written
+     here that is not text. */
+  int fd = typlat_open_write(p, append);
   if (fd < 0) return -errno;
   int32_t r = ty_write_fd(fd, buf->data + off, len);
   if (r < 0) {
@@ -738,8 +718,7 @@ int32_t ty_file_write_str(tystr *path, tystr *s, int32_t append) {
   const char *p = ty_cstr(path);
   if (!p || !*p) return -EINVAL;
   if (!s) return -EINVAL;
-  int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
-  int fd = open(p, flags, 0666);
+  int fd = typlat_open_write(p, append);
   if (fd < 0) return -errno;
   int32_t r = ty_write_fd(fd, s->data, s->len);
   if (r < 0) {
@@ -752,8 +731,11 @@ int32_t ty_file_write_str(tystr *path, tystr *s, int32_t append) {
 }
 
 tystr *ty_file_temp_dir(tystr *prefix) {
-  const char *base = getenv("TMPDIR");
-  if (!base || !*base) base = "/tmp";
+  /* Where temporary names go is one of the four things that differ between the
+     platforms, so the layer answers it: TMPDIR or /tmp, and the directory
+     Windows keeps for the same purpose, which is neither of those. */
+  char base[TY_TEMP_ROOT_MAX];
+  typlat_temp_root(base, sizeof base);
   char pfx[TY_PREFIX_MAX];
   size_t k = 0;
   if (prefix && prefix->data) {
@@ -770,9 +752,11 @@ tystr *ty_file_temp_dir(tystr *prefix) {
   char *tpl = (char *)malloc(n);
   if (!tpl) return NULL;
   snprintf(tpl, n, "%s/%sXXXXXX", base, pfx);
-  /* mkdtemp creates the directory and replaces the X's atomically, which is
-     what stops two programs starting at once from choosing the same name. */
-  if (!mkdtemp(tpl)) {
+  /* The layer creates the directory and replaces the X's, and what makes that
+     safe is the layer's business: mkdtemp is atomic here, and on Windows it is
+     a create that fails rather than overwrites when another process chose the
+     name first. */
+  if (!typlat_mkdtemp(tpl)) {
     free(tpl);
     return NULL;
   }

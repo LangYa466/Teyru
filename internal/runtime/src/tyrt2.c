@@ -5,7 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include <time.h>
 
 /* The helpers below that a generated program calls but tyrt.h does not declare
    (that header is another component's): getClass's Class builder, and the
@@ -346,16 +345,11 @@ int32_t ty_is_digit(uint16_t c) { return c >= '0' && c <= '9'; }
 int32_t ty_is_letter(uint16_t c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
 int32_t ty_is_space(uint16_t c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
-int64_t ty_millis(void) {
-  struct timespec ts;
-  clock_gettime(CLOCK_REALTIME, &ts);
-  return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
-int64_t ty_nanos(void) {
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
-}
+/* The two clocks, both read through the platform layer: the wall clock, which
+   System.currentTimeMillis means, and the monotonic one every deadline in the
+   runtime is measured on. */
+int64_t ty_millis(void) { return typlat_realtime_ms(); }
+int64_t ty_nanos(void) { return typlat_monotonic_ns(); }
 void ty_exit(int32_t code) { exit(code); }
 
 void ty_arraycopy(void *src, int32_t spos, void *dst, int32_t dpos, int32_t len) {

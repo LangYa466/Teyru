@@ -5,8 +5,13 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <setjmp.h>
-#include <pthread.h>
 #include <string.h>
+
+/* Every operating system call the runtime makes is behind this header: the
+   locks, the threads, the clock, and the sockets. Nothing below this line
+   includes a system header for one of them, so this runtime has one platform
+   layer to port rather than one per file. */
+#include "tyrt_plat.h"
 
 typedef struct tyclass tyclass;
 typedef struct tyobj tyobj;
@@ -257,9 +262,9 @@ struct tythread {
      thread is scanned from there upwards. It only ever moves down, so it stays
      a lower bound on what has to be scanned. */
   char *stack_base, *stack_top, *park_sp;
-  pthread_t tid;
-  pthread_mutex_t mtx; /* guards the fields below, and signals a joiner */
-  pthread_cond_t cv;
+  typlat_thread tid;
+  typlat_mutex mtx; /* guards the fields below, and signals a joiner */
+  typlat_cond cv;
   int64_t id;             /* what Thread.getId() reports */
   void *obj;              /* the Teyru Thread object, NULL before one is bound */
   tystr *name;            /* the thread's name, for an uncaught exception */
@@ -397,9 +402,9 @@ void ty_thread_stopped_end(void);
 
 /* ---- threads ----------------------------------------------------------- */
 
-/* The body of a spawned thread: pthread_create is handed this, it installs the
-   new thread's runtime state (its shadow stack, its stack bounds, its place in
-   the registry), runs fn(arg), marks itself finished and wakes a joiner. It
+/* The body of a spawned thread: typlat_thread_begin is handed this, it installs
+   the new thread's runtime state (its shadow stack, its stack bounds, its place
+   in the registry), runs fn(arg), marks itself finished and wakes a joiner. It
    returns NULL. */
 void *ty_thread_start(void *(*fn)(void *), void *arg);
 

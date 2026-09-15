@@ -8,6 +8,14 @@ import _ "embed"
 //go:embed src/tyrt.h
 var Header string
 
+// PlatHeader is tyrt_plat.h: the platform layer's interface. Every operating
+// system call the runtime makes is declared there, and the runtime's own files
+// call those declarations rather than the calls themselves, so the runtime has
+// one file to port rather than one per file.
+//
+//go:embed src/tyrt_plat.h
+var PlatHeader string
+
 // Core is tyrt.c.
 //
 //go:embed src/tyrt.c
@@ -45,3 +53,16 @@ var Reflect string
 //
 //go:embed src/tyrt_thread.c
 var Thread string
+
+// PlatPosix and PlatWin are tyrt_plat.h's two implementations: the POSIX one
+// (the C library's threads, sockets and files) and the Windows one (winpthreads
+// and Winsock). A build compiles exactly one of them, chosen by the target it
+// was asked for, and which one that is happens in internal/driver. They are
+// embedded both of them because a compiler that can build for Windows has to
+// carry the Windows half of its runtime wherever it runs.
+//
+//go:embed src/tyrt_plat_posix.c
+var PlatPosix string
+
+//go:embed src/tyrt_plat_win.c
+var PlatWin string

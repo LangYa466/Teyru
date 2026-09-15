@@ -1,0 +1,167 @@
+# The suite, on every platform this compiler claims to build for.
+#
+# The point of the matrix is that the runtime is portable and that a claim about
+# a platform is a claim CI can check: linux x86-64 is where the suite is a full
+# shell suite, windows x86-64 runs the same programs natively, and macOS runs
+# them on both of its architectures. arm64 linux builds and runs a program; the
+# cross-build job builds for windows and arm64 from x86-64, which is what proves
+# the platform layer compiles for a target this runner is not.
+#
+# tests/ is the teyru-lang/tests submodule: a checkout without --recurse-submodules
+# has the directory and nothing in it, and every test in this repository refuses
+# to pass on an empty suite rather than reporting success having run nothing.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: linux x86-64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: C compiler
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: build the compiler
+        run: go build -trimpath -o teyru ./cmd/teyru
+      - name: unit tests and the program suite (go test)
+        run: go test ./... -count=1 -timeout 30m
+      # The shell suite is the same data driven a second way, and it is the only
+      # thing that runs tests/native/net_c_test.c: the socket layer tested as C,
+      # with a forked child as the peer. That file is POSIX, so this step is the
+      # linux job's alone.
+      - name: the shell suite, including the C socket test
+        run: TEYRU="$PWD/teyru" sh tests/run.sh
+      - name: benchmarks (informational)
+        run: RUNS=3 JAVA=0 BIN="$PWD/teyru" sh scripts/bench.sh
+
+  windows:
+    name: windows x86-64 (native)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      # The runtime is written against winpthreads (pthread.h) and Winsock, so
+      # the compiler for this platform is mingw-w64's gcc: a clang configured
+      # for the MSVC target has neither header. The driver picks
+      # x86_64-w64-mingw32-gcc when it is on PATH, which this puts there.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc
+          path-type: inherit
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: toolchain
+        shell: bash
+        run: |
+          gcc --version | head -1
+          go version
+      - name: build the compiler
+        shell: bash
+        run: go build -trimpath -o teyru.exe ./cmd/teyru
+      # The same programs, the same expected outputs, the same exit statuses:
+      # the runtime puts the standard streams in binary mode so that a line
+      # written on Windows is the same bytes as a line written on linux, which
+      # is what makes the one set of .expected files meaningful here.
+      - name: unit tests and the program suite (go test)
+        shell: bash
+        run: go test ./... -count=1 -timeout 30m
+
+  macos:
+    name: macos ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-15 is the Apple Silicon image, macos-15-intel the Intel one:
+          # the two architectures the runtime claims, each built natively. These
+          # labels move with GitHub's images (see actions/runner-images).
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build the compiler
+        run: go build -trimpath -o teyru ./cmd/teyru
+      - name: unit tests and the program suite (go test)
+        run: go test ./... -count=1 -timeout 30m
+
+  # The target the maintainers cannot run: linux arm64 gets a build and a
+  # program that runs, which is the strongest claim made for it here.
+  linux-arm64:
+    name: linux arm64 (build and smoke run)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build the compiler
+        run: go build -trimpath -o teyru ./cmd/teyru
+      - name: a program, built for this machine and run
+        run: |
+          set -eu
+          test "$(uname -m)" = aarch64
+          mkdir -p /tmp/smoke
+          printf 'class Hello {\n  public static void main(String[] args) {\n    System.out.println("hello from arm64")\n  }\n}\n' > /tmp/smoke/Hello.teyru
+          ./teyru build -O1 --target linux/arm64 -o /tmp/smoke/hello /tmp/smoke/Hello.teyru
+          file /tmp/smoke/hello
+          test "$(/tmp/smoke/hello)" = "hello from arm64"
+
+  # Every target that can be built from an x86-64 Linux runner, built: the
+  # windows one is the platform layer's other implementation, compiled here and
+  # not run, and the arm64 one is the same target the job above runs.
+  cross-build:
+    name: cross-build for windows and arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: cross compilers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu
+      - name: build the compiler
+        run: go build -trimpath -o teyru ./cmd/teyru
+      - name: a program for each target
+        run: |
+          set -eu
+          mkdir -p /tmp/smoke
+          printf 'class Hello {\n  public static void main(String[] args) {\n    System.out.println("hello")\n  }\n}\n' > /tmp/smoke/Hello.teyru
+          ./teyru build -O1 --target windows/amd64 -o /tmp/smoke/hello /tmp/smoke/Hello.teyru
+          file /tmp/smoke/hello.exe
+          # The suffix came from the target and the file really is a Windows
+          # program: a "build" that produced a linux binary named .exe would
+          # pass every other check here and fail only in the user's hands.
+          file -b /tmp/smoke/hello.exe | grep -q 'PE32+'
+          ./teyru build -O1 --target linux/arm64 -o /tmp/smoke/hello-arm64 /tmp/smoke/Hello.teyru
+          file /tmp/smoke/hello-arm64
+          file -b /tmp/smoke/hello-arm64 | grep -q 'aarch64'
