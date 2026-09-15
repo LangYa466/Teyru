@@ -14,13 +14,11 @@ package teyru
  * end up with exactly the right number, and it is what the tests check.
  *
  * The one waiting class here, CountDownLatch, waits the way everything in
- * 37_executor.teyru waits: a thread that has to block parks a Signal of its own
- * (declared there) and waits on that, rather than waiting on the latch's own
- * monitor, and the wait runs in bounded slices and re-examines the count. The
- * reasons are in that file's comment: this runtime loses wakeups when several
- * threads are inside Object.wait on one object, and a lost notification must
- * cost a poll interval rather than a hang. The latch's count and its list of
- * parked signals are under the latch's monitor; no thread ever waits on it.
+ * 37_executor.teyru waits: a thread that has to block is inside Object.wait on
+ * the latch's own monitor, with the count it is waiting for guarded by that
+ * same monitor, and the countDown that takes the count to zero releases every
+ * waiter with one notifyAll. Several threads waiting on one object is the
+ * ordinary shape of a synchronizer, and the runtime carries it.
  *
  * Absent, and deliberately not declared: TimeUnit (every duration here is
  * milliseconds, as in Thread.sleep), interruptible waits (there is no
@@ -31,15 +29,18 @@ package teyru
 
 /* Java's CountDownLatch: a gate that opens when the count reaches zero.
  *
- * The count and the list of waiters are one object's monitor. countDown and the
- * two awaits all take that monitor, so a countDown that empties the latch
- * cannot slip between an awaiter's test of the count and its decision to wait:
- * the awaiter holds the monitor while it decides, and a thread that arrives
- * after the latch opened is answered without waiting at all. */
+ * The count is one object's monitor. countDown and the two awaits all take that
+ * monitor, so a countDown that empties the latch cannot slip between an
+ * awaiter's test of the count and its decision to wait: the awaiter holds the
+ * monitor while it decides, and a thread that arrives after the latch opened is
+ * answered without waiting at all. An awaiter waits on that same monitor,
+ * which it gives up for the wait, and countDown wakes all of them with a
+ * notifyAll: any number of threads may await one latch, and each of them wakes
+ * because the count reached zero, not because a notification happened to reach
+ * one waiter. */
 class CountDownLatch {
   /* Written only under this object's monitor. */
   private int count
-  private Waiters waiters = new Waiters()
 
   public CountDownLatch(int count) {
     if (count < 0) {
@@ -57,25 +58,24 @@ class CountDownLatch {
       if (this.count > 0) {
         this.count = this.count - 1
         if (this.count == 0) {
-          this.waiters.wakeAll()
+          /* The latch is open, and everybody waiting on it is inside this
+             monitor's wait. */
+          this.notifyAll()
         }
       }
     }
   }
 
-  /* Wait until the count reaches zero. The wait itself is on this thread's own
-     signal, so any number of threads may await the same latch, and each of them
-     wakes because the latch was emptied, not because a notification happened to
-     reach one waiter. */
+  /* Wait until the count reaches zero. The wait is on the latch's own monitor,
+     so any number of threads may await the same latch at once, and the count is
+     the condition: a countDown that has already emptied it is seen without
+     waiting, and one that empties it while this thread waits releases it. */
   public void await() {
-    Signal mine = new Signal()
     synchronized (this) {
-      if (this.count == 0) {
-        return
+      while (this.count > 0) {
+        this.wait(-1L)
       }
-      this.waiters.park(mine)
     }
-    mine.await()
   }
 
   /* Wait up to this many milliseconds. Answers true when the count reached
@@ -83,23 +83,28 @@ class CountDownLatch {
      boolean, and the reason a program can wait on a latch it does not fully
      control without hanging forever. */
   public boolean await(long millis) {
-    Signal mine = new Signal()
+    long deadline = System.nanoTime() + millis * 1000000L
     synchronized (this) {
-      if (this.count == 0) {
-        return true
+      while (this.count > 0) {
+        long left = deadline - System.nanoTime()
+        if (left <= 0) {
+          /* the time is up with the count still above zero: this waiter answers
+             false, and it is not on any list to be taken off -- the latch holds
+             nothing but its count */
+          return false
+        }
+        long millisLeft = left / 1000000L
+        if (millisLeft <= 0) {
+          /* under a millisecond left, and wait counts in milliseconds: spend it
+             as one, and let the loop answer */
+          millisLeft = 1
+        }
+        /* One wait for as long as the caller has left: a countDown that empties
+           the latch releases it at once, and the deadline is the caller's. */
+        this.wait(millisLeft)
       }
-      this.waiters.park(mine)
+      return true
     }
-    boolean opened = mine.await(millis)
-    if (!opened) {
-      /* this waiter gave up, so it must not stay on the list: a latch whose
-         count never reaches zero would otherwise hold every abandoned waiter
-         for the rest of the program */
-      synchronized (this) {
-        this.waiters.leave(mine)
-      }
-    }
-    return opened
   }
 
   /* How many countDowns are still outstanding. Java's answer is a long; this
@@ -127,9 +132,10 @@ class CountDownLatch {
  * be composed with another operation the way getAndIncrement followed by
  * compareAndSet could be in Java.
  *
- * Nothing here waits, so nothing here is affected by the one-waiter rule the
- * waiting classes in 37_executor.teyru follow: a monitor that is taken and
- * released is exactly what this runtime does carry. */
+ * Nothing here waits, so nothing here has a condition to be woken for: a
+ * monitor that is taken and released, with no waiter on it, is all these need
+ * -- and all a monitor has to do for a CAS that is spelled as a critical
+ * section. */
 class AtomicInteger {
   private int value
 
