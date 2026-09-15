@@ -639,6 +639,48 @@ static void *block_object(char *p, size_t total) {
   return obj;
 }
 
+/* Builds the object at `p` and holds it on this thread's shadow stack until the
+   caller has handed it out. Called with the heap lock held, for a block that
+   came from memory a collection can already see -- off a free list, or the
+   first block of the slab just taken.
+
+   Why it is needed. This thread counts as stopped until ty_heap_unlock's
+   stopped_end returns -- that is what keeps a collector holding the heap lock
+   from waiting for a thread that is only waiting for that lock -- so a
+   collection can start in the window between taking the block and handing it
+   out, walk the block's slab, read exactly what the block still says (a free
+   block, or a size word malloc never wrote), and take it for free space: it
+   re-links the block onto the free list, or releases the whole slab it is in,
+   and the same memory is handed out twice -- or handed out after it has gone
+   back to the system. A four-thread allocation stress reproduced that as a
+   SIGSEGV inside block_object's memset, always in a slab the same collection
+   had just released.
+
+   Why the header and the class word are written first. Marking an object is not
+   the end of what the collector does with it: a marked object is traced, and a
+   block just taken off a free list still holds its previous tenant's bytes, so
+   a root that was pushed before those bytes were gone would have the collector
+   read that dead object's class pointer and fields as if they were this one's
+   -- and for a block whose last tenant was an array, its stale element pointer
+   and length, which is a walk of memory that may not be mapped at all. The
+   class word is the only part of the payload anything reads before the caller
+   sets it, so writing it zero is what makes tracing this object a no-op, and it
+   is written here; the rest of the payload is zeroed by the caller after the
+   lock is dropped, so that a large array is not zeroed under the heap lock.
+
+   A block the bump path hands out needs none of this, and must not be treated
+   as if it did: it lies beyond the watermark the thread's slab had when it last
+   stopped, and a collection walks a slab only up to that watermark, so no
+   collection can see it as a block in the first place. */
+static void *handout_begin(char *p, size_t total) {
+  *(uint64_t *)p = (uint64_t)total;
+  *(uint64_t *)((char *)p + 8) = 0;
+  void *obj = p + TY_HDR;
+  *(void **)obj = NULL;
+  TY_ROOT_PUSH(obj);
+  return obj;
+}
+
 void *ty_alloc_slow(size_t total) {
   /* The batch first, and before the lock: a block this thread took from the
      free list in a batch of TY_BATCH is handed out here without the heap lock
@@ -690,6 +732,12 @@ void *ty_alloc_slow(size_t total) {
      them would hold more memory than the threads that want them. */
   p = k >= 0 ? take_batch(k) : NULL;
   if (!p) p = take_free(total);
+  void *obj = NULL;
+  int rooted = 0;
+  if (p) {
+    obj = handout_begin(p, total);
+    rooted = 1;
+  }
   if (!p) {
     /* Refill: a slab of this thread's own. The old one goes back to the shared
        heap, where the collector can reclaim it and where its free blocks are
@@ -712,10 +760,25 @@ void *ty_alloc_slow(size_t total) {
     me->bump_end = c->mem + c->cap;
     c->used = total;
     p = c->mem;
+    /* This slab is fresh and its watermark is this one block, so the block is
+       inside the region a collection walks -- and its size word is whatever
+       malloc left there until handout_begin writes it. It is in the same
+       position as a block off a free list, and gets the same treatment. */
+    obj = handout_begin(p, total);
+    rooted = 1;
   }
   me->alloc_since += (int64_t)total;
   ty_heap_unlock();
-  return block_object(p, total);
+  /* The hand-out is done: the block is the caller's object now, and its
+     reference is in the caller's frame before this thread can stop again. What
+     is left of block_object -- zeroing the payload -- is done here, outside the
+     heap lock, so that a large array is not zeroed while everybody else waits
+     for the heap. */
+  if (rooted) {
+    memset(obj, 0, total - TY_HDR);
+    TY_ROOT_POP();
+  }
+  return obj;
 }
 
 void ty_gc_init(void) {
