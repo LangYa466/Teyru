@@ -45,6 +45,8 @@ flags:
   --no-lto      disable link-time optimisation
   --native <f>  C source implementing the program's native methods (repeatable)
   --link <arg>  extra argument for the link step, such as -lm or a .a path
+  --cc-flag <arg>  extra argument for the C compile step (repeatable), such as
+                -I <dir> to put a --native-header on the include path
   --native-header <p>  write the C prototypes of every native method to <p>;
                        stops there unless --native is also given
   -v            verbose
@@ -113,6 +115,16 @@ func run() int {
 			i++
 			if i < len(args) {
 				opts.Link = append(opts.Link, args[i])
+			}
+		case a == "--cc-flag":
+			// An argument for the C *compile* step rather than the link step:
+			// a program whose native methods are implemented in C needs its
+			// generated header on the include path, and until this existed the
+			// only way to say so was the Go API, which left the suite's native
+			// fixture unrunnable from the command line.
+			i++
+			if i < len(args) {
+				opts.ExtraCC = append(opts.ExtraCC, args[i])
 			}
 		case a == "--native-header":
 			i++

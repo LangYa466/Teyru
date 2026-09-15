@@ -153,73 +153,43 @@ func TestPackages(t *testing.T) {
 }
 
 // TestDiagnostics checks that ill-typed programs are rejected.
+// TestDiagnostics compiles the programs under tests/diagnostics, each of which
+// must be *rejected*, and checks that the diagnostic named in the file beside it
+// appears.
+//
+// The cases are data in the tests repository, with every other case, rather than
+// Go string literals here. A suite that keeps one of its parts inside the
+// compiler's source is not a suite the compiler is tested against -- it is the
+// compiler testing itself, and the harness that runs the other cases from the
+// tests repository cannot run these at all.
 func TestDiagnostics(t *testing.T) {
-	cases := []struct {
-		name string
-		src  string
-		code string
-	}{
-		{"semicolon", "class A {\n  public static void main(String[] args) {\n    int x = 1;\n  }\n}\n", "TY-SYN-0001"},
-		{"type", "class A {\n  public static void main(String[] args) {\n    int x = \"s\"\n  }\n}\n", "TY-TYP-0051"},
-		{"unknownName", "class A {\n  public static void main(String[] args) {\n    System.out.println(missing)\n  }\n}\n", "TY-TYP-0048"},
-		{"abstractMissing", "abstract class B {\n  abstract int f()\n}\nclass A extends B {\n  public static void main(String[] args) {\n  }\n}\n", "TY-TYP-0019"},
-		{"recursiveCtor", "class A {\n  A(int n) {\n    this(1)\n  }\n  A() {\n    this(2)\n  }\n}\nclass Main {\n  public static void main(String[] args) {\n    new A()\n  }\n}\n", "TY-TYP-0075"},
-		{"doubleSwitch", "class Main {\n  public static void main(String[] args) {\n    double d = 0.5\n    switch (d) {\n      case 1.5 -> System.out.println(\"x\")\n      default -> System.out.println(\"y\")\n    }\n  }\n}\n", "TY-TYP-0035"},
-		{"notExhaustive", "class Main {\n  public static void main(String[] args) {\n    int n = 7\n    String s = switch (n) {\n      case 1 -> \"one\"\n      case 2 -> \"two\"\n    }\n    System.out.println(s)\n  }\n}\n", "TY-TYP-0096"},
-		{"longSelector", "class Main {\n  public static void main(String[] args) {\n    long v = 1\n    switch (v) {\n      case 1 -> System.out.println(\"one\")\n      default -> System.out.println(\"other\")\n    }\n  }\n}\n", "TY-TYP-0035"},
-		{"lambdaThisInStatic", "import java.util.function.Supplier\n\nclass Main {\n  int n() { return 3 }\n  public static void main(String[] args) {\n    Supplier<Integer> s = () -> n() + 1\n    System.out.println(s.get())\n  }\n}\n", "TY-TYP-0098"},
-		// An expression continued on the next line is a new statement, so this
-		// is what keeps the second line from being a silent unary plus.
-		{"noEffectStatement", "class Main {\n  public static void main(String[] args) {\n    int a = 1\n    int b = 2\n    long x = 100L + a\n             + b\n    System.out.println(x)\n  }\n}\n", "TY-TYP-0114"},
-		// The implicit close is an interface call, so a class that merely has a
-		// close() method would dispatch into nothing at run time.
-		{"resourceNotCloseable", "class P {\n  public void close() { }\n}\nclass Main {\n  public static void main(String[] args) {\n    try (P p = new P()) { System.out.println(\"in\") }\n  }\n}\n", "TY-TYP-0113"},
-		// The check stopped at any target that was not a bare identifier, so a
-		// final field reached through a receiver was writable from anywhere and
-		// the modifier meant nothing outside the class that declared it. All
-		// three forms go through the same check.
-		{"finalFieldAssigned", "class F {\n  public final int k = 1\n}\nclass Main {\n  public static void main(String[] args) {\n    F o = new F()\n    o.k = 9\n    System.out.println(o.k)\n  }\n}\n", "TY-TYP-0058"},
-		{"finalFieldCompound", "class F {\n  public final int k = 1\n}\nclass Main {\n  public static void main(String[] args) {\n    F o = new F()\n    o.k += 1\n    System.out.println(o.k)\n  }\n}\n", "TY-TYP-0058"},
-		{"finalFieldUpdate", "class F {\n  public final int k = 1\n}\nclass Main {\n  public static void main(String[] args) {\n    F o = new F()\n    o.k++\n    System.out.println(o.k)\n  }\n}\n", "TY-TYP-0058"},
-		// The declaration was not counted as the assignment it is, so the
-		// counter was still zero at the first reassignment of a `val` and the
-		// error waited for the second one.
-		{"valReassigned", "class Main {\n  public static void main(String[] args) {\n    val x = 1\n    x = 2\n    System.out.println(x)\n  }\n}\n", "TY-TYP-0057"},
-		// A final local with no initializer does get its one assignment, which
-		// is Java's rule, so the second is the one to reject.
-		{"finalLocalTwice", "class Main {\n  public static void main(String[] args) {\n    final int x\n    x = 3\n    x = 4\n    System.out.println(x)\n  }\n}\n", "TY-TYP-0057"},
-		// A property's storage field is private for every property, so the
-		// accessor's modifiers are what decides who may use it -- and the check
-		// was skipped for properties, which left a private one readable and
-		// writable from anywhere.
-		{"privateProperty", "class C {\n  private int v {\n    get { return field + 7 }\n    set { field = value }\n  }\n}\nclass Main {\n  public static void main(String[] args) {\n    C c = new C()\n    c.v = 3\n    System.out.println(c.v)\n  }\n}\n", "TY-TYP-0046"},
-		// A name resolves by its simple name whatever package is written in
-		// front of it, so this import used to be accepted and the List it
-		// really meant was picked anyway.
-		{"misspelledImport", "import java.utli.List\n\nclass Main {\n  public static void main(String[] args) {\n    List<String> l = new ArrayList<String>()\n    System.out.println(l.size())\n  }\n}\n", "TY-TYP-0115"},
-		{"unknownImport", "import com.example.Nothing\n\nclass Main {\n  public static void main(String[] args) {\n  }\n}\n", "TY-TYP-0115"},
-		// The `extends` check runs before Lombok, so @Value's `final` arrived
-		// too late to stop a subclass: `class Ext extends V` compiled where
-		// Lombok says "cannot inherit from final".
-		{"extendsLombokValue", "import lombok.Value\n\n@Value\nclass V {\n  int x\n}\nclass Ext extends V {\n  Ext() {\n    super(1)\n  }\n}\nclass Main {\n  public static void main(String[] args) {\n    System.out.println(new Ext().getX())\n  }\n}\n", "TY-TYP-0007"},
-		{"extendsLombokUtility", "import lombok.experimental.UtilityClass\n\n@UtilityClass\nclass U {\n  int f() { return 1 }\n}\nclass Ext extends U {\n}\nclass Main {\n  public static void main(String[] args) {\n    System.out.println(U.f())\n  }\n}\n", "TY-TYP-0007"},
+	dir := "tests/diagnostics"
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			path := filepath.Join(dir, tc.name+".teyru")
-			if err := os.WriteFile(path, []byte(tc.src), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			res, err := driver.Compile([]string{path}, driver.Options{Out: filepath.Join(dir, "out"), Opt: "-O0"})
+	requireSuite(t, dir, entries)
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".teyru") {
+			continue
+		}
+		name := strings.TrimSuffix(e.Name(), ".teyru")
+		want, err := os.ReadFile(filepath.Join(dir, name+".code"))
+		if err != nil {
+			t.Fatalf("%s: missing %s.code, the diagnostic the program must be rejected with: %v", name, name, err)
+		}
+		code := strings.TrimSpace(string(want))
+		t.Run(name, func(t *testing.T) {
+			res, err := driver.Compile([]string{filepath.Join(dir, e.Name())},
+				driver.Options{Out: filepath.Join(t.TempDir(), "out"), Opt: "-O0"})
 			if err == nil {
 				t.Fatalf("expected failure")
 			}
 			if res == nil || res.Diags == nil {
 				t.Fatalf("expected diagnostics, got %v", err)
 			}
-			if !strings.Contains(res.Diags.String(), tc.code) {
-				t.Errorf("expected code %s in:\n%s", tc.code, res.Diags)
+			if !strings.Contains(res.Diags.String(), code) {
+				t.Errorf("expected code %s in:\n%s", code, res.Diags)
 			}
 		})
 	}
