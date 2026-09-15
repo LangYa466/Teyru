@@ -16,9 +16,13 @@ package codegen
 // java.util.stream, because `String.lines()` sits in String's table next to
 // `String.length()` and nothing can tell the two apart once both are addresses
 // in a live array. Measured on this tree: the same hello world is 508,304 bytes
-// with every slot filled and 56,392 bytes with every slot null, so essentially
-// all of it is the standard library arriving through slots no program could
-// dispatch.
+// with every slot filled and 56,392 bytes with every slot null -- and the number
+// this rule actually produces is *below* that second figure now, which is what
+// says the older figure is not a floor: it was taken before the wrappers moved
+// into lib/04_boxing.teyru and before a complement bug was fixed, and both
+// changed what the prelude is. Sizes in this file and in the docs are `-O2`
+// (the default, and what scripts/bench.sh uses); the level matters -- the same
+// hello world is 75,232 bytes at `-O1` and 59,408 at `-O3`.
 //
 // A dispatch reads slot `idx(selector)` of the receiver's class, and only a call
 // site that dispatches that selector reads it, so a slot may be dropped exactly

@@ -257,7 +257,8 @@ source → lexer → parser → ast → sema → codegen
   它第一次的版本用「第一個單獨的 `}`」當函式結尾，而 pattern-switch 的降階會在左邊界產生一個
   內部的收尾大括號，於是那段之後的分派被歸給不存在的定義、slot 被清成 NULL，
   `t133_arrow_blocks`／`t84_sealed_switch`／`t51_java25_tour` 直接 SIGSEGV；改成字串與註解感知
-  的大括號計數後才正確。**尺寸**：hello 508,304 → **95,064 位元組**（全部 slot 皆空的下限是
+  的大括號計數後才正確。**尺寸（以下皆為 `-O2`，也就是預設值與 `bench.sh` 用的等級；同一支 hello 在 `-O1` 是
+  75,232、`-O3` 是 59,408 位元組）**：hello 508,304 → **95,064 位元組**（全部 slot 皆空的下限是
   56,392；9/13 的 `74fa648` 是 48,840），t84 520,752 → 104,408，t133 509,456 → 101,160；用到
   反射的程式不變（`t146_reflect` 4,110,448、`t101_gson` 4,097,840），因為反射會從 main 接上每
   一張成員表，不動點自然留下全部。**速度沒有可量測的變化**（六個基準 best-of-5、每次 5–37 ms
@@ -288,99 +289,21 @@ source → lexer → parser → ast → sema → codegen
   38.1 + 36.5 ms。單執行緒配置快速路徑不受影響（2000 萬次 `ty_alloc(16)` 11.5 ns）；
   `bench_loop` 仍比 #57 之前慢約 10%，那是迴圈回邊安全點的代價。
 - **執行期寫在 Teyru 到哪裡為止（包裝型別那一組已完成）**：八個包裝類別的值語意
-  現在是 Teyru（`lib/04_boxing.teyru`）。每個類別有**一個 instance 欄位** `value`，
-  `valueOf` 配置一個包裝再把值寫進那個欄位，`byteValue()`／`intValue()`／`longValue()`／…
-  是讀那個欄位，`hashCode`／`equals`／`compareTo`／`toString` 也都寫在類別裡；
-  `equals` 是 `o instanceof X && ((X) o).value == value`——Java 的契約（先比類別、
-  再比值），而類別是 `final`（Java 也是），所以 `instanceof` 就是 `ty_box_equals`
-  當初拿兩個 box 的 tyclass 指標在比的那個類別檢查。編譯器不再經過
-  `internal/codegen/native.go` 的 native 表，而是**在呼叫點直接呼叫這些方法**
-  （`emit_expr.go` 的 `boxedValue`／`unboxCall`，兩個後端共用；LLVM 端另外要
-  `instantiate` 類別與 `needMethod`）。移動的量是實測的：**96 個方法**不再是
-  `native`（同一個檔案裡的 native 宣告 157 → 61）、執行期刪掉 **74 個 C 函式**
-  （57 個有名字的 `ty_*`、DEFBOX 展開出來的 12 個 box／unbox、5 個內部 static）、
-  `native.go` 少掉 95 個表項、`internal/runtime/src/*.c` 7147 → 6974 行、
-  `tyrt.h` 1078 → 1031 行。
-
-  留下的 61 個 `native` 是**另一組**，不是漏掉：解析（`parsable`／`parseIntDigits`）、
-  進位制格式化（`toString(v, radix)`／`toUnsignedString`）、位元操作（`bitCount`／
-  `rotateLeft`／`reverse`／…）、浮點的位元視圖（`floatToIntBits`／`doubleToLongBits`／
-  `longBitsToDouble`，C 的 `memcpy` 是唯一讀得到位元的方法）、`isNaN`／`isInfinite`／
-  `isFinite`、`max`／`min`，以及 `Character` 的字元分類。
-
-  留下的 C 不是缺口，是**設計上的核心**。移動之後 `internal/runtime/src` 仍有
-  6,974 行、603 個函式定義，其中：
-  - **配置與收集器**（`ty_alloc`／`ty_alloc_arr`、標記掃描、影子堆疊、slab）：一個有
-    GC 的語言不能用自己寫自己的配置器與收集器。保守收集要認得堆疊上的每一個字組，
-    配置要交出未經掃描的記憶體，兩者都需要這個語言沒有的原始指標與「不掃描區」；
-    Go 的執行期是 Go **加**組合語言，理由相同。這不是沒人寫，是寫不出來。
-  - **`setjmp`／`longjmp` 的例外框架**（`tycatch`、`ty_throw`）：catch 框架住在 C 堆疊
-    上，跨越 Teyru 的呼叫，語言自己看不到那條堆疊。
-  - **反射的成員表存取器**（`tyrt_reflect.c`，921 行）：讀的是編譯器發出的靜態結構
-    （`tyfield`／`tymethod`／`tyannotation`）與每個方法的 invoker。它同時是唯一
-    「用原始指標打開一個 box」的地方（`box_alloc`／`box_take`）：執行期函式不能呼叫
-    產生它的那支程式裡的 Teyru 方法，因為那支程式對它還沒有名字。
-  - **系統呼叫**：socket（`tyrt_net.c` 876 行）、執行緒與鎖（`tyrt_thread.c` 768 行）、
-    時鐘與檔案，全部在 `tyrt_plat.h` 後面（`tyrt_plat_posix.c` ＋ `tyrt_plat_win.c`
-    共 814 行，兩個平台各一份）。
-  - **box 本身的記憶體**（`tyintbox` … `tyshortbox`，`tyrt.h`）與 **`ty_prim_match`**
-    （JEP 507 的原生型別樣式比對：匹配到的值用 `void *out` 寫回，那是編譯器的 ABI，
-    不是值運算）。
-  - **數字與文字之間的轉換**：`ty_str_of_int`／`ty_str_of_long`／`ty_str_of_double`
-    （最短可往返表示，`fmt_generic`）與解析（`ty_str_parsable_*`、`strtod`）。這是
-    下一組可以搬的，與包裝型別無關，屬於 printf 那一側。
-
-  兩個後端都必須同意：LLVM 後端從 `tyrt.h` 讀原型，所以從標頭移除的函式也必須從
-  它的呼叫點移除（`llvm_rt_test.go` 也因此少掉兩列）。編譯器另外對每個包裝類別在
-  產生的 C 裡發出 `_Static_assert`（`emit.go` 的 `structOf`），斷言該類別的 struct
-  與執行期的 `tyintbox`／`tylongbox`／… 同大小、同欄位位移，因為反射會拿原始指標
-  讀同一個 layout；`tyrt.h` 那邊也斷言每個 box 都是「標頭 ＋ 8 位元組」。
-
-  實測的行為差異只有一處。等價程式把八個包裝型別的邊界值（最小值、最大值、NaN、
-  ±0.0、±Infinity、超界值）走過一次：box／unbox、六個 `Number` 轉換、`hashCode`／
-  `equals`／`compare`／`compareTo`／`toString`、隱式裝箱的每一種位置、`switch` 的
-  裝箱選擇子、null 的解裝箱與 null 的 `switch`，輸出 78 行逐位元比對前後：77 行
-  完全相同，只差 `double d = someInteger`——以前把 box 的 4 個位元組當成 double 的
-  位元讀（5.4E-323），現在照 Java 走 `intValue()` 再拓寬（11.0）。舊的答案不是任何
-  Java 規則給的，要留著就得把 `ty_unbox_double` 留在 C。
-  程式看得見的介面也保持原樣：`new Integer()`、`Class.newInstance()` 與包裝類別上的
-  其他反射入口都還能用（宣告一個帶參數的建構子會把語言給的無參數建構子關掉，所以
-  `valueOf` 不宣告建構子）。反射唯一多看到的是那個欄位本身——
-  `Integer.class.getDeclaredFields().length` 由 5 變 6，Java 的 `Integer` 也有
-  `value` 這個欄位。
-
-  這一組順帶修好的：包裝值的**一元運算子**。`-someInteger` 以前產生 `-(指標)` 而編譯
-  失敗，`someInteger++` 更是對 box 指標做指標運算，執行時 SIGSEGV。現在照 Java 走：
-  先解裝箱、在提升後的型別做運算（byte／short／char 提升為 int，其餘不變；整數走無號
-  運算，所以 `-Integer.MIN_VALUE` 與 `Long.MAX_VALUE++` 的繞回跟 Java 一樣），
-  `++`／`--` 把結果裝進**新的**包裝再存回變數（包裝不可變，另一個變數握著舊的不能跟著
-  變），null 則丟 NullPointerException。兩個後端都有（LLVM 原本拒絕這幾個運算式，現在照同一套規則降低）；端到端測試
-  `tests/programs/t182_boxed_unary.teyru` 的輸出與 javac 21／JVM 逐位元相同（兩端邊界、繞回、欄位與陣列元素、null 都涵蓋）。**仍未修**：`~` 作用在
-  包裝上被檢查器以 `TY-TYP-0053` 拒絕，而 Java 允許（解裝箱後取補數）——那是語言介面
-  的決定，不是這一組的。
-
-  速度沒有退步，包裝型別的呼叫反而比原本的 native 呼叫快（rebase 到 `11557ad` 之後，
-  同一台機器、交錯量測、best-of-5，前 → 後）：`intValue()`／`hashCode()`／`longValue()`
-  的純讀取迴圈 600M 次 0.4825 → 0.0898 s（**5.4 倍快**）、4000 萬次裝箱
-  0.2495 → 0.2357 s（快 5.7%）、1 億次配置 0.1115 → 0.1110 s、`bench_loop`
-  0.1147 → 0.1144 s、`bench_string` 0.0602 → 0.0602 s。`examples/` 的表（`RUNS=5`）：
-  bench_alloc 0.0234 → 0.0234、bench_loop 0.0245 → 0.0244、bench_string
-  0.0157 → 0.0157、bench_invoke 0.6057 → 0.5876、bench_fib 0.0053 → 0.0054、
-  bench_oop 0.0055 → 0.0055；啟動 100 次 0.0789 → 0.0754 s，hello world
-  95,832 → 95,792 位元組（vtable 剪枝之後的基準；**.text 少掉的那部分**與這個移動
-  互相抵消，淨差 40 位元組），peak RSS 兩邊都是 4048 kB。
-
-  為此編譯器多了一條綁定規則：**呼叫 `final` 類別或 `final` 方法的實例方法時直接
-  綁定，不讀 vtable**（`emit_expr.go` 的 `directBind`）。一個不可能被覆寫的方法在
-  slot 裡只有一個實作，這與 `nativeIsFinal` 對 native 輔助函式的推論相同；包裝類別
-  都是 final（Java 也是），所以 `x.intValue()` 仍然是一個普通呼叫而不是 vtable 載入。
-  這條規則刻意**不用**「這個程式裡沒有任何類別繼承它」那個更寬、也一樣正確的版本：
-  那個版本會連 `new Cell(i).value()` 都綁定，於是優化器可以整個刪掉配置——
-  `examples/bench_alloc` 在 1 億次迭代由 0.1101 s 掉到 0.0225 s（同一次交錯量測裡
-  的 0.1101／0.1100／0.0225），代價是那個基準再也不量測配置（它會變成一個純加法的
-  迴圈）。順帶一提，那個版本也讓 vtable 剪枝多丟掉一批 slot（hello world 再從
-  95,792 掉到 55,720 位元組，比「每個 slot 都空」的 56,392 還低）。要用更寬的規則，
-  就得先重新設計那個基準。
+- **vtable 剪裁的第二段（已落地）**：第一段只會保留「沒有任何可達分派會讀到的 slot」以外的
+  全部；7／12／13／16 這四個索引當時對**每個**存活類別都填，因為掃描看不到那些分派。但產生
+  的 C 內文其實帶著擁有者
+  （`((RET(*)(OWNER*, ...))((recv)->obj.cls->vtable[N]))`），所以問題只是「接收者能不能是該擁
+  有者的子類別」，而類別記錄（`.super`、`.ifaces`）就在同一份 C 裡。掃描現在走這個超集：
+  hello 由 95,064 掉到 **55,920 位元組**（`-O2`；`-O1` 是 75,232、`-O3` 是 59,408），
+  t84 由 104,408 到 74,888、t133 由 101,160 到 61,064、t51 由 442,040 到 253,328。
+  **仍然無條件的是 slots 0／1／2**，而且不能用子類別測試收窄：執行期是拿 `void *`／`tyobj *`
+  按索引讀它們的（`print_uncaught` 與字串輔助函式讀 `[0]`、`ty_obj_hash` 讀 `[1]`、
+  `ty_obj_equal` 讀 `[2]`），所以它們的擁有者是繼承樹的根。要再往下砍就需要「某個類別永遠不會
+  有實例」這個事實，而 C 內文不決定它（物件可以來自存活方法裡的 `ty_alloc`、該類別的區域變數、
+  執行期自己的字串／陣列／裝箱／例外，或反射），而且那裡猜錯的代價是跳到 NULL，不是浪費幾個
+  位元組。剪裁後的 C 裡量到：628 個 vtable 陣列、511 個有任何填入、**只有一個**在索引 3 以上有
+  填入（`Class` 自己的 7／12／13／16）。用到反射的程式不變（各約 4.1～4.9 MB），因為反射會從
+  main 接上每一張成員表；五個基準的時間與 checksum 都不變。
 
 ---
 
