@@ -40,6 +40,11 @@ flags:
   -o <path>     output executable (default a.out)
   -c <path>     keep the generated C at <path>
   --cc <name>   C compiler to use (default clang)
+  --target <os/arch>  platform to build for (default this machine):
+                linux/amd64, linux/arm64, windows/amd64, darwin/amd64,
+                darwin/arm64. A target other than this machine's needs the
+                cross compiler for it on PATH (windows/amd64:
+                x86_64-w64-mingw32-gcc), and appends its output suffix.
   -O0..-O3      optimisation level (default -O2)
   --llvm-ir <p> write the LLVM IR module to <p> (the backend is clang/LLVM)
   --backend <b> c (default) or llvm: which back end compiles the program.
@@ -139,6 +144,15 @@ func run() int {
 			i++
 			if i < len(args) {
 				opts.EmitLLVM = args[i]
+			}
+		case a == "--target":
+			// The platform to build for, as <os>/<arch> (linux/amd64,
+			// windows/amd64, ...). The driver resolves it and refuses one it has
+			// no compiler for; omitting it builds for this machine, as it
+			// always did.
+			i++
+			if i < len(args) {
+				opts.Target = args[i]
 			}
 		case a == "--backend":
 			i++

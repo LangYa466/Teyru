@@ -121,20 +121,23 @@ func (e *llvmEmitter) literal(f *fb, l *ast.Literal) lval {
 	return value("0", nil)
 }
 
-// floatLit renders a floating point constant. An infinity or a NaN has no
-// decimal spelling, so it goes in as its bit pattern; everything else is written
-// with enough digits to round-trip.
+// floatLit renders a floating point constant as its bit pattern.
+//
+// The bit pattern rather than a decimal spelling, because LLVM parses a decimal
+// floating point literal as a double and then requires it to be a value the
+// operand's type can hold: `float 1.401298464e-45` -- the nine significant
+// digits that round-trip a float32 -- is rejected as "floating point constant
+// invalid for type", and only the seventeen-digit form of the double it came
+// from is accepted. Nine digits look right and are wrong; the bits cannot be.
+//
+// A `single` constant is the float32 the program really has, widened for the
+// literal, so that the constant and the value the program computes are the same
+// number.
 func floatLit(v float64, single bool) string {
 	if single {
-		if f := float32(v); math.IsInf(float64(f), 0) || f != f {
-			return fmt.Sprintf("0x%X", math.Float32bits(f))
-		}
-		return strconv.FormatFloat(v, 'e', 9, 32)
+		v = float64(float32(v))
 	}
-	if math.IsInf(v, 0) || v != v {
-		return fmt.Sprintf("0x%X", math.Float64bits(v))
-	}
-	return strconv.FormatFloat(v, 'e', 17, 64)
+	return fmt.Sprintf("0x%X", math.Float64bits(v))
 }
 
 // ---------------------------------------------------------------- names
@@ -634,14 +637,19 @@ func (e *llvmEmitter) condExpr(f *fb, v *ast.Cond) lval {
 	f.cbr(e.toBool(f, v.C), then, els)
 	f.label(then)
 	x := e.coerce(f, e.expr(f, v.X), v.GetType())
+	// The arm may have split its own block -- a cast inside it emits a check --
+	// and the phi has to name the block that branches to the join, not the one
+	// the arm started in.
+	xFrom := f.cur
 	f.br(join)
 	f.label(els)
 	y := e.coerce(f, e.expr(f, v.Y), v.GetType())
+	yFrom := f.cur
 	f.br(join)
 	f.label(join)
 	ty := e.llvmType(v.GetType())
 	r := f.reg()
-	f.ins(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", r, ty, x.v, then, y.v, els))
+	f.ins(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", r, ty, x.v, xFrom, y.v, yFrom))
 	return value(r, v.GetType())
 }
 

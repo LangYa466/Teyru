@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -34,6 +35,11 @@ type Options struct {
 	CC       string // C compiler (default: clang)
 	Opt      string // optimisation flag (default -O2)
 	EmitLLVM string // if set, also write LLVM IR here (the backend is clang/LLVM)
+	// Target is the platform to build for, as "<os>/<arch>". Empty is the
+	// machine this compiler is running on, which is what every build was before
+	// targets existed. It selects the C compiler, the flags, the platform half
+	// of the runtime and the output suffix; see resolveTarget below.
+	Target string
 	// Backend selects what compiles the program. The C backend is the default
 	// and the one the whole standard library is known to work with; the LLVM
 	// backend emits the program's own module, so that nothing hands the program
@@ -73,6 +79,12 @@ type Result struct {
 
 // Compile turns Teyru sources into a native executable.
 func Compile(paths []string, opts Options) (*Result, error) {
+	// The target is resolved first so that "no compiler for that platform" is
+	// said before a single file is read, let alone a program compiled.
+	tgt, err := resolveTarget(opts.Target)
+	if err != nil {
+		return nil, err
+	}
 	if len(paths) == 0 {
 		paths = []string{"."}
 	}
@@ -196,7 +208,7 @@ func Compile(paths []string, opts Options) (*Result, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	rtC := writeRuntime(rtDir)
+	rtC := writeRuntime(rtDir, tgt)
 	if err := os.WriteFile(cfile, []byte(csrc), 0o644); err != nil {
 		return nil, err
 	}
@@ -211,7 +223,13 @@ func Compile(paths []string, opts Options) (*Result, error) {
 	}
 	cc := opts.CC
 	if cc == "" {
-		cc = findCC()
+		// The target's own compiler when it names one -- a cross compiler is not
+		// interchangeable with the host's -- and the host's own otherwise, which
+		// is the first of clang, gcc and cc that is on PATH, exactly as before.
+		cc = tgt.cc
+		if cc == "" {
+			cc = findCC()
+		}
 	}
 	// The result reports each output as it is written, so a failure never
 	// claims a file that was not produced.
@@ -230,6 +248,12 @@ func Compile(paths []string, opts Options) (*Result, error) {
 		return res, nil
 	}
 	exe := opts.Out
+	// A target whose executables are named by their extension gets one, unless
+	// the caller already wrote it: `teyru build -o out prog.teyru --target
+	// windows/amd64` produces out.exe, which is a file Windows will run.
+	if tgt.suffix != "" && !strings.HasSuffix(exe, tgt.suffix) {
+		exe += tgt.suffix
+	}
 	// -fwrapv: Java's integer arithmetic wraps, and C's is undefined on
 	// overflow, which a compiler is free to fold away. It did: `Integer.MIN_VALUE
 	// * -1` printed 2147483648 and `-Long.MIN_VALUE` printed 0, because the
@@ -238,6 +262,14 @@ func Compile(paths []string, opts Options) (*Result, error) {
 	base := []string{opt, "-std=gnu11", "-fwrapv", "-fno-strict-aliasing", "-w", "-I", rtDir, cfile}
 	base = append(base, strings.Fields(rtC)...)
 	base = append(base, opts.Native...)
+	base = append(base, tgt.cflags...)
+	// The target's own flags, before the libraries: -static has to be seen
+	// before the -l that follows it, or the library it is meant to apply to is
+	// taken from the dynamic import library instead and the program needs a
+	// DLL beside it. ws2_32 is the other one that matters here: the socket
+	// layer calls Winsock, and a program that links it without that library
+	// does not link at all.
+	base = append(base, tgt.ldflags...)
 	base = append(base, "-o", exe, "-lm", "-lpthread")
 	base = append(base, opts.Link...)
 	base = append(base, opts.ExtraCC...)
@@ -284,6 +316,22 @@ const (
 // runtime, which is C. A refusal is a diagnostic, not a fallback.
 func compileLLVM(prog *sema.Program, opts Options, diags *source.Diagnostics) (*Result, error) {
 	res := &Result{Diags: diags}
+	// The target decides which half of the runtime is compiled beside the module
+	// and what the output is called, exactly as it does for the C back end.
+	tgt, err := resolveTarget(opts.Target)
+	if err != nil {
+		return nil, err
+	}
+	// The module this back end writes carries a target triple and calls this
+	// machine's C library and the runtime's C directly, so it is right for the
+	// platform it was written for and for no other. Handing it to another
+	// platform's linker would produce something wrong in a way nobody sees until
+	// it runs there, so a target it was not written for is refused here.
+	if tgt.name != "linux/amd64" {
+		diags.Errorf(source.Pos{}, "TY-INT-0101",
+			"the llvm back end compiles for linux/amd64 only (%s was asked for); use the c back end for other platforms", tgt.name)
+		return res, fmt.Errorf("the llvm backend has no such target")
+	}
 	ir, refusal := codegen.EmitLLVM(prog)
 	if refusal != nil {
 		diags.Errorf(refusal.Pos, refusal.Code, "%s", refusal.Message())
@@ -306,7 +354,7 @@ func compileLLVM(prog *sema.Program, opts Options, diags *source.Diagnostics) (*
 	if err := os.MkdirAll(filepath.Dir(mfile), 0o755); err != nil {
 		return nil, err
 	}
-	rtC := writeRuntime(rtDir)
+	rtC := writeRuntime(rtDir, tgt)
 	if err := os.WriteFile(mfile, []byte(ir), 0o644); err != nil {
 		return nil, err
 	}
@@ -337,7 +385,10 @@ func compileLLVM(prog *sema.Program, opts Options, diags *source.Diagnostics) (*
 	}
 	cc := opts.CC
 	if cc == "" {
-		cc = findCC()
+		cc = tgt.cc
+		if cc == "" {
+			cc = findCC()
+		}
 	}
 	// -fwrapv and -fno-strict-aliasing are the runtime's, not the program's: the
 	// generated module states its own wrapping arithmetic and its own loads.
@@ -347,7 +398,13 @@ func compileLLVM(prog *sema.Program, opts Options, diags *source.Diagnostics) (*
 		"-x", "ir", mfile, "-x", "none"}
 	base = append(base, strings.Fields(rtC)...)
 	base = append(base, opts.Native...)
-	base = append(base, "-o", opts.Out, "-lm", "-lpthread")
+	base = append(base, tgt.cflags...)
+	base = append(base, tgt.ldflags...)
+	exe := opts.Out
+	if tgt.suffix != "" && !strings.HasSuffix(exe, tgt.suffix) {
+		exe += tgt.suffix
+	}
+	base = append(base, "-o", exe, "-lm", "-lpthread")
 	base = append(base, opts.Link...)
 	base = append(base, opts.ExtraCC...)
 	args := append([]string{}, base...)
@@ -382,7 +439,7 @@ func compileLLVM(prog *sema.Program, opts Options, diags *source.Diagnostics) (*
 			return res, backendFailure(errOut.String(), mfile, err)
 		}
 	}
-	res.Exe = opts.Out
+	res.Exe = exe
 	return res, nil
 }
 
@@ -673,11 +730,163 @@ func mangleForHeader(s string) string {
 	return strings.ToUpper(util.Mangle(s))
 }
 
+// -------------------------------------------------------- target support
+//
+// Everything that differs between the platforms this compiler can build for is
+// in the table below. The generated C is the same for every target, and so are
+// five of the runtime's six translation units: what a target changes is which C
+// compiler runs, which flags it is given, which half of the runtime is compiled
+// beside the rest, and what the output is called. A target that is not the
+// machine this is: the compiler here is a cross compiler, and a build that
+// cannot find one says so instead of producing something that does not run.
+
+// target is one row of the table: a platform, and what building for it takes.
+type target struct {
+	name string
+	// cc is the compiler to look for. Empty means the host's own -- the first of
+	// clang, gcc and cc that is on PATH -- which is what a build with no target
+	// has always used. A target whose OS differs from the host's must name one:
+	// an ordinary cc cannot produce a program for another operating system.
+	cc string
+	// platSrc and platText are the platform half of the runtime: the file name
+	// the build writes it under, and its text, which is embedded in the compiler
+	// (internal/runtime/embed.go).
+	platSrc  string
+	platText string
+	// suffix is appended to an output path that does not already end in it.
+	suffix string
+	// cflags and ldflags are added to the compile and link command lines. Empty
+	// for most targets: the platform is detected by the C preprocessor's own
+	// _WIN32 rather than by a define this table hands it.
+	cflags  []string
+	ldflags []string
+}
+
+// targets is the list of platforms this compiler knows how to build for. It is
+// not a promise that each one has been run: linux/amd64 is the suite's, and a
+// target that needs a cross toolchain this machine does not have fails at the
+// compiler, with the compiler's own error, rather than silently.
+var targets = map[string]*target{
+	"linux/amd64": {
+		name:     "linux/amd64",
+		platSrc:  "tyrt_plat_posix.c",
+		platText: tyrt.PlatPosix,
+	},
+	"linux/arm64": {
+		name:     "linux/arm64",
+		cc:       "aarch64-linux-gnu-gcc",
+		platSrc:  "tyrt_plat_posix.c",
+		platText: tyrt.PlatPosix,
+	},
+	"windows/amd64": {
+		name:     "windows/amd64",
+		cc:       "x86_64-w64-mingw32-gcc",
+		platSrc:  "tyrt_plat_win.c",
+		platText: tyrt.PlatWin,
+		suffix:   ".exe",
+		// -lws2_32 is Winsock, which the socket layer calls. -static is what
+		// makes the program stand alone: the threads are winpthreads, and
+		// without it every program this compiler produced would need
+		// libwinpthread-1.dll next to it.
+		ldflags: []string{"-lws2_32", "-static"},
+	},
+	// The Apple targets are built by the host's own clang, which is the only
+	// compiler that has an SDK to build against: there is no cross compiler for
+	// macOS that this table could name, so asking for one from another host is
+	// an error rather than a build that fails somewhere less obvious.
+	"darwin/amd64": {
+		name:     "darwin/amd64",
+		platSrc:  "tyrt_plat_posix.c",
+		platText: tyrt.PlatPosix,
+	},
+	"darwin/arm64": {
+		name:     "darwin/arm64",
+		platSrc:  "tyrt_plat_posix.c",
+		platText: tyrt.PlatPosix,
+	},
+}
+
+// hostTarget is what a build with no target asked for gets: the machine this
+// compiler is running on, with the compiler it already has.
+func hostTarget() *target {
+	name := runtime.GOOS + "/" + runtime.GOARCH
+	if t, ok := targets[name]; ok {
+		c := *t
+		// A host builds with its own compiler: the one the table names for this
+		// platform if it is installed, and otherwise the first of clang, gcc and
+		// cc, which is what a build has always used. On Windows the two are not
+		// interchangeable -- the runtime is written against winpthreads' pthread
+		// and against Winsock, and a clang configured for the MSVC target has
+		// neither -- so the compiler the platform is known to be built with is
+		// preferred rather than left to whichever happens to be first on PATH.
+		c.cc = ""
+		if t.cc != "" {
+			if _, err := exec.LookPath(t.cc); err == nil {
+				c.cc = t.cc
+			}
+		}
+		return &c
+	}
+	return &target{
+		name:     name,
+		platSrc:  platSrcFor(runtime.GOOS),
+		platText: platTextFor(runtime.GOOS),
+	}
+}
+
+// platSrcFor is the platform half of the runtime an OS compiles. Anything that
+// is not Windows is POSIX, which is a real statement and not a default: the
+// layer's POSIX implementation is the one the C library of every other system
+// this could be built on provides.
+func platSrcFor(goos string) string {
+	if goos == "windows" {
+		return "tyrt_plat_win.c"
+	}
+	return "tyrt_plat_posix.c"
+}
+
+func platTextFor(goos string) string {
+	if goos == "windows" {
+		return tyrt.PlatWin
+	}
+	return tyrt.PlatPosix
+}
+
+// resolveTarget turns a --target into the target a build uses. An empty name is
+// the host. An unknown name, or one whose compiler is not installed, is an
+// error: a build must not quietly produce a program for somewhere else.
+func resolveTarget(name string) (*target, error) {
+	if name == "" || name == runtime.GOOS+"/"+runtime.GOARCH {
+		return hostTarget(), nil
+	}
+	t, ok := targets[name]
+	if !ok {
+		names := make([]string, 0, len(targets))
+		for k := range targets {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		return nil, fmt.Errorf("unknown target %q: known targets are %s", name, strings.Join(names, ", "))
+	}
+	if t.cc == "" {
+		return nil, fmt.Errorf("no C compiler for %s on a %s host: building for it needs a compiler that runs here and targets it",
+			name, runtime.GOOS+"/"+runtime.GOARCH)
+	}
+	if _, err := exec.LookPath(t.cc); err != nil {
+		return nil, fmt.Errorf("no C compiler for %s: %s is not on PATH", name, t.cc)
+	}
+	return t, nil
+}
+
 // writeRuntime materialises the C runtime next to the generated program.
-func writeRuntime(dir string) string {
+func writeRuntime(dir string, tgt *target) string {
 	// The header only has to exist next to the sources: it is found through the
 	// -I on the command line, so it is written but never reported back.
 	must(os.WriteFile(filepath.Join(dir, "tyrt.h"), []byte(tyrt.Header), 0o644))
+	// The platform layer's interface, which every one of the six sources below
+	// includes: what the runtime may call, and where an operating system call is
+	// allowed to be made from.
+	must(os.WriteFile(filepath.Join(dir, "tyrt_plat.h"), []byte(tyrt.PlatHeader), 0o644))
 	c1 := filepath.Join(dir, "tyrt.c")
 	c2 := filepath.Join(dir, "tyrt2.c")
 	c3 := filepath.Join(dir, "tyrt_net.c")
@@ -688,7 +897,12 @@ func writeRuntime(dir string) string {
 	must(os.WriteFile(c4, []byte(tyrt.Reflect), 0o644))
 	c5 := filepath.Join(dir, "tyrt_thread.c")
 	must(os.WriteFile(c5, []byte(tyrt.Thread), 0o644))
-	return c1 + " " + c2 + " " + c3 + " " + c4 + " " + c5
+	// The platform half of the runtime, and the one file that differs between
+	// targets: exactly one of the two is compiled, and which one is the target's
+	// business rather than the C compiler's.
+	c6 := filepath.Join(dir, tgt.platSrc)
+	must(os.WriteFile(c6, []byte(tgt.platText), 0o644))
+	return c1 + " " + c2 + " " + c3 + " " + c4 + " " + c5 + " " + c6
 }
 
 func must(err error) {

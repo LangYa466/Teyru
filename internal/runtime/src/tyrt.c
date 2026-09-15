@@ -1,4 +1,3 @@
-#define _GNU_SOURCE 1
 /* tyrt.c - Teyru native runtime. */
 #include "tyrt.h"
 
@@ -8,8 +7,6 @@
 #include <math.h>
 #include <float.h>
 #include <stdarg.h>
-#include <pthread.h>
-#include <unistd.h>
 
 #if defined(__has_feature)
 #if __has_feature(address_sanitizer)
@@ -138,16 +135,17 @@ static size_t gc_heap_span = 0;
    collector for the whole of a collection. ty_heap_lock counts the caller as
    stopped while it waits, which is what keeps a collector holding this lock from
    waiting for the threads that want it. */
-static pthread_mutex_t heap_mtx = PTHREAD_MUTEX_INITIALIZER;
+static typlat_mutex heap_mtx = TYPLAT_MUTEX_INITIALIZER;
 
 /* Where a scan of a stopped thread starts, below the point the thread recorded
-   when it stopped. The frame that blocks belongs to libc (pthread_cond_wait,
-   nanosleep) and its saved registers are just below that point; none of them can
-   be found by arithmetic, so a fixed margin is scanned conservatively instead.
-   The words in it are stale stack words like the thousands the scan already
-   walks, so the cost is a little retention and the alternative -- missing a
-   register that holds the only reference to a live object -- is a crash. The
-   scan never starts below the thread's own stack base. */
+   when it stopped. The frame that blocks belongs to the platform layer's own
+   wait (typlat_cond_wait, typlat_sleep_ns) and its saved registers are just
+   below that point; none of them can be found by arithmetic, so a fixed margin
+   is scanned conservatively instead. The words in it are stale stack words like
+   the thousands the scan already walks, so the cost is a little retention and
+   the alternative -- missing a register that holds the only reference to a live
+   object -- is a crash. The scan never starts below the thread's own stack
+   base. */
 #define TY_PARK_MARGIN 1024
 
 /* Free lists, declared here because the collector rebuilds them. */
@@ -192,11 +190,11 @@ void ty_heap_lock(void) {
      done nothing to the heap, and a collection must not wait for it -- the
      collector is holding this very lock. */
   ty_thread_stopped_begin();
-  pthread_mutex_lock(&heap_mtx);
+  typlat_mutex_lock(&heap_mtx);
 }
 
 void ty_heap_unlock(void) {
-  pthread_mutex_unlock(&heap_mtx);
+  typlat_mutex_unlock(&heap_mtx);
   ty_thread_stopped_end();
 }
 
@@ -3277,6 +3275,12 @@ tystr *ty_str_format(tystr *fmt, tyarr *args) {
 
 void ty_init(void) {
   ty_gc_init();
+  /* Bring up the platform: Winsock, which has to be started before the first
+     socket exists, and the standard streams, which have to be in binary mode
+     before the first line is written to them. A no-op on POSIX, and it is here
+     rather than at the first use because a program's startup is the one point
+     every program passes through, before any thread is running. */
+  typlat_init();
   /* The main thread takes its place in the registry here, with the stack bounds
      the collector scans it by. Nothing has allocated yet: the first allocation
      is what takes the main thread's slab, exactly as it takes every other
