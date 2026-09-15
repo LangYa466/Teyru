@@ -227,6 +227,21 @@ void *ty_assertfail(const char *msg);
 #define TY_HDR 16
 #define TY_ALIGN 16
 
+/* How many blocks a thread takes out of the heap's free lists at once. The
+   sweep of a collection hands a whole slab of dead blocks back to those lists,
+   and a thread that then allocates them one at a time pays the heap lock, the
+   safepoint around it and a free-list write for every one of the thousands of
+   them: measured at 14 ns an allocation, 31% of bench_invoke. A batch pays that
+   once for TY_BATCH of them instead.
+
+   It is a bound on memory a collection cannot reuse rather than a tuning knob:
+   worst case a thread holds TY_BATCH blocks of every size class, and the
+   classes run to 1 KB, so a thread that allocates one block of every class and
+   then stops still holds under 2 MB. TY_NCLASS in tyrt.c is the number of
+   classes and the size of the table below. */
+#define TY_BATCH 64
+#define TY_BATCH_CLASSES 64
+
 /* ---- threads and the per-thread state ---------------------------------
 
    Everything the runtime keeps for one thread lives in the struct below,
@@ -245,11 +260,21 @@ struct tythread {
   /* The thread's own slab of the heap. `bump` walks it and `bump_end` is where
      it ends, so an allocation is a pointer comparison and a pointer bump; only
      a refill -- the slab running out, or the collection budget running out --
-     enters the runtime and takes the heap lock. `chunk` is the slab itself, a
-     tychunk the heap owns and the collector walks. */
+     enters the runtime at all, and one the batch below can serve does it
+     without the heap lock. `chunk` is the slab itself, a tychunk the heap owns
+     and the collector walks. */
   char *bump, *bump_end;
   int64_t alloc_since;
   void *chunk;
+  /* The thread's own share of the free lists: what one batch taken from them
+     under the heap lock left behind, indexed by the size class the blocks were
+     filed under -- and a block's class is its size, so a block handed out here
+     is exactly the size the request asked for and nothing is searched. This is
+     where the drain of a collection's dead blocks is served from without the
+     lock. collect_slabs empties every thread's table before the sweep rebuilds
+     the free lists, so that no thread is left holding a link into a list the
+     sweep rewrote. */
+  void *batch[TY_BATCH_CLASSES];
   /* The shadow stack: the roots the runtime's own C code pushes around an
      object it holds across a call (tyrt_net.c and tyrt_reflect.c). Generated
      code needs none: its live references are on the C stack, which the

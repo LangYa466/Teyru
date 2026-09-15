@@ -82,16 +82,69 @@ const objectProtocolSlots = 3
 // receiver is untyped), so the slot a dispatch needs is the integer after this.
 const dispatchPrefix = "->vtable["
 
+// tlsPrefix is what the name of every TLS helper in the runtime starts with.
+// Those helpers are the runtime's one dependency on a library this compiler does
+// not ship -- OpenSSL -- so the emitted C naming one of them is what decides
+// whether a build compiles internal/runtime/src/tyrt_tls.c and links -lssl.
+const tlsPrefix = "ty_tls_"
+
 // pruneVtables returns src with every vtable slot that no reachable dispatch can
-// read set to NULL. It returns src unchanged when the C is not shaped the way
-// the scan expects.
-func pruneVtables(src string) string {
+// read set to NULL, and whether the program can reach a TLS helper.
+//
+// It returns src unchanged and true when the C is not shaped the way the scan
+// expects: a program whose C cannot be read is then linked as if it used TLS,
+// because an unused library costs a dependency and a missing one costs the
+// build. The next version of the emitter is the thing that would change the
+// shape, and a dependency is the failure that does not stop anybody from
+// getting their program.
+func pruneVtables(src string) (string, bool) {
 	p := parseC(src)
 	if p == nil {
-		return src
+		return src, true
 	}
 	p.liveSlots()
-	return p.rewrite()
+	return p.rewrite(), p.reachesTLS()
+}
+
+// reachesTLS reports whether the program can reach a call to one of the runtime's
+// TLS helpers: the definitions the fixpoint marked live, and the entry point
+// itself, which is not one of them (main is written without `static`, exactly so
+// that a program may name the runtime's helpers without a procedure in between).
+//
+// This is the same reachability the vtable rewrite above computes, and reading
+// it off the emitted C rather than off the tree is deliberate for the same
+// reason: the C is what the linker sees. A call written in a method nothing can
+// run -- the https branch of a client no program uses -- is not live here, and
+// the bytes it would have taken are not in the program either.
+//
+// One thing it is not is precise about *branches*: a live method's every call is
+// live, taken or not, because a call graph has no notion of which way a test
+// went. The consequence is worth knowing when a program that does not use TLS
+// turns out to be linked against OpenSSL: a program that reaches Class.forName
+// carries the table that names every class of the program
+// (emitSynth's forname_all), and that makes the TLS classes live -- so every
+// client of the reflection API, which includes anything the web framework scans,
+// reaches the TLS layer through them. That is a program that already carries the
+// whole standard library (see AGENTS.md on the 4 MB a reflecting program costs),
+// and it is the same conservative direction as the slot pruning: a layer linked
+// and not called costs bytes, and one called and not linked does not build.
+func (p *cparse) reachesTLS() bool {
+	for i, d := range p.defs {
+		if !p.live[i] || !d.fn {
+			continue
+		}
+		for k := d.start; k <= d.end; k++ {
+			if strings.Contains(p.lines[k], tlsPrefix) {
+				return true
+			}
+		}
+	}
+	for k := p.rootStart; k <= p.rootEnd; k++ {
+		if strings.Contains(p.lines[k], tlsPrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // cdef is one file-scope definition in the generated C: a function, or one of
@@ -128,6 +181,10 @@ type cparse struct {
 	// roots is the entry point's references: the seed of the fixpoint. It is not
 	// one of the defs, because main is written without `static`.
 	roots *cdef
+	// rootStart and rootEnd are the lines roots was read from, which is what a
+	// question about the entry point itself -- does main name a TLS helper --
+	// has to be asked of.
+	rootStart, rootEnd int
 	// live marks the definitions the fixpoint reached, and need the dispatches a
 	// reached method makes.
 	live []bool
@@ -205,6 +262,7 @@ func parseC(src string) *cparse {
 		}
 	}
 	p.roots = &cdef{name: "int main", refs: map[int]bool{}, slots: map[slotKey]bool{}}
+	p.rootStart, p.rootEnd = mainAt, len(lines)-1
 	for k := mainAt; k < len(lines); k++ {
 		p.scanLine(lines[k], p.roots)
 	}

@@ -8,13 +8,21 @@ package teyru
 // host and port, which is what makes a second request to the same server cheap
 // and what every client does.
 //
-// Two things are not here, and both are said rather than hidden:
+// https:// works, and the policy it works under is worth stating where a caller
+// can read it: the URL opens the same connection a http:// URL does and the TLS
+// handshake runs on it, the certificate the server presents is verified against
+// the system's trust anchors -- and, when a caller names one with trustStore, a
+// CA file of its own as well -- and the host in the URL is checked against the
+// certificate. A certificate that is not trusted and a certificate that is
+// trusted but is not for that host fail the request with two different
+// exceptions, because they are two different problems. There is no way to ask
+// this client to accept anything: a TLS client that checks nothing hands the
+// program a stream it believes is a particular server while anyone on the path
+// can read and rewrite it.
 //
-//   * HTTPS. The runtime has no TLS, so an https:// URL is refused instead of
-//     opening a socket that would fail the handshake. A client that needs it
-//     needs a TLS implementation first.
-//   * Redirects. A 3xx is answered as it stands, with the Location header there
-//     for a caller that wants to follow it.
+// One thing is not here, and it is said rather than hidden: redirects. A 3xx is
+// answered as it stands, with the Location header there for a caller that wants
+// to follow it.
 
 // HttpUrl is a URL split into the parts a client needs. Java's URI does more
 // (relative resolution, encoding rules); this does what a request needs.
@@ -411,6 +419,11 @@ class HttpClient {
   private Socket socket
   private String connectedTo = ""
   private int timeoutMs = 30000
+  // The PEM file whose certificates are trusted in addition to the system's, or
+  // "" for none. It is a path and not a context because a client is built per
+  // request by Http, and reading a file is what happens once per connection
+  // rather than once per builder call.
+  private String trustCa = ""
 
   public static HttpClient newHttpClient() {
     return new HttpClient()
@@ -421,12 +434,20 @@ class HttpClient {
     return this
   }
 
+  // trustStore adds a CA file to the anchors this client verifies against: the
+  // certificates in it are trusted as well as the system's, which is what a
+  // server with a private CA -- or a test with a self-signed certificate --
+  // needs. It does not replace them, and there is no call that removes them:
+  // the point of a trust store is that a name is either covered by a
+  // certificate someone vouched for or is not.
+  public HttpClient trustStore(String caFile) {
+    this.trustCa = caFile
+    return this
+  }
+
   public HttpClientResponse send(HttpClientRequest request) {
     HttpUrl u = HttpUrl.of(request.url)
-    if (u.scheme.equals("https")) {
-      throw new IllegalStateException("https is not supported: the runtime has no TLS")
-    }
-    if (u.scheme.length() > 0 && u.scheme.equals("http") == false) {
+    if (u.scheme.length() > 0 && u.scheme.equals("http") == false && u.scheme.equals("https") == false) {
       throw new IllegalStateException("unsupported scheme: " + u.scheme)
     }
     HttpClientResponse res = exchange(u, request)
@@ -473,6 +494,15 @@ class HttpClient {
     close()
     socket = new Socket(u.host, u.port)
     socket.setSoTimeout(timeoutMs)
+    // https is the same connection with a handshake on it, and the timeout is
+    // set before the handshake rather than after it: a peer that accepts the
+    // connection and then says nothing would otherwise hold the request for as
+    // long as it likes. Everything above this -- the request, the response
+    // parser, the reuse of the connection for the next request -- is the same
+    // code for both schemes.
+    if (u.scheme.equals("https")) {
+      socket = TlsSocket.start(socket, u.host, trustCa)
+    }
     connectedTo = key
     return socket
   }
