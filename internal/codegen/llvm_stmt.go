@@ -32,7 +32,7 @@ func (e *llvmEmitter) stmt(f *fb, s ast.Stmt) {
 	case *ast.LocalVar:
 		e.localVar(f, v)
 	case *ast.LocalClass:
-		e.refuse(noPos, "a local class: the llvm back end has no closure layout")
+		e.localClassStmt(f, v)
 	case *ast.ExprStmt:
 		e.exprStmt(f, v.X)
 	case *ast.If:
@@ -90,6 +90,23 @@ func (e *llvmEmitter) exprStmt(f *fb, x ast.Expr) {
 		return
 	}
 	e.expr(f, x)
+}
+
+// localClassStmt writes what a class declared inside a method leaves behind:
+// the instance an @Helper local class is used through. The class itself is
+// reached through the `new` that creates it, but that instance is a variable of
+// the enclosing method and has to be initialized here -- leaving it to the stack
+// is what made an unqualified call reach an object that was never built.
+func (e *llvmEmitter) localClassStmt(f *fb, v *ast.LocalClass) {
+	if v.Instance == nil {
+		return
+	}
+	slot := f.localSlot(v.Instance)
+	if v.InstanceInit == nil {
+		e.store(f, slot, v.Instance.Type, f.zero(v.Instance.Type))
+		return
+	}
+	e.store(f, slot, v.Instance.Type, e.coerce(f, e.expr(f, v.InstanceInit), v.Instance.Type))
 }
 
 func (e *llvmEmitter) localVar(f *fb, v *ast.LocalVar) {
@@ -205,7 +222,42 @@ func (e *llvmEmitter) forStmt(f *fb, v *ast.For) {
 func (e *llvmEmitter) forEach(f *fb, v *ast.ForEach) {
 	labels := f.takeLabels()
 	if v.Iterable {
-		e.refuse(noPos, "a colon loop over an Iterable: the llvm back end does not lower interface dispatch")
+		// `for (T x : collection)` is the Iterable protocol: one interface call
+		// for the iterator, then hasNext/next per turn. The selector decides the
+		// implementation and the receiver's class answers it, exactly as the C
+		// back end's three ty_itab calls do.
+		itM := e.ifaceMethod(e.p.Builtins.Iterable, "iterator", 0)
+		hnM := e.ifaceMethod(e.p.Builtins.Iterator, "hasNext", 0)
+		nxM := e.ifaceMethod(e.p.Builtins.Iterator, "next", 0)
+		if itM == nil || hnM == nil || nxM == nil {
+			e.refuse(noPos, "a colon loop over an Iterable: this program's prelude has no iterator protocol")
+		}
+		it := e.ifaceDispatch(f, itM, e.expr(f, v.X), nil)
+		cond := f.nextLabel("fe_cond")
+		body := f.nextLabel("fe_body")
+		upd := f.nextLabel("fe_upd")
+		end := f.nextLabel("fe_end")
+		f.br(cond)
+		f.label(cond)
+		has := e.ifaceDispatch(f, hnM, it, nil)
+		c := f.reg()
+		f.ins(fmt.Sprintf("%s = icmp ne i32 %s, 0", c, has.v))
+		f.cbr(c, body, end)
+		f.label(body)
+		e.safepoint(f)
+		f.pushLoop(loopFrame{cont: upd, brk: end, labels: labels})
+		if v.Var.Sym != nil {
+			raw := e.ifaceDispatch(f, nxM, it, nil)
+			got := e.coerce(f, value(raw.v, nxM.Result), v.Elem)
+			e.store(f, f.localSlot(v.Var.Sym), v.Var.Sym.Type, e.coerce(f, got, v.Var.Sym.Type))
+		}
+		e.stmtAsBlock(f, v.Body)
+		f.popLoop()
+		f.br(upd)
+		f.label(upd)
+		f.br(cond)
+		f.label(end)
+		return
 	}
 	elem := v.Elem
 	arr := e.expr(f, v.X)
@@ -594,7 +646,8 @@ func (e *llvmEmitter) leaveFinallys(f *fb, loopDepth int) {
 func (e *llvmEmitter) tryStmt(f *fb, v *ast.Try) {
 	// From here on every access to this function's own slots is volatile: the
 	// catch runs on the path setjmp's second return takes, and only memory is
-	// guaranteed to be there.
+	// guaranteed to be there. See the fb.slots comment for why this is the same
+	// rule C puts on a local live across a setjmp.
 	f.volatile = true
 	if len(v.Resources) > 0 {
 		e.refuse(noPos, "try-with-resources: the llvm back end does not lower interface dispatch (AutoCloseable.close)")
@@ -775,6 +828,11 @@ func (e *llvmEmitter) ctorBody(f *fb, cl *ast.Class, m *ast.Method, body *ast.Bl
 			e.directCall(f, sup, "%this", nil)
 		}
 	}
+	// the captures arrive as trailing parameters, before the field initializers
+	// run -- an initializer may read one
+	if len(cl.CapFields) > 0 {
+		e.bindCapturesFromParams(f, cl, m)
+	}
 	e.fieldInits(f, cl)
 	if body != nil {
 		stmts := body.Stmts
@@ -826,7 +884,7 @@ func (e *llvmEmitter) fieldInits(f *fb, cl *ast.Class) {
 // accessorBody writes a default property accessor, whose body is the backing
 // field.
 func (e *llvmEmitter) accessorBody(f *fb, m *ast.Method) {
-	fd := m.Prop
+	fd := e.canonicalField(m.Prop)
 	if fd == nil {
 		e.refuse(noPos, "the synthesized member %s.%s", m.Owner.Full, m.Name)
 	}
@@ -836,6 +894,7 @@ func (e *llvmEmitter) accessorBody(f *fb, m *ast.Method) {
 		g := "@" + util.Mangle(staticName(fd.Owner, fd))
 		if m.Accessor != nil && m.Accessor.IsSet {
 			e.store(f, g, fd.Type, e.coerce(f, value("%a0", m.Params[0]), fd.Type))
+			f.retVoid()
 			return
 		}
 		f.retVal(e.load(f, g, fd.Type).v)
@@ -844,6 +903,7 @@ func (e *llvmEmitter) accessorBody(f *fb, m *ast.Method) {
 	ptr := e.fieldAddr(f, fd, "%this", false)
 	if m.Accessor != nil && m.Accessor.IsSet {
 		e.store(f, ptr, fd.Type, e.coerce(f, value("%a0", m.Params[0]), fd.Type))
+		f.retVoid()
 		return
 	}
 	f.retVal(e.load(f, ptr, fd.Type).v)
