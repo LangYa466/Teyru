@@ -1722,21 +1722,39 @@ func (ctx *methodCtx) convertTo(e ast.Expr, target ast.Type) {
 	}
 }
 
+// widening reports whether a value of type `from` converts to `to` with no cast.
+//
+// The pairs are the ones JLS 5.1.2 lists, written out rather than read off an
+// ordering of the kinds. An ordering has to put byte below char -- they are both
+// one byte wide and both widen to int -- and putting it there says byte widens
+// to char, and short (beside char) widens to char, which the language does not
+// say: char is unsigned, and Java converts a byte or a short to a char only with
+// a cast. The difference is not academic. With the ordering, `String.valueOf(b)`
+// for a byte `b` resolved to valueOf(char) instead of valueOf(int) and printed
+// the character the byte encodes rather than its number, which is how the
+// standard library's own wrapper code had to be written around it.
 func widening(from, to *ast.PrimType) bool {
 	if from.Kind == to.Kind {
 		return true
 	}
-	order := map[ast.PrimKind]int{ast.Byte: 1, ast.Short: 2, ast.Char: 2, ast.Int: 3, ast.Long: 4, ast.Float: 5, ast.Double: 6}
-	if !from.IsNumeric() || !to.IsNumeric() {
-		return false
+	switch from.Kind {
+	case ast.Byte:
+		return to.Kind == ast.Short || to.Kind == ast.Int || to.Kind == ast.Long ||
+			to.Kind == ast.Float || to.Kind == ast.Double
+	case ast.Short:
+		return to.Kind == ast.Int || to.Kind == ast.Long ||
+			to.Kind == ast.Float || to.Kind == ast.Double
+	case ast.Char:
+		return to.Kind == ast.Int || to.Kind == ast.Long ||
+			to.Kind == ast.Float || to.Kind == ast.Double
+	case ast.Int:
+		return to.Kind == ast.Long || to.Kind == ast.Float || to.Kind == ast.Double
+	case ast.Long:
+		return to.Kind == ast.Float || to.Kind == ast.Double
+	case ast.Float:
+		return to.Kind == ast.Double
 	}
-	if from.Kind == ast.Char && to.Kind == ast.Short {
-		return false
-	}
-	if from.Kind == ast.Char && to.Kind == ast.Byte {
-		return false
-	}
-	return order[from.Kind] <= order[to.Kind]
+	return false
 }
 
 func fitsConstant(cv constValue, to *ast.PrimType) bool {
