@@ -1,0 +1,1756 @@
+package teyru
+
+/* java.util.zip's archive layer: ZipEntry, ZipOutputStream, ZipInputStream and
+   ZipFile, over the Deflater, Inflater and CRC32 in lib/44_zip.teyru.
+
+   A ZIP archive is a container, not a compression format, and that is what
+   makes it a different problem from the gzip in 44_zip: the bytes a reader
+   needs are in three places at once. Each entry has a local file header and its
+   data; every entry is described again in the central directory at the end of
+   the archive, together with the offset of its local header; and the central
+   directory is found through the end-of-central-directory record, which is the
+   last thing written and the only record whose position is fixed -- a reader
+   that cannot seek has to walk the local headers, and a reader that can seek
+   goes to the end first. ZipInputStream is the walker, ZipFile is the seeker,
+   and they share the field layout in this file rather than each having one.
+
+   What is here. ZipEntry is the record both of them produce: the name, the
+   size, the compressed size, the CRC-32, the compression method, the MS-DOS
+   date and time, the extra field and the comment. ZipOutputStream writes an
+   archive -- STORED and DEFLATED entries, the local headers, the data
+   descriptors when they are needed, the central directory and the end record --
+   and ZipInputStream and ZipFile read one back. ZipFile additionally answers
+   for an entry by name and for one entry's data at a time, which is what a
+   random-access reader is for.
+
+   The format decisions, and why each is a decision rather than a default.
+
+   * A local header is written ONCE, before the entry's data, and whether it
+     carries the sizes is decided at that moment. When the caller has supplied
+     the size, the compressed size and the CRC-32 (all three, and for a DEFLATED
+     entry the compressed size has to have been set by the caller rather than
+     inherited from a reader, which is Java's csizeSet rule), they go into the
+     local header and the entry needs nothing after its data. Otherwise the
+     header says zero and the three numbers follow the data as a data descriptor
+     with the 0x08074b50 signature, and general purpose flag bit 3 says so --
+     which is the only way to write an entry whose sizes are not known until it
+     has been compressed, and is what the JDK itself does in that case. A STORED
+     entry has no such option: a reader has to know where its data ends before
+     it reads one byte of it, so its sizes are required up front and this writer
+     refuses the entry rather than guessing. The choice is per entry and made by
+     the entry's own fields, exactly as in java.util.zip, so the same program
+     produces the same structure with both libraries.
+
+   * The general purpose bit flags that are honoured are three. Bit 0
+     (encryption) is rejected by both readers with the JDK's message: an
+     encrypted entry cannot be read, and reading its bytes as if they were data
+     would be a decryption that silently produces the wrong bytes. Bit 3 (data
+     descriptor) is set by the writer when the sizes are unknown, and is what
+     tells a reader to take the CRC-32, the compressed size and the size from
+     after the data rather than from the header. Bit 11 (the language encoding
+     flag, EFS) is set on every entry this writer writes, because a Teyru string
+     IS its UTF-8 bytes and there is no other charset to write in; a reader
+     ignores it for the same reason. The rest -- the level hints in bits 1 and
+     2, patched data, strong encryption, the reserved bits -- are read into the
+     entry's flag field and not otherwise acted on, which is also what the JDK
+     does with them.
+
+   * Names are UTF-8 bytes, always, with bit 11 set to say so, and the writer
+     has no charset parameter: java.util.zip's ZipOutputStream(OutputStream,
+     Charset) exists because a Java string is UTF-16 and has to choose, and this
+     language's strings are already the bytes the format wants. A reader decodes
+     a name without bit 11 as UTF-8 too, which is what the JDK's default
+     ZipCoder does (the ZIP specification's other answer, CP437, is not
+     implemented anywhere in this library); an archive whose names were written
+     in CP437 is read as its bytes, which is right for the ASCII names that are
+     nearly all of them.
+
+   * ZIP64 is refused rather than half-written. Everything the format needs for
+     an archive over 4 GiB, over 65534 entries, or with an entry at an offset
+     over 4 GiB, is a second set of 64-bit records: a ZIP64 extra field in both
+     the local and central headers, a ZIP64 end-of-central-directory record and
+     a locator. Writing the low 32 bits of a value that does not fit would
+     produce an archive that reads back truncated, so a value that does not fit
+     a field is a ZipException naming the field, and a reader that meets one of
+     the magic 0xFFFFFFFF or 0xFFFF values says ZIP64 is not implemented here
+     instead of misreading it. An archive small enough for 32-bit fields is what
+     this file does; that is every archive this library writes.
+
+   * The extra field is carried, not interpreted. A caller's bytes are written
+     into both headers exactly as given, and a reader hands them back exactly as
+     it read them. Two extra fields are therefore NOT synthesised: the
+     extended-timestamp field (0x5455) that records a unix time beside the DOS
+     one, and the ZIP64 field above. That has one visible consequence on the
+     reading side: the JDK prefers the extended timestamp, when an entry carries
+     one, over the MS-DOS date and time, and this ZipEntry does not -- getTime
+     and getTimeLocal answer from the DOS fields, which are the fields the
+     format defines and the only ones this library writes.
+
+   * The CRC-32 and the uncompressed size are checked by BOTH readers when an
+     entry's data has been read to its end, and the compressed size is checked
+     with them. java.util.zip's ZipInputStream does the same; its ZipFile does
+     not -- a ZipFile entry stream in the JDK hands back whatever the inflater
+     produced without looking at the CRC-32 or the size at all. This is the one
+     place this file deliberately disagrees with the JDK, and it disagrees in
+     the direction that costs a caller nothing when the archive is intact: a
+     corrupt or truncated entry that javac's ZipFile would return silently is a
+     ZipException here, with the JDK's own message for it.
+
+   * A time is the MS-DOS date and time, the only timestamp the format has, and
+     that part is exact: setTimeLocal and getTimeLocal convert between those
+     fields and java.time.LocalDateTime without a zone, which is what the JDK
+     does with the same two methods. setTime(long) and getTime() work in epoch
+     milliseconds, and they are where this library's one time convention shows:
+     there is no zone database anywhere in this library (see the note at the top
+     of lib/20_time.teyru), so an instant becomes a date and time in UTC, where
+     Java uses the JVM's default zone. They agree with javac exactly when the
+     JVM's default zone is UTC and differ by the offset otherwise, which is the
+     same deviation every other date in this library has. Nothing about an
+     archive depends on the difference: whichever zone wrote the DOS fields is
+     not recorded in them.
+
+   Everything else about the shape of the two readers. ZipInputStream reads the
+   local headers in order and stops when the signature stops matching, which is
+   how it ends at the central directory -- the archive's end is "the next four
+   bytes are not a local header", not a record with a length in it. Like
+   GZIPInputStream in 44_zip, it reads its input one byte at a time unless the
+   stream under it is a ByteArrayInputStream, because this library's InputStream
+   declares read() and readln() and no block read, and it keeps the bytes the
+   inflater did not consume in a pending region so that the next header starts
+   where the data ended rather than where the last read happened to end.
+   ZipFile reads the whole archive into memory and parses the central directory
+   from its end: this library has no seekable byte channel, and a byte array is
+   what a file, a jar and an HTTP body all already are. It answers entries() as
+   an Enumeration, as Java does, over a snapshot of the central directory taken
+   when the archive is opened.
+
+   How this file is verified. tests/programs/t185_zip_archive.teyru and
+   t186_zip_file.teyru are the same programs as the javac 21 programs in their
+   .java.ref files, and their .expected files are those programs' output on a
+   JVM whose default zone is UTC. Both are interoperable in both directions:
+   t185 carries one archive the JDK's ZipOutputStream wrote and one this
+   library's, and both programs read both, and t186 writes an archive to a file
+   with one library and reads it back with the other's ZipFile. A STORED-only
+   archive written here is byte for byte the JDK's for the same entries, which
+   is checked directly rather than argued; a DEFLATED one is not, because the
+   compressed bytes are the compressor's business (lib/44_zip.teyru says where
+   that equality holds and where it does not). The archives this library writes
+   are also read by Info-ZIP's unzip, a third implementation, which is what
+   settles that the headers are not merely what this library's own reader
+   expects. */
+
+// ---------------------------------------------------------------- the entry
+
+/* java.util.zip.ZipEntry: one entry of an archive as both sides of this file
+   see it.
+
+   The fields are package-level rather than private, exactly as they are in
+   java.util.zip, because ZipOutputStream, ZipInputStream and ZipFile set them
+   where the JDK's three do -- a decoder fills in the size, the compressed size
+   and the CRC-32 of an entry it just read, and the writer fills them in for a
+   DEFLATED entry that was written with a data descriptor. The accessors below
+   are the public surface, and they are Java's.
+
+   One difference in the surface: java.util.zip.ZipEntry has no accessor at all
+   for the general purpose bit flags -- they are package-private, and only the
+   three classes beside it read them. There is no package boundary to hide them
+   behind here either, so they are a package-level field like the rest, and a
+   caller who wants to see what a reader found in a header reads the field. The
+   method has Java's own public accessors, and both of them check the value the
+   way Java's do. */
+class ZipEntry extends Object {
+  /* Java's two methods. Any other value is refused by the writer and by both
+     readers, which is what java.util.zip does with a method it does not know. */
+  public static final int STORED = 0
+  public static final int DEFLATED = 8
+
+  /* The MS-DOS date and time this class stores for a timestamp before 1980,
+     which is 1980-01-01 00:00:00: the earliest moment the field can express.
+     Java clamps to the same value, from the same place. */
+  static final long DOSTIME_BEFORE_1980 = (1 << 21) | (1 << 16)
+
+  String name
+  /* The MS-DOS date and time as the format packs it, or -1 when nothing has set
+     one. Java calls this field xdostime and keeps a fractional second in its
+     high half; there is no such half here, so the value is exactly the four
+     bytes an archive carries and a millisecond set through setTime is lost, as
+     it is in the file. */
+  long dosTime = -1
+  long size = -1
+  long csize = -1
+  long crc = -1
+  int method = -1
+  int flag = 0
+  /* Whether the compressed size came from setCompressedSize rather than from a
+     reader. ZipOutputStream's rule for whether an entry's sizes can be trusted
+     turns on it, as it does in the JDK. */
+  boolean csizeSet = false
+  byte[] extra = null
+  String comment = null
+
+  public ZipEntry(String name) {
+    if (name == null) {
+      throw new NullPointerException("name")
+    }
+    /* Java's check, on characters rather than on the UTF-8 bytes a header
+       carries: whether the bytes fit is the writer's question, and it is asked
+       there too. */
+    if (name.length() > 0xFFFF) {
+      throw new IllegalArgumentException("entry name too long")
+    }
+    this.name = name
+  }
+
+  /* Java's copy constructor. The extra field is copied rather than shared, so
+     that writing one entry's extra data cannot change another's. */
+  public ZipEntry(ZipEntry e) {
+    if (e == null) {
+      throw new NullPointerException()
+    }
+    name = e.name
+    dosTime = e.dosTime
+    size = e.size
+    csize = e.csize
+    crc = e.crc
+    method = e.method
+    flag = e.flag
+    csizeSet = e.csizeSet
+    comment = e.comment
+    if (e.extra == null) {
+      extra = null
+    } else {
+      extra = e.extra.clone()
+    }
+  }
+
+  public String getName() {
+    return name
+  }
+
+  // ------------------------------------------------------------ the time
+
+  /* An instant, as the MS-DOS date and time in UTC. Java reads the instant in
+     the JVM's default zone; the difference is the point of the note at the top
+     of this file, and of the one at the top of lib/20_time.teyru.
+
+     A time before 1980 has no spelling in the field and becomes 1980-01-01,
+     which is what java.util.zip does with one. */
+  public void setTime(long millis) {
+    if (millis < 0) {
+      dosTime = DOSTIME_BEFORE_1980
+      return
+    }
+    long second = millis / 1000
+    long days = second / 86400
+    long ofDay = second % 86400
+    long[] civil = TimeMath.civilFromDays(days)
+    int year = (int) civil[0]
+    if (year < 1980) {
+      dosTime = DOSTIME_BEFORE_1980
+      return
+    }
+    dosTime = pack(year, (int) civil[1], (int) civil[2],
+      (int) (ofDay / 3600), (int) ((ofDay % 3600) / 60), (int) (ofDay % 60))
+  }
+
+  /* The instant the DOS fields name, read in UTC. -1 when no time has been set,
+     which is Java's answer for an entry that never had one. */
+  public long getTime() {
+    if (dosTime == -1) {
+      return -1
+    }
+    int year = (int) (((dosTime >> 25) & 0x7f) + 1980)
+    int month = (int) ((dosTime >> 21) & 0x0f)
+    int day = (int) ((dosTime >> 16) & 0x1f)
+    int hour = (int) ((dosTime >> 11) & 0x1f)
+    int minute = (int) ((dosTime >> 5) & 0x3f)
+    int second = (int) ((dosTime << 1) & 0x3e)
+    long days = TimeMath.daysFromCivil(year, month, day)
+    return days * 86400000L + (hour * 3600L + minute * 60L + second) * 1000L
+  }
+
+  /* The DOS fields as a local date and time, exactly as java.util.zip's
+     setTimeLocal does it: no zone is involved in either direction, so this pair
+     agrees with the JDK on every machine. */
+  public void setTimeLocal(LocalDateTime t) {
+    if (t == null) {
+      throw new NullPointerException("time")
+    }
+    int year = t.toLocalDate().getYear()
+    if (year < 1980) {
+      dosTime = DOSTIME_BEFORE_1980
+      return
+    }
+    dosTime = pack(year, t.toLocalDate().getMonthValue(), t.toLocalDate().getDayOfMonth(),
+      t.toLocalTime().getHour(), t.toLocalTime().getMinute(), t.toLocalTime().getSecond())
+  }
+
+  /* null when the entry has no time, where the JDK's version walks its -1
+     through the field layout and raises a DateTimeException for a month of 15. */
+  public LocalDateTime getTimeLocal() {
+    if (dosTime == -1) {
+      return null
+    }
+    return LocalDateTime.of(
+      (int) (((dosTime >> 25) & 0x7f) + 1980),
+      (int) ((dosTime >> 21) & 0x0f),
+      (int) ((dosTime >> 16) & 0x1f),
+      (int) ((dosTime >> 11) & 0x1f),
+      (int) ((dosTime >> 5) & 0x3f),
+      (int) ((dosTime << 1) & 0x3e))
+  }
+
+  /* The MS-DOS date and time field: five bits of year from 1980, four of month,
+     five of day, five of hour, six of minute and five of second divided by two.
+     Seconds are the reason an archive's timestamps have two-second resolution
+     and this class has no milliseconds to lose. */
+  static long pack(int year, int month, int day, int hour, int minute, int second) {
+    long y = (long) (year - 1980)
+    long v = (y << 25) | ((long) month << 21) | ((long) day << 16) |
+      ((long) hour << 11) | ((long) minute << 5) | ((long) (second >> 1))
+    return v & 0xFFFFFFFFL
+  }
+
+  // ------------------------------------------------------------ the fields
+
+  public void setSize(long v) {
+    size = v
+  }
+
+  public long getSize() {
+    return size
+  }
+
+  /* Setting this is what tells ZipOutputStream that the caller knows the
+     compressed size -- and therefore that the entry can be written with its
+     sizes in the local header instead of a data descriptor. An entry that came
+     from a reader has a compressed size and has not been through here, which is
+     exactly Java's distinction and why it is a separate bit rather than a test
+     against -1. */
+  public void setCompressedSize(long v) {
+    csize = v
+    csizeSet = true
+  }
+
+  public long getCompressedSize() {
+    return csize
+  }
+
+  public void setCrc(long v) {
+    crc = v
+  }
+
+  public long getCrc() {
+    return crc
+  }
+
+  /* Java keeps setMethod and getMethod package-private; here they are the only
+     way a caller can say which of the two methods an entry uses. The value is
+     checked where java.util.zip checks it, so an entry cannot be made to name a
+     method the writer would then have to refuse. */
+  public void setMethod(int m) {
+    if (m != STORED && m != DEFLATED) {
+      throw new IllegalArgumentException("invalid compression method")
+    }
+    method = m
+  }
+
+  public int getMethod() {
+    return method
+  }
+
+  public void setExtra(byte[] b) {
+    /* The only thing java.util.zip checks here: the field's own length, which
+       is a 16-bit number in both headers. A malformed extra field is left for a
+       reader to walk, as Java leaves it. */
+    if (b != null && b.length > 0xFFFF) {
+      throw new IllegalArgumentException("invalid extra field length")
+    }
+    extra = b
+  }
+
+  public byte[] getExtra() {
+    return extra
+  }
+
+  public void setComment(String c) {
+    comment = c
+  }
+
+  public String getComment() {
+    return comment
+  }
+
+  /* Java's definition: an entry whose name ends in '/' is a directory, and that
+     is the whole of it -- the format has no directory bit. */
+  public boolean isDirectory() {
+    return name.endsWith("/")
+  }
+
+  public String toString() {
+    return name
+  }
+
+  public int hashCode() {
+    return name.hashCode()
+  }
+}
+
+// ---------------------------------------------------------------- the fields
+
+/* The little-endian field readers the two parsers share.
+
+   Everything in a ZIP header is little-endian and nothing else in this library
+   is -- DataInputStream reads big-endian, which is Java's byte order and not
+   the archive's -- so the two readers that parse a header out of a byte array
+   share these two calls rather than each carrying its own shift-and-mask. The
+   writer has no counterpart here: it writes through ZipOutputStream's own
+   helpers, which count the bytes they write as they go. */
+final class ZipFields {
+  public static int get16(byte[] b, int at) {
+    return (b[at] & 0xFF) | ((b[at + 1] & 0xFF) << 8)
+  }
+
+  public static long get32(byte[] b, int at) {
+    return (long) (b[at] & 0xFF) |
+      ((long) (b[at + 1] & 0xFF) << 8) |
+      ((long) (b[at + 2] & 0xFF) << 16) |
+      ((long) (b[at + 3] & 0xFF) << 24)
+  }
+}
+
+// ---------------------------------------------------------------- writing
+
+/* java.util.zip.ZipOutputStream: an archive, written once, in order.
+
+   The stream keeps what the central directory needs -- every entry and the
+   offset of its local header -- and writes nothing but the local headers and
+   the data until finish, which is what makes it a stream: an entry's bytes do
+   not have to be known when the entry before it is written. */
+class ZipOutputStream extends Object implements OutputStream {
+  public static final int STORED = ZipEntry.STORED
+  public static final int DEFLATED = ZipEntry.DEFLATED
+
+  /* Java's default buffer: the size of the array the deflater is drained
+     through, not a buffer of the stream's own. */
+  private static final int DEFAULT_BUFSIZE = 512
+
+  /* The one flag this class decides: the sizes are not in the local header. */
+  private static final int DESCRIPTOR_FLAG = 8
+  /* The language encoding flag, which every entry here carries. */
+  private static final int UTF8_FLAG = 0x800
+
+  private static final long LOCSIG = 0x04034b50L
+  private static final long EXTSIG = 0x08074b50L
+  private static final long CENSIG = 0x02014b50L
+  private static final long ENDSIG = 0x06054b50L
+
+  /* The value a 32-bit field holds when the real one is in a ZIP64 record, and
+     the value a 16-bit entry count holds when the same is true of it. Both are
+     refused rather than written. */
+  private static final long ZIP64_MAGIC = 0xFFFFFFFFL
+  private static final int ZIP64_COUNT = 0xFFFF
+
+  private OutputStream out
+  private Deflater deflater
+  private CRC32 crc = new CRC32()
+  private byte[] buf
+  /* Every byte written to out, which is what makes a local header's offset a
+     running total rather than a count of entries. */
+  private long written = 0
+  private byte[] comment = null
+  private int method = DEFLATED
+
+  /* The central directory, in the order the entries were added: the entries and
+     the offset of each local header, in parallel arrays that grow together. */
+  private ZipEntry[] entries = new ZipEntry[8]
+  private long[] offsets = new long[8]
+  private int count = 0
+
+  /* Java refuses two entries with one name, because a reader that looks an
+     entry up by name would find one of them and an extractor that writes them
+     out would overwrite. */
+  private HashSet<String> names = new HashSet<String>()
+
+  private ZipEntry current = null
+  /* What the current entry has produced so far: the bytes the caller wrote and
+     the bytes the deflater emitted. The header is written before either is
+     known, so these are what the verification and the data descriptor use. */
+  private long entryIn = 0
+  private long entryOut = 0
+  private boolean finished = false
+  private boolean closed = false
+  private byte[] one = new byte[1]
+
+  public ZipOutputStream(OutputStream out) {
+    this(out, DEFAULT_BUFSIZE)
+  }
+
+  public ZipOutputStream(OutputStream out, int size) {
+    if (out == null) {
+      throw new NullPointerException("out")
+    }
+    this.out = out
+    this.buf = new byte[size > 0 ? size : DEFAULT_BUFSIZE]
+    /* A raw deflate stream: the ZIP format has no wrapper of its own, and the
+       zlib header gzip's cousin carries would be eight bytes of nothing in
+       front of every entry. */
+    this.deflater = new Deflater(Deflater.DEFAULT_COMPRESSION, true)
+  }
+
+  // ------------------------------------------------------------ the knobs
+
+  /* Java's IllegalArgumentException for a comment the field cannot hold, checked
+     here rather than at finish time so that a caller learns at the call. */
+  public void setComment(String c) {
+    if (c == null) {
+      comment = null
+      return
+    }
+    byte[] bytes = c.getBytes()
+    if (bytes.length > 0xFFFF) {
+      throw new IllegalArgumentException("ZIP file comment too long")
+    }
+    comment = bytes
+  }
+
+  /* The method an entry uses when it did not choose one. */
+  public void setMethod(int m) {
+    if (m != DEFLATED && m != STORED) {
+      throw new IllegalArgumentException("invalid compression method")
+    }
+    method = m
+  }
+
+  public void setLevel(int level) {
+    deflater.setLevel(level)
+  }
+
+  // ------------------------------------------------------------ the entries
+
+  public void putNextEntry(ZipEntry e) {
+    ensureOpen()
+    if (e == null) {
+      throw new NullPointerException("entry")
+    }
+    if (current != null) {
+      closeEntry()
+    }
+    if (e.dosTime == -1) {
+      /* Java's default, and it is what makes an entry written without a time
+         carry the time it was written at. */
+      e.setTime(System.currentTimeMillis())
+    }
+    if (e.method == -1) {
+      e.method = method
+    }
+    e.flag = 0
+    if (e.method == DEFLATED) {
+      if (e.size == -1 || e.csize == -1 || e.crc == -1 || e.csizeSet == false) {
+        e.flag = DESCRIPTOR_FLAG
+      }
+    } else if (e.method == STORED) {
+      if (e.size == -1) {
+        e.size = e.csize
+      } else if (e.csize == -1) {
+        e.csize = e.size
+      } else if (e.size != e.csize) {
+        throw new ZipException("STORED entry where compressed != uncompressed size")
+      }
+      if (e.size == -1 || e.crc == -1) {
+        throw new ZipException("STORED entry missing size, compressed size, or crc-32")
+      }
+    } else {
+      throw new ZipException("unsupported compression method")
+    }
+    if (names.add(e.name) == false) {
+      throw new ZipException("duplicate entry: " + e.name)
+    }
+    e.flag = e.flag | UTF8_FLAG
+    current = e
+    entryIn = 0
+    entryOut = 0
+    addEntry(e, written)
+    writeLOC(e)
+  }
+
+  public void closeEntry() {
+    ensureOpen()
+    if (current == null) {
+      return
+    }
+    ZipEntry e = current
+    if (e.method == DEFLATED) {
+      deflater.finish()
+      while (deflater.finished() == false) {
+        drain()
+      }
+      if ((e.flag & DESCRIPTOR_FLAG) == 0) {
+        /* The caller said what the sizes would be; this is where a wrong answer
+           is caught, which is the whole value of writing them up front. */
+        if (e.size != entryIn) {
+          throw new ZipException("invalid entry size (expected " + e.size +
+            " but got " + entryIn + " bytes)")
+        }
+        if (e.csize != entryOut) {
+          throw new ZipException("invalid entry compressed size (expected " +
+            e.csize + " but got " + entryOut + " bytes)")
+        }
+        if (e.crc != crc.getValue()) {
+          throw new ZipException("invalid entry CRC-32 (expected 0x" +
+            Long.toHexString(e.crc) + " but got 0x" + Long.toHexString(crc.getValue()) + ")")
+        }
+      } else {
+        /* The descriptor is filled from what the compressor actually did, and
+           the entry is updated with it so that a caller can read back what it
+           could not know in advance. */
+        e.size = entryIn
+        e.csize = entryOut
+        e.crc = crc.getValue()
+        writeEXT(e)
+      }
+    } else if (e.method == STORED) {
+      if (e.size != entryIn) {
+        throw new ZipException("invalid entry size (expected " + e.size +
+          " but got " + entryIn + " bytes)")
+      }
+      if (e.crc != crc.getValue()) {
+        throw new ZipException("invalid entry crc-32 (expected 0x" +
+          Long.toHexString(e.crc) + " but got 0x" + Long.toHexString(crc.getValue()) + ")")
+      }
+    } else {
+      throw new ZipException("invalid compression method")
+    }
+    crc.reset()
+    deflater.reset()
+    current = null
+  }
+
+  /* The central directory and the end record. closing the stream calls this,
+     and a caller who finishes an archive and then writes another file to the
+     same stream does so through it. */
+  public void finish() {
+    ensureOpen()
+    if (finished) {
+      return
+    }
+    if (current != null) {
+      closeEntry()
+    }
+    if (count > ZIP64_COUNT - 1) {
+      throw new ZipException("too many entries in ZIP file for an archive without ZIP64: " + count)
+    }
+    long off = written
+    for (int i = 0 : i < count : i++) {
+      writeCEN(entries[i], offsets[i])
+    }
+    writeEND(off, written - off)
+    finished = true
+  }
+
+  // ------------------------------------------------------------ the writes
+
+  public void write(int b) {
+    one[0] = (byte) b
+    write(one, 0, 1)
+  }
+
+  public void write(byte[] b, int off, int len) {
+    if (b == null) {
+      throw new NullPointerException()
+    }
+    if (off < 0 || len < 0 || off > b.length - len) {
+      throw new ArrayIndexOutOfBoundsException("Range [" + off + ", " + off +
+        " + " + len + ") out of bounds for length " + b.length)
+    }
+    if (len == 0) {
+      return
+    }
+    if (current == null) {
+      throw new ZipException("no current ZIP entry")
+    }
+    ZipEntry e = current
+    if (e.method == DEFLATED) {
+      crc.update(b, off, len)
+      entryIn += len
+      deflater.setInput(b, off, len)
+      while (deflater.needsInput() == false) {
+        drain()
+      }
+    } else if (e.method == STORED) {
+      /* A STORED entry's local header has already promised its size, so a write
+         past it is a header that would be a lie -- Java's message, and its
+         check, which is the only way to keep the promise true. */
+      if (entryIn + len > e.size) {
+        throw new ZipException("attempt to write past end of STORED entry")
+      }
+      out.write(b, off, len)
+      written += len
+      entryIn += len
+      crc.update(b, off, len)
+    } else {
+      throw new ZipException("invalid compression method")
+    }
+  }
+
+  /* What the deflater has ready, pushed to the stream. A compressed entry is
+     written as it is compressed -- nothing here holds an entry's bytes -- so
+     this is the call that makes the class a stream rather than a buffer. */
+  private void drain() {
+    while (true) {
+      int n = deflater.deflate(buf, 0, buf.length, Deflater.NO_FLUSH)
+      if (n > 0) {
+        out.write(buf, 0, n)
+        written += n
+        entryOut += n
+      }
+      if (n < buf.length) {
+        return
+      }
+    }
+  }
+
+  /* Java's flush, which is DeflaterOutputStream's with syncFlush false: what the
+     stream under this one holds goes out, and the tail of the entry being
+     compressed stays where it is, because the deflater cannot end the block
+     without ending the entry. */
+  public void flush() {
+    out.flush()
+  }
+
+  public void close() {
+    if (closed) {
+      return
+    }
+    finish()
+    closed = true
+    deflater.end()
+    out.close()
+  }
+
+  private void ensureOpen() {
+    if (closed) {
+      throw new IOException("Stream closed")
+    }
+  }
+
+  // ------------------------------------------------------------ the records
+
+  /* How many bytes the entry needs before a reader can find its data: 20 for a
+     DEFLATED entry, because that is the first version of the format that had
+     deflate, and 10 for a STORED one. Java answers the same two numbers, and a
+     reader is entitled to believe them. */
+  private int version(ZipEntry e) {
+    if (e.method == DEFLATED) {
+      return 20
+    }
+    if (e.method == STORED) {
+      return 10
+    }
+    throw new ZipException("unsupported compression method")
+  }
+
+  /* A value that has to fit a 32-bit little-endian field. A negative one means
+     a caller set a size the entry never reached, which is a different bug with
+     the same answer: the field cannot hold it. */
+  private long field(long v, String what) {
+    if (v < 0 || v >= ZIP64_MAGIC) {
+      throw new ZipException(what + " does not fit a ZIP field without ZIP64: " + v)
+    }
+    return v
+  }
+
+  private void writeLOC(ZipEntry e) {
+    writeInt(LOCSIG)
+    writeShort(version(e))
+    writeShort(e.flag)
+    writeShort(e.method)
+    writeInt(e.dosTime)
+    if ((e.flag & DESCRIPTOR_FLAG) != 0) {
+      writeInt(0)
+      writeInt(0)
+      writeInt(0)
+    } else {
+      writeInt(e.crc)
+      writeInt(field(e.csize, "compressed size"))
+      writeInt(field(e.size, "size"))
+    }
+    byte[] nameBytes = e.name.getBytes()
+    if (nameBytes.length > 0xFFFF) {
+      throw new ZipException("entry name too long")
+    }
+    int elen = e.extra == null ? 0 : e.extra.length
+    if (elen > 0xFFFF) {
+      throw new ZipException("entry extra data too long")
+    }
+    writeShort(nameBytes.length)
+    writeShort(elen)
+    writeBytes(nameBytes, 0, nameBytes.length)
+    if (elen > 0) {
+      writeBytes(e.extra, 0, elen)
+    }
+  }
+
+  /* The data descriptor, which a reader finds after the compressed data rather
+     than before it. The signature is optional in the format and written here
+     because the JDK writes it and because without it a reader has to guess
+     whether the first four bytes are a CRC-32 or the signature. */
+  private void writeEXT(ZipEntry e) {
+    writeInt(EXTSIG)
+    writeInt(e.crc)
+    writeInt(field(e.csize, "compressed size"))
+    writeInt(field(e.size, "size"))
+  }
+
+  /* The entry's second description, at the end of the archive, where a reader
+     that can seek looks first. Everything a reader needs is here except the
+     data: the sizes, the CRC-32, the offset of the local header, and the name,
+     extra field and comment again. */
+  private void writeCEN(ZipEntry e, long offset) {
+    byte[] nameBytes = e.name.getBytes()
+    if (nameBytes.length > 0xFFFF) {
+      throw new ZipException("entry name too long")
+    }
+    int elen = e.extra == null ? 0 : e.extra.length
+    if (elen > 0xFFFF) {
+      throw new ZipException("entry extra data too long")
+    }
+    byte[] commentBytes = e.comment == null ? null : e.comment.getBytes()
+    int clen = commentBytes == null ? 0 : commentBytes.length
+    if (clen > 0xFFFF) {
+      throw new ZipException("entry comment too long")
+    }
+    writeInt(CENSIG)
+    /* Version made by and version needed are the same number here: this writer
+       is not a UNIX tool and records no file attributes, so the high byte of
+       version-made-by, which is the making system, is not written. The external
+       attributes field below is zero for the same reason -- the ZIP format
+       keeps UNIX permissions there, and this library's entries have none. */
+    writeShort(version(e))
+    writeShort(version(e))
+    writeShort(e.flag)
+    writeShort(e.method)
+    writeInt(e.dosTime)
+    writeInt(e.crc)
+    writeInt(field(e.csize, "compressed size"))
+    writeInt(field(e.size, "size"))
+    writeShort(nameBytes.length)
+    writeShort(elen)
+    writeShort(clen)
+    writeShort(0)
+    writeShort(0)
+    writeInt(0)
+    writeInt(field(offset, "local header offset"))
+    writeBytes(nameBytes, 0, nameBytes.length)
+    if (elen > 0) {
+      writeBytes(e.extra, 0, elen)
+    }
+    if (clen > 0) {
+      writeBytes(commentBytes, 0, clen)
+    }
+  }
+
+  private void writeEND(long off, long len) {
+    writeInt(ENDSIG)
+    writeShort(0)
+    writeShort(0)
+    writeShort(count)
+    writeShort(count)
+    writeInt(field(len, "central directory size"))
+    writeInt(field(off, "central directory offset"))
+    if (comment == null) {
+      writeShort(0)
+    } else {
+      writeShort(comment.length)
+      writeBytes(comment, 0, comment.length)
+    }
+  }
+
+  // ------------------------------------------------------------ the fields
+
+  /* Every one of these counts what it wrote, because the offset of the next
+     local header is exactly what has been written so far. */
+  private void writeShort(int v) {
+    out.write(v & 0xFF)
+    out.write((v >>> 8) & 0xFF)
+    written += 2
+  }
+
+  private void writeInt(long v) {
+    out.write((int) (v & 0xFF))
+    out.write((int) ((v >>> 8) & 0xFF))
+    out.write((int) ((v >>> 16) & 0xFF))
+    out.write((int) ((v >>> 24) & 0xFF))
+    written += 4
+  }
+
+  private void writeBytes(byte[] b, int off, int len) {
+    out.write(b, off, len)
+    written += len
+  }
+
+  private void addEntry(ZipEntry e, long offset) {
+    if (count == entries.length) {
+      ZipEntry[] bigger = new ZipEntry[entries.length * 2]
+      long[] wider = new long[offsets.length * 2]
+      System.arraycopy(entries, 0, bigger, 0, count)
+      System.arraycopy(offsets, 0, wider, 0, count)
+      entries = bigger
+      offsets = wider
+    }
+    entries[count] = e
+    offsets[count] = offset
+    count = count + 1
+  }
+}
+
+// ---------------------------------------------------------------- reading
+
+/* java.util.zip.ZipInputStream: an archive read from front to back, one entry
+   at a time, without seeking.
+
+   This is the reader for a stream that cannot go back: an HTTP body, a pipe, a
+   file whose local headers are enough. It reads the local headers in order and
+   trusts them, which is what makes it cheap and what makes its answers weaker
+   than ZipFile's when a header disagrees with the central directory. The end of
+   the archive is the first four bytes that are not a local header -- for a
+   complete archive, the central directory's own signature -- and that is a null
+   from getNextEntry, not an error.
+
+   The reading state is one byte buffer and a pending region, as in
+   GZIPInputStream: the inflater is fed from the buffer and consumes only part
+   of it, so the bytes it did not consume are where the data descriptor and the
+   next local header start. getRemaining is the inflater's own count of them,
+   and the pending region is recomputed from it whenever an entry ends.
+
+   Java's InputStream grew readAllBytes, readNBytes, skipNBytes, skip and
+   transferTo over the releases, and this class inherits none of them: nothing
+   in this library's stream hierarchy declares a method of that family, and the
+   one place in this file that reads a whole entry (ZipFile.getInputStream's
+   callers, and the tests) reads in a loop. */
+class ZipInputStream extends InputStream implements Reader {
+  private static final int DEFAULT_BUFSIZE = 512
+  private static final int DESCRIPTOR_FLAG = 8
+  private static final long ZIP64_MAGIC = 0xFFFFFFFFL
+  private static final long LOCSIG = 0x04034b50L
+  private static final long EXTSIG = 0x08074b50L
+  private static final int LOCHDR = 30
+
+  private InputStream in
+  private byte[] buf
+  private Inflater inflater = new Inflater(true)
+  private CRC32 crc = new CRC32()
+  private ZipEntry entry = null
+  /* The local header on its way in, reused rather than allocated per entry. */
+  private byte[] header = new byte[LOCHDR]
+  /* Bytes read from the stream that the inflater has not consumed. inLen is the
+     length of the last chunk fed to it, so the pending region is the tail of
+     that chunk, which is what getRemaining counts from. */
+  private int pendingPos = 0
+  private int pendingEnd = 0
+  private int inLen = 0
+  private long remaining = 0
+  private boolean entryEOF = false
+  private boolean closed = false
+  private byte[] one = new byte[1]
+  private byte[] drainBuf = new byte[256]
+  private LineScanner scanner = null
+
+  public ZipInputStream(InputStream in) {
+    this(in, DEFAULT_BUFSIZE)
+  }
+
+  public ZipInputStream(InputStream in, int size) {
+    if (in == null) {
+      throw new NullPointerException("in")
+    }
+    this.in = in
+    this.buf = new byte[size > 0 ? size : DEFAULT_BUFSIZE]
+  }
+
+  // ------------------------------------------------------------ the entries
+
+  /* The next local header, or null at the end of the archive. Closing the entry
+     before it is what makes this read the data the previous one left, so a
+     caller who reads every entry never needs closeEntry. */
+  public ZipEntry getNextEntry() {
+    ensureOpen()
+    if (entry != null) {
+      closeEntry()
+    }
+    crc.reset()
+    inflater.reset()
+    /* The pending region is NOT reset: the next header starts inside the bytes
+       the inflater did not consume, and throwing them away would lose it. */
+    entry = readLOC()
+    if (entry == null) {
+      return null
+    }
+    if (entry.method == ZipEntry.STORED) {
+      remaining = entry.size
+    }
+    entryEOF = false
+    return entry
+  }
+
+  /* Reads the current entry to its end, checking what the header promised. A
+     caller who does not want the data pays for reading it, which is what a
+     stream that cannot seek has to do. */
+  public void closeEntry() {
+    ensureOpen()
+    while (read(drainBuf, 0, drainBuf.length) != -1) {
+    }
+    entryEOF = true
+  }
+
+  public int available() {
+    return entryEOF ? 0 : 1
+  }
+
+  private ZipEntry readLOC() {
+    int got = 0
+    while (got < LOCHDR) {
+      int b = nextByte()
+      if (b < 0) {
+        /* The archive ended inside what would have been a header. Java answers
+           the same thing: fewer than thirty bytes left is the end. */
+        return null
+      }
+      header[got] = (byte) b
+      got = got + 1
+    }
+    if (ZipFields.get32(header, 0) != LOCSIG) {
+      /* Not a local header: for a complete archive this is the central
+         directory's signature, which is where this reader stops. */
+      return null
+    }
+    int flag = ZipFields.get16(header, 6)
+    int method = ZipFields.get16(header, 8)
+    long time = ZipFields.get32(header, 10)
+    int nlen = ZipFields.get16(header, 26)
+    int elen = ZipFields.get16(header, 28)
+    byte[] nameBytes = new byte[nlen]
+    readFully(nameBytes, 0, nlen)
+    ZipEntry e = new ZipEntry(Net.stringFrom(nameBytes, 0, nlen))
+    e.flag = flag
+    e.method = method
+    e.dosTime = time
+    if ((flag & 1) != 0) {
+      throw new ZipException("encrypted ZIP entry not supported")
+    }
+    if ((flag & DESCRIPTOR_FLAG) != 0) {
+      /* A data descriptor is only defined for a deflated entry: for a stored one
+         there is no way to know where the data ends, so a reader cannot honour
+         the flag. Java refuses it by name. */
+      if (method != ZipEntry.DEFLATED) {
+        throw new ZipException("only DEFLATED entries can have EXT descriptor")
+      }
+      e.size = -1
+      e.csize = -1
+      e.crc = -1
+    } else {
+      e.crc = ZipFields.get32(header, 14)
+      e.csize = ZipFields.get32(header, 18)
+      e.size = ZipFields.get32(header, 22)
+      if (e.csize == ZIP64_MAGIC || e.size == ZIP64_MAGIC) {
+        throw new ZipException("ZIP64 entries are not implemented")
+      }
+    }
+    if (elen > 0) {
+      byte[] extra = new byte[elen]
+      readFully(extra, 0, elen)
+      e.extra = extra
+    }
+    return e
+  }
+
+  /* The end of a deflated entry: the sizes the header could not carry, if a
+     data descriptor is what follows the data, and then the three checks. Java
+     makes the same three, in the same order and with the same messages. */
+  private void readEnd(ZipEntry e) {
+    pendingEnd = inLen
+    pendingPos = inLen - (int) inflater.getRemaining()
+    if ((e.flag & DESCRIPTOR_FLAG) != 0) {
+      long sig = nextUInt()
+      long c = sig
+      if (sig == EXTSIG) {
+        c = nextUInt()
+      }
+      e.crc = c
+      e.csize = nextUInt()
+      e.size = nextUInt()
+      if (e.csize == ZIP64_MAGIC || e.size == ZIP64_MAGIC) {
+        throw new ZipException("ZIP64 entries are not implemented")
+      }
+    }
+    if (e.size != inflater.getTotalOut()) {
+      throw new ZipException("invalid entry size (expected " + e.size +
+        " but got " + inflater.getTotalOut() + " bytes)")
+    }
+    if (e.csize != inflater.getTotalIn()) {
+      throw new ZipException("invalid entry compressed size (expected " + e.csize +
+        " but got " + inflater.getTotalIn() + " bytes)")
+    }
+    if (e.crc != crc.getValue()) {
+      throw new ZipException("invalid entry CRC (expected 0x" + Long.toHexString(e.crc) +
+        " but got 0x" + Long.toHexString(crc.getValue()) + ")")
+    }
+  }
+
+  // ------------------------------------------------------------ the reads
+
+  public int read() {
+    int n = read(one, 0, 1)
+    if (n < 0) {
+      return -1
+    }
+    return one[0] & 0xFF
+  }
+
+  /* Java's odd contract, kept: this returns -1 at the END OF THE CURRENT ENTRY
+     rather than at the end of the stream, so a caller reads one entry, takes
+     the -1, and asks for the next entry. */
+  public int read(byte[] b, int off, int len) {
+    ensureOpen()
+    if (b == null) {
+      throw new NullPointerException()
+    }
+    if (off < 0 || len < 0 || off > b.length - len) {
+      throw new ArrayIndexOutOfBoundsException("Range [" + off + ", " + off +
+        " + " + len + ") out of bounds for length " + b.length)
+    }
+    if (len == 0) {
+      return 0
+    }
+    if (entry == null) {
+      return -1
+    }
+    ZipEntry e = entry
+    if (e.method == ZipEntry.DEFLATED) {
+      while (true) {
+        if (inflater.finished()) {
+          readEnd(e)
+          entry = null
+          entryEOF = true
+          return -1
+        }
+        if (inflater.needsInput()) {
+          fill()
+        }
+        int n = inflater.inflate(b, off, len)
+        if (n > 0) {
+          crc.update(b, off, n)
+          return n
+        }
+      }
+    } else if (e.method == ZipEntry.STORED) {
+      if (remaining <= 0) {
+        entry = null
+        entryEOF = true
+        return -1
+      }
+      if (len > remaining) {
+        len = (int) remaining
+      }
+      int n = readRaw(b, off, len)
+      if (n < 0) {
+        throw new ZipException("unexpected EOF")
+      }
+      crc.update(b, off, n)
+      remaining = remaining - n
+      if (remaining == 0 && e.crc != crc.getValue()) {
+        throw new ZipException("invalid entry CRC (expected 0x" + Long.toHexString(e.crc) +
+          " but got 0x" + Long.toHexString(crc.getValue()) + ")")
+      }
+      return n
+    } else {
+      throw new ZipException("invalid compression method")
+    }
+  }
+
+  /* The prelude's readln reads the console, which a stream over an archive must
+     not do. */
+  public String readln() {
+    if (scanner == null) {
+      scanner = new LineScanner(this)
+    }
+    return scanner.readLine()
+  }
+
+  public void close() {
+    if (closed) {
+      return
+    }
+    closed = true
+    entry = null
+    inflater.end()
+    if (in instanceof AutoCloseable) {
+      ((AutoCloseable) in).close()
+    }
+  }
+
+  // ------------------------------------------------------------ the input
+
+  /* More bytes for the inflater: the ones it did not consume first, then the
+     stream. Reading them moves the pending region to the front of the buffer,
+     which is what keeps inLen and getRemaining counting from the same place. */
+  private void fill() {
+    if (pendingPos < pendingEnd) {
+      int n = pendingEnd - pendingPos
+      System.arraycopy(buf, pendingPos, buf, 0, n)
+      pendingPos = 0
+      pendingEnd = 0
+      inLen = n
+      inflater.setInput(buf, 0, n)
+      return
+    }
+    if (in instanceof ByteArrayInputStream) {
+      int n = ((ByteArrayInputStream) in).read(buf, 0, buf.length)
+      if (n <= 0) {
+        throw new EOFException("Unexpected end of ZLIB input stream")
+      }
+      inLen = n
+      inflater.setInput(buf, 0, n)
+      return
+    }
+    /* One byte at a time, for the reason GZIPInputStream documents in 44_zip:
+       this library's InputStream declares read() and readln() and nothing
+       else, so the only read every stream must answer is the single-byte one. */
+    int b = in.read()
+    if (b < 0) {
+      throw new EOFException("Unexpected end of ZLIB input stream")
+    }
+    buf[0] = (byte) b
+    inLen = 1
+    inflater.setInput(buf, 0, 1)
+  }
+
+  /* One byte, from the pending region first and then from the stream, or -1 at
+     the end of the stream. */
+  private int nextByte() {
+    if (pendingPos < pendingEnd) {
+      int v = buf[pendingPos] & 0xFF
+      pendingPos = pendingPos + 1
+      return v
+    }
+    return in.read()
+  }
+
+  /* A block read that takes the pending region first: the bytes the inflater
+     did not consume come before anything still in the stream, and a STORED
+     entry's data can begin inside them. */
+  private int readRaw(byte[] b, int off, int len) {
+    if (pendingPos < pendingEnd) {
+      int n = pendingEnd - pendingPos
+      if (n > len) {
+        n = len
+      }
+      System.arraycopy(buf, pendingPos, b, off, n)
+      pendingPos = pendingPos + n
+      return n
+    }
+    if (in instanceof ByteArrayInputStream) {
+      return ((ByteArrayInputStream) in).read(b, off, len)
+    }
+    int v = in.read()
+    if (v < 0) {
+      return -1
+    }
+    b[off] = (byte) v
+    return 1
+  }
+
+  private void readFully(byte[] b, int off, int len) {
+    while (len > 0) {
+      int n = readRaw(b, off, len)
+      if (n <= 0) {
+        throw new EOFException()
+      }
+      off = off + n
+      len = len - n
+    }
+  }
+
+  private long nextUInt() {
+    long v = 0
+    for (int i = 0 : i < 4 : i++) {
+      int b = nextByte()
+      if (b < 0) {
+        throw new EOFException()
+      }
+      v = v | ((long) b << (8 * i))
+    }
+    return v
+  }
+
+  private void ensureOpen() {
+    if (closed) {
+      throw new IOException("Stream closed")
+    }
+  }
+}
+
+// ---------------------------------------------------------------- a file
+
+/* An Enumeration over a snapshot of the central directory, which is what
+   java.util.zip.entries() returns.
+
+   The JDK's enumeration reads the central directory as it walks, so a call
+   after the archive has been closed is an IllegalStateException; this one walks
+   an array built when the archive was opened, so closing it does not stop an
+   enumeration that was already handed out. That is the difference a reader that
+   has the whole archive in memory buys, and it is the only one. */
+final class ZipEntryEnumeration implements Enumeration<ZipEntry> {
+  private final ZipEntry[] entries
+  private final int count
+  private int at = 0
+
+  public ZipEntryEnumeration(ZipEntry[] entries, int count) {
+    this.entries = entries
+    this.count = count
+  }
+
+  public boolean hasMoreElements() {
+    return at < count
+  }
+
+  public ZipEntry nextElement() {
+    if (at >= count) {
+      throw new NoSuchElementException()
+    }
+    ZipEntry e = entries[at]
+    at = at + 1
+    return e
+  }
+}
+
+/* The stream over one entry of an already-open archive: the bytes of a STORED
+   entry as they are, or the inflated bytes of a DEFLATED one.
+
+   It exists because ZipFile has the whole archive in memory and can hand out a
+   slice of it, where ZipInputStream has to read forward through everything
+   before the entry. The bytes it serves are bounded by the compressed size the
+   central directory gave, so a corrupt length cannot make it read into the next
+   entry, and it checks the CRC-32 and the size when the entry's data runs out
+   (see the note at the top of this file about that check and the JDK). */
+class ZipEntryStream extends InputStream implements Reader {
+  private byte[] data
+  private int pos
+  private int end
+  private Inflater inflater = null
+  private CRC32 crc = new CRC32()
+  private int method
+  private long size
+  private long expectedCrc
+  private long served = 0
+  private boolean eof = false
+  private boolean closed = false
+  private byte[] one = new byte[1]
+  private LineScanner scanner = null
+
+  public ZipEntryStream(byte[] data, int off, int len, int method,
+                        long size, long expectedCrc) {
+    this.data = data
+    this.pos = off
+    this.end = off + len
+    this.method = method
+    this.size = size
+    this.expectedCrc = expectedCrc
+    if (method == ZipEntry.DEFLATED) {
+      this.inflater = new Inflater(true)
+      this.inflater.setInput(data, off, len)
+    } else if (method != ZipEntry.STORED) {
+      throw new ZipException("invalid compression method")
+    }
+  }
+
+  public int read() {
+    int n = read(one, 0, 1)
+    if (n < 0) {
+      return -1
+    }
+    return one[0] & 0xFF
+  }
+
+  public int read(byte[] b, int off, int len) {
+    if (b == null) {
+      throw new NullPointerException()
+    }
+    if (off < 0 || len < 0 || off > b.length - len) {
+      throw new ArrayIndexOutOfBoundsException("Range [" + off + ", " + off +
+        " + " + len + ") out of bounds for length " + b.length)
+    }
+    if (len == 0) {
+      return 0
+    }
+    if (closed) {
+      throw new IOException("Stream closed")
+    }
+    if (eof) {
+      return -1
+    }
+    if (method == ZipEntry.STORED) {
+      if (pos >= end) {
+        check()
+        eof = true
+        return -1
+      }
+      int n = end - pos
+      if (n > len) {
+        n = len
+      }
+      System.arraycopy(data, pos, b, off, n)
+      pos = pos + n
+      crc.update(b, off, n)
+      served = served + n
+      return n
+    }
+    while (true) {
+      if (inflater.finished()) {
+        check()
+        eof = true
+        return -1
+      }
+      if (inflater.needsInput()) {
+        /* The whole compressed entry was handed to the inflater in the
+           constructor, so needing input means the bytes the central directory
+           promised are all there were: the entry is truncated, and there is no
+           next entry to read into. Java's message for the same situation. */
+        throw new EOFException("Unexpected end of ZLIB input stream")
+      }
+      int n = inflater.inflate(b, off, len)
+      if (n > 0) {
+        crc.update(b, off, n)
+        return n
+      }
+    }
+  }
+
+  /* What the central directory said, against what came out. */
+  private void check() {
+    long produced = method == ZipEntry.DEFLATED ? inflater.getTotalOut() : served
+    if (produced != size) {
+      throw new ZipException("invalid entry size (expected " + size +
+        " but got " + produced + " bytes)")
+    }
+    if (crc.getValue() != expectedCrc) {
+      throw new ZipException("invalid entry CRC (expected 0x" + Long.toHexString(expectedCrc) +
+        " but got 0x" + Long.toHexString(crc.getValue()) + ")")
+    }
+  }
+
+  public String readln() {
+    if (scanner == null) {
+      scanner = new LineScanner(this)
+    }
+    return scanner.readLine()
+  }
+
+  public void close() {
+    if (closed) {
+      return
+    }
+    closed = true
+    if (inflater != null) {
+      inflater.end()
+    }
+  }
+}
+
+/* java.util.zip.ZipFile: an archive read at random.
+
+   The whole archive is read into memory and the central directory is parsed
+   from its end, which is where a reader that can look everywhere starts: the
+   end record is at a fixed distance from the end, the central directory is at
+   the offset it gives, and every entry's local header is at an offset the
+   central directory gives. Nothing walks the local headers, so an archive whose
+   local headers disagree with its central directory is read the way its central
+   directory describes it.
+
+   Java's ZipFile reads through a seekable channel and one constructor takes a
+   Charset; here the archive is a byte array (this library has no seekable byte
+   channel, and a file, a jar and a response body are all byte arrays already),
+   the name encoding is UTF-8 always, and ZipFile(byte[]) is the constructor
+   java.util.zip does not have. All the rest of the surface is Java's:
+   entries(), getEntry, getInputStream, size(), getComment, getName, close. What
+   is not here is Java 8's stream() and the OPEN_READ/OPEN_DELETE mode
+   constants: there is no handle to open, only bytes that have already arrived,
+   and entries() is the whole of the iteration. A path that is not there is also
+   not the JDK's answer: the bytes are read by Files.readAllBytes, so a missing
+   file is its NoSuchFileException rather than java.io.FileNotFoundException. */
+class ZipFile extends Object implements AutoCloseable {
+  private static final long ENDSIG = 0x06054b50L
+  private static final long CENSIG = 0x02014b50L
+  private static final long LOCSIG = 0x04034b50L
+  private static final int ENDHDR = 22
+  private static final int CENHDR = 46
+  private static final int LOCHDR = 30
+  /* How far back the end record can be: its own 22 bytes and the longest
+     comment the format allows. */
+  private static final int MAX_COMMENT = 0xFFFF
+  private static final long ZIP64_MAGIC = 0xFFFFFFFFL
+  private static final int ZIP64_COUNT = 0xFFFF
+
+  private byte[] data
+  private String path
+  private String comment = null
+  private ZipEntry[] entries = null
+  private long[] offsets = null
+  private int count = 0
+  private HashMap<String, Integer> byName = new HashMap<String, Integer>()
+  private boolean closed = false
+
+  public ZipFile(String name) {
+    if (name == null) {
+      throw new NullPointerException("name")
+    }
+    this.path = name
+    this.data = Files.readAllBytes(name)
+    readCentralDirectory()
+  }
+
+  public ZipFile(File file) {
+    if (file == null) {
+      throw new NullPointerException("file")
+    }
+    this.path = file.getPath()
+    this.data = Files.readAllBytes(this.path)
+    readCentralDirectory()
+  }
+
+  /* An archive that is already bytes -- a jar's body, an HTTP response -- with
+     no file behind it. getName answers "" for this one, because there is no
+     path to answer with. */
+  public ZipFile(byte[] bytes) {
+    if (bytes == null) {
+      throw new NullPointerException("bytes")
+    }
+    this.path = ""
+    this.data = bytes
+    readCentralDirectory()
+  }
+
+  public String getName() {
+    return path
+  }
+
+  public String getComment() {
+    return comment
+  }
+
+  public int size() {
+    ensureOpen()
+    return count
+  }
+
+  public Enumeration<ZipEntry> entries() {
+    ensureOpen()
+    return new ZipEntryEnumeration(entries, count)
+  }
+
+  /* The entry with this name, or null. Java looks for the name and then, if the
+     name was not there, for the directory entry with a slash on the end, which
+     is why getEntry("dir") finds the entry named "dir/". */
+  public ZipEntry getEntry(String name) {
+    if (name == null) {
+      throw new NullPointerException("name")
+    }
+    ensureOpen()
+    Integer at = byName.get(name)
+    if (at == null) {
+      at = byName.get(name + "/")
+      if (at == null) {
+        return null
+      }
+    }
+    return entries[at.intValue()]
+  }
+
+  /* A stream over the entry's data, or null when the entry is not in this
+     archive -- Java's answer for an entry from somewhere else, and the reason
+     this looks the entry up again by name rather than trusting the object.
+
+     The local header is read here, in the archive's bytes, to find where the
+     data starts: a local header's extra field is allowed to differ in length
+     from the central directory's, so the offset the central directory gives is
+     the header's, not the data's.
+
+     The answer is a ZipEntryStream rather than the InputStream java.util.zip
+     declares, and for the reason GZIPInputStream documents in 44_zip: this
+     library's InputStream declares read() and readln() and no block read, so a
+     caller handed the interface could only read an archive one byte at a time.
+     The concrete class is still an InputStream, so it goes anywhere one is
+     wanted. */
+  public ZipEntryStream getInputStream(ZipEntry entry) {
+    if (entry == null) {
+      throw new NullPointerException("entry")
+    }
+    ensureOpen()
+    Integer at = byName.get(entry.name)
+    if (at == null) {
+      return null
+    }
+    int index = at.intValue()
+    long off = offsets[index]
+    if (off < 0 || off + LOCHDR > data.length) {
+      throw new ZipException("ZipFile invalid LOC header (bad signature)")
+    }
+    if (ZipFields.get32(data, (int) off) != LOCSIG) {
+      throw new ZipException("ZipFile invalid LOC header (bad signature)")
+    }
+    int nlen = ZipFields.get16(data, (int) off + 26)
+    int elen = ZipFields.get16(data, (int) off + 28)
+    int start = (int) off + LOCHDR + nlen + elen
+    ZipEntry e = entries[index]
+    if (start + e.csize > data.length) {
+      throw new ZipException("ZipFile error reading zip file")
+    }
+    return new ZipEntryStream(data, start, (int) e.csize, e.method, e.size, e.crc)
+  }
+
+  public void close() {
+    closed = true
+  }
+
+  private void ensureOpen() {
+    if (closed) {
+      throw new IllegalStateException("zip file closed")
+    }
+  }
+
+  // ------------------------------------------------------------ the reading
+
+  /* The end record, then the central directory, then the index by name. */
+  private void readCentralDirectory() {
+    int len = data.length
+    /* Java's check, which is on the length being zero rather than on it being
+       shorter than an end record: a shorter file is searched like any other and
+       answers "no end record" rather than "empty". */
+    if (len == 0) {
+      throw new ZipException("zip file is empty")
+    }
+    int at = findEnd(len)
+    long total = ZipFields.get16(data, at + 10)
+    long cdSize = ZipFields.get32(data, at + 12)
+    long cdOff = ZipFields.get32(data, at + 16)
+    int comlen = ZipFields.get16(data, at + 20)
+    if (cdSize == ZIP64_MAGIC || cdOff == ZIP64_MAGIC || total == ZIP64_COUNT) {
+      throw new ZipException("ZIP64 archives are not implemented")
+    }
+    if (cdOff + cdSize > len) {
+      throw new ZipException("invalid END header (bad central directory size)")
+    }
+    if (comlen > 0) {
+      comment = Net.stringFrom(data, at + ENDHDR, comlen)
+    }
+    int limit = (int) (cdOff + cdSize)
+    /* The number of entries the records hold, counted before they are read: the
+       end record's own count is not trusted, which is what the JDK does with it
+       as well -- it walks the records and takes what it finds, so a header that
+       says three and holds five is read as five. */
+    int real = countRecords((int) cdOff, limit)
+    entries = new ZipEntry[real]
+    offsets = new long[real]
+    int pos = (int) cdOff
+    while (pos + CENHDR <= limit) {
+      if (ZipFields.get32(data, pos) != CENSIG) {
+        throw new ZipException("invalid CEN header (bad signature)")
+      }
+      int flag = ZipFields.get16(data, pos + 8)
+      int method = ZipFields.get16(data, pos + 10)
+      long time = ZipFields.get32(data, pos + 12)
+      long crc = ZipFields.get32(data, pos + 16)
+      long csize = ZipFields.get32(data, pos + 20)
+      long size = ZipFields.get32(data, pos + 24)
+      int nlen = ZipFields.get16(data, pos + 28)
+      int elen = ZipFields.get16(data, pos + 30)
+      int clen = ZipFields.get16(data, pos + 32)
+      long off = ZipFields.get32(data, pos + 42)
+      int nameAt = pos + CENHDR
+      if (nameAt + nlen + elen + clen > data.length) {
+        throw new ZipException("invalid CEN header (bad header size)")
+      }
+      if ((flag & 1) != 0) {
+        throw new ZipException("invalid CEN header (encrypted entry)")
+      }
+      if (method != ZipEntry.DEFLATED && method != ZipEntry.STORED) {
+        throw new ZipException("invalid CEN header (bad compression method: " + method + ")")
+      }
+      if (csize == ZIP64_MAGIC || size == ZIP64_MAGIC || off == ZIP64_MAGIC) {
+        throw new ZipException("ZIP64 entries are not implemented")
+      }
+      String name = Net.stringFrom(data, nameAt, nlen)
+      ZipEntry e = new ZipEntry(name)
+      e.flag = flag
+      e.method = method
+      e.dosTime = time
+      e.crc = crc
+      e.csize = csize
+      e.size = size
+      if (elen > 0) {
+        byte[] extra = new byte[elen]
+        System.arraycopy(data, nameAt + nlen, extra, 0, elen)
+        e.extra = extra
+      }
+      if (clen > 0) {
+        e.comment = Net.stringFrom(data, nameAt + nlen + elen, clen)
+      }
+      entries[count] = e
+      offsets[count] = off
+      /* Two entries may share a name -- the format allows it even though this
+         writer refuses to make one -- and the first is the one a lookup finds,
+         which is the order Java's central-directory search walks. */
+      if (byName.get(name) == null) {
+        byName.put(name, count)
+      }
+      count = count + 1
+      pos = nameAt + nlen + elen + clen
+    }
+  }
+
+  /* The records walked without being interpreted: a record's length is its own
+     header plus the three length fields in it, so the count is a walk rather
+     than a read, and a record whose lengths do not land inside the central
+     directory is the one thing that walk can say. */
+  private int countRecords(int at, int limit) {
+    int n = 0
+    int pos = at
+    while (pos + CENHDR <= limit) {
+      int nlen = ZipFields.get16(data, pos + 28)
+      int elen = ZipFields.get16(data, pos + 30)
+      int clen = ZipFields.get16(data, pos + 32)
+      int next = pos + CENHDR + nlen + elen + clen
+      if (next > limit) {
+        throw new ZipException("invalid CEN header (bad header size)")
+      }
+      pos = next
+      n = n + 1
+    }
+    if (pos != limit) {
+      throw new ZipException("invalid CEN header (bad header size)")
+    }
+    return n
+  }
+
+  /* The end record is found by looking for its signature from the end backwards
+     rather than forwards from the front, because its position is the one thing
+     about the archive that is not in a field: a comment of any length up to
+     65535 bytes may follow it, and a reader that does not know the length has to
+     search. The last signature that is followed by exactly a comment's worth of
+     bytes is the record. */
+  private int findEnd(int len) {
+    int lowest = len - ENDHDR - MAX_COMMENT
+    if (lowest < 0) {
+      lowest = 0
+    }
+    for (int at = len - ENDHDR : at >= lowest : at--) {
+      if (ZipFields.get32(data, at) == ENDSIG) {
+        int comlen = ZipFields.get16(data, at + 20)
+        if (at + ENDHDR + comlen == len) {
+          return at
+        }
+      }
+    }
+    throw new ZipException("zip END header not found")
+  }
+}
