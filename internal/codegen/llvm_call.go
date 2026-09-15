@@ -98,6 +98,14 @@ func (e *llvmEmitter) callExpr(f *fb, c *ast.Call) lval {
 	if m == nil {
 		return e.arrayMethod(f, c)
 	}
+	if e.needsReflection(f, m) {
+		// The C back end writes the member tables when a call site like this
+		// exists; this back end does not write them at all, so the program is
+		// refused here rather than built into one whose reflection answers
+		// NoSuchMethodException at run time -- which is a wrong answer, not a
+		// missing feature.
+		e.refuse(c.GetPos(), "a reflective call (%s.%s): the llvm back end does not write the member tables java.lang.reflect reads", m.Owner.Full, m.Name)
+	}
 	recv := ""
 	if !m.IsStatic() {
 		switch {
@@ -147,6 +155,19 @@ func (e *llvmEmitter) callExpr(f *fb, c *ast.Call) lval {
 		return e.virtualCall(f, m, value(recv, c.Recv.GetType()), args)
 	}
 	return e.directCall(f, m, recv, args)
+}
+
+// needsReflection reports whether a call site can reach a member table. It is
+// the C back end's own predicate -- the one that decides whether the tables
+// ship -- asked at this back end's call sites, so that the two agree on which
+// programs are reflection users. The emitter state it needs (the class the call
+// is written in) is the one the C back end has at the same point.
+func (e *llvmEmitter) needsReflection(f *fb, m *ast.Method) bool {
+	ce := &Emitter{prog: e.p}
+	if f != nil && f.fn != nil {
+		ce.curClass = f.fn.Owner
+	}
+	return ce.reflectionCall(m)
 }
 
 // ifaceMethod is the interface method of a given name, or nil when the program
