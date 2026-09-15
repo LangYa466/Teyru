@@ -66,6 +66,7 @@ class SpringApplication {
     }
     int port = parseIntOr(ctx.getProperty("server.port", "8080"), 8080)
     int idle = parseIntOr(ctx.getProperty("spring.web.idle-ms", "0"), 0)
+    Sessions.setTimeout(SpringApplication.sessionTimeoutSeconds(ctx))
     HttpServer server = new HttpServer(port, Application.routerFrom(ctx), ctx)
     WebSocketScanner.register(ctx, server)
     WebSocketApi.register(ctx, server)
@@ -73,6 +74,49 @@ class SpringApplication {
     ctx.setServer(server)
     server.serveIdle(idle)
     return ctx
+  }
+
+  // sessionTimeoutSeconds is how long a session may sit untouched before it is
+  // gone. Boot's key is `server.servlet.session.timeout` and its value is a
+  // duration -- `30m`, `1h`, `45s`, or a bare number of seconds -- so both the
+  // key and the shape of the value are honoured, with `spring.web.session.timeout`
+  // accepted as the shorter spelling this project uses for its other web
+  // settings. No key at all means no limit, because a session that expires is a
+  // promise a container has to keep exactly.
+  static int sessionTimeoutSeconds(ApplicationContext ctx) {
+    String raw = ctx.getProperty("server.servlet.session.timeout", "")
+    if (raw.length() == 0) {
+      raw = ctx.getProperty("spring.web.session.timeout", "")
+    }
+    return SpringApplication.durationSeconds(raw)
+  }
+
+  // durationSeconds reads Boot's duration syntax: a number, optionally with `s`,
+  // `m`, `h` or `d`. Anything it cannot read is 0 rather than a guess.
+  static int durationSeconds(String raw) {
+    String v = raw.trim()
+    if (v.length() == 0) {
+      return 0
+    }
+    int unit = 1
+    char last = v.charAt(v.length() - 1)
+    if (last == 's' || last == 'S') {
+      v = v.substring(0, v.length() - 1)
+    } else if (last == 'm' || last == 'M') {
+      unit = 60
+      v = v.substring(0, v.length() - 1)
+    } else if (last == 'h' || last == 'H') {
+      unit = 3600
+      v = v.substring(0, v.length() - 1)
+    } else if (last == 'd' || last == 'D') {
+      unit = 86400
+      v = v.substring(0, v.length() - 1)
+    }
+    int n = parseIntOr(v.trim(), -1)
+    if (n < 0) {
+      return 0
+    }
+    return n * unit
   }
 
   // run without a source class, which is what a program that is not written the

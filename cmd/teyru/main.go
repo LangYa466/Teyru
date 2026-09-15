@@ -42,6 +42,10 @@ flags:
   --cc <name>   C compiler to use (default clang)
   -O0..-O3      optimisation level (default -O2)
   --llvm-ir <p> write the LLVM IR module to <p> (the backend is clang/LLVM)
+  --backend <b> c (default) or llvm: which back end compiles the program.
+                The llvm back end emits the program's own LLVM module and
+                links the C runtime against it; it refuses, with TY-INT-0100
+                and the feature's name, anything it cannot lower
   --no-lto      disable link-time optimisation
   --native <f>  C source implementing the program's native methods (repeatable)
   --link <arg>  extra argument for the link step, such as -lm or a .a path
@@ -136,6 +140,14 @@ func run() int {
 			if i < len(args) {
 				opts.EmitLLVM = args[i]
 			}
+		case a == "--backend":
+			i++
+			if i < len(args) {
+				opts.Backend = args[i]
+			}
+		case strings.HasPrefix(a, "--backend="):
+			// the `--flag=value` spelling, which is what a build script writes
+			opts.Backend = strings.TrimPrefix(a, "--backend=")
 		case len(a) > 2 && a[0] == '-' && a[1] == 'O':
 			opts.Opt = a
 		default:
@@ -154,6 +166,12 @@ func run() int {
 	default:
 		fmt.Fprintf(os.Stderr, "teyru: unknown command %q\n", cmd)
 		fmt.Print(usage)
+		return 2
+	}
+	switch opts.Backend {
+	case "", driver.BackendC, driver.BackendLLVM:
+	default:
+		fmt.Fprintf(os.Stderr, "teyru: unknown backend %q: the back ends are c (the default) and llvm\n", opts.Backend)
 		return 2
 	}
 

@@ -3,8 +3,10 @@
 package driver
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -32,6 +34,11 @@ type Options struct {
 	CC       string // C compiler (default: clang)
 	Opt      string // optimisation flag (default -O2)
 	EmitLLVM string // if set, also write LLVM IR here (the backend is clang/LLVM)
+	// Backend selects what compiles the program. The C backend is the default
+	// and the one the whole standard library is known to work with; the LLVM
+	// backend emits the program's own module, so that nothing hands the program
+	// to a C compiler, and refuses (loudly) what it cannot lower.
+	Backend string
 	// CSourceOnly stops the pipeline once the generated C is written: no C
 	// compiler runs, so no executable is produced. `teyru emit` sets it to print
 	// the C without leaving a binary behind.
@@ -161,6 +168,13 @@ func Compile(paths []string, opts Options) (*Result, error) {
 			return &Result{Diags: diags}, nil
 		}
 	}
+	// The LLVM backend emits the program's own module and links it against the
+	// runtime, which is the only part of the build that still goes through a C
+	// compiler. It refuses a program it cannot lower rather than falling back to
+	// the C backend, so a program either builds with it or says why it does not.
+	if opts.Backend == BackendLLVM {
+		return compileLLVM(prog, opts, diags)
+	}
 	csrc := codegen.Emit(prog)
 
 	rtDir, err := os.MkdirTemp("", "teyru-rt-")
@@ -256,6 +270,138 @@ func Compile(paths []string, opts Options) (*Result, error) {
 	}
 	res.Exe = exe
 	return res, nil
+}
+
+// BackendC and BackendLLVM are the two back ends. The C backend is the default:
+// it is what the whole standard library is known to build with.
+const (
+	BackendC    = "c"
+	BackendLLVM = "llvm"
+)
+
+// compileLLVM compiles a program with the LLVM backend: the module is written by
+// this compiler (codegen.EmitLLVM), and the C compiler is handed only the
+// runtime, which is C. A refusal is a diagnostic, not a fallback.
+func compileLLVM(prog *sema.Program, opts Options, diags *source.Diagnostics) (*Result, error) {
+	res := &Result{Diags: diags}
+	ir, refusal := codegen.EmitLLVM(prog)
+	if refusal != nil {
+		diags.Errorf(refusal.Pos, refusal.Code, "%s", refusal.Message())
+		return res, fmt.Errorf("the llvm backend cannot compile this program")
+	}
+	rtDir, err := os.MkdirTemp("", "teyru-rt-")
+	if err != nil {
+		return nil, err
+	}
+	if !opts.KeptTemp {
+		defer os.RemoveAll(rtDir)
+	}
+	// The module is this build's scaffolding, in the same sense the C backend's
+	// generated C is: written into the temporary directory unless the caller
+	// named a path.
+	mfile := opts.CFile
+	if mfile == "" {
+		mfile = filepath.Join(rtDir, "program.ll")
+	}
+	if err := os.MkdirAll(filepath.Dir(mfile), 0o755); err != nil {
+		return nil, err
+	}
+	rtC := writeRuntime(rtDir)
+	if err := os.WriteFile(mfile, []byte(ir), 0o644); err != nil {
+		return nil, err
+	}
+	if opts.EmitC != "" {
+		// `-c` asks for the output of the back end that ran, which for this back
+		// end is the module.
+		if err := os.WriteFile(opts.EmitC, []byte(ir), 0o644); err != nil {
+			return nil, err
+		}
+	}
+	res.CFile = mfile
+	res.CSource = ir
+	if opts.EmitLLVM != "" {
+		// The module is written here rather than asked of clang: this is the
+		// module the compiler emitted.
+		if err := os.WriteFile(opts.EmitLLVM, []byte(ir), 0o644); err != nil {
+			return nil, err
+		}
+		res.LLVMFile = opts.EmitLLVM
+	}
+	if opts.CSourceOnly {
+		// only the module was asked for, so nothing is linked
+		return res, nil
+	}
+	opt := opts.Opt
+	if opt == "" {
+		opt = "-O2"
+	}
+	cc := opts.CC
+	if cc == "" {
+		cc = findCC()
+	}
+	// -fwrapv and -fno-strict-aliasing are the runtime's, not the program's: the
+	// generated module states its own wrapping arithmetic and its own loads.
+	// -x ir names the module as IR whatever it was called, and -x none ends that
+	// so the runtime is still read as C.
+	base := []string{opt, "-std=gnu11", "-fwrapv", "-fno-strict-aliasing", "-w", "-I", rtDir,
+		"-x", "ir", mfile, "-x", "none"}
+	base = append(base, strings.Fields(rtC)...)
+	base = append(base, opts.Native...)
+	base = append(base, "-o", opts.Out, "-lm", "-lpthread")
+	base = append(base, opts.Link...)
+	base = append(base, opts.ExtraCC...)
+	args := append([]string{}, base...)
+	// Link-time optimisation lets clang inline the runtime's helpers (the
+	// allocation fast path's slow half, the string operations) into the module,
+	// which is what the C backend's build gets. It is retried without it when
+	// the toolchain has no LTO support: only the link flags differ.
+	if !opts.NoLTO {
+		args = append([]string{"-flto"}, base...)
+	}
+	if opts.Verbose {
+		fmt.Fprintf(os.Stderr, "teyru: llvm backend: %s %s\n", cc, strings.Join(args, " "))
+	}
+	// The compiler's stderr is read rather than streamed, because a module the
+	// back end emitted that does not verify is this compiler's bug and has to be
+	// reported as one: otherwise the program's author sees a parse error in a
+	// file they never wrote and cannot tell it apart from a limit of the back
+	// end.
+	var errOut bytes.Buffer
+	cmd := exec.Command(cc, args...)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &errOut)
+	if err := cmd.Run(); err != nil {
+		if opts.NoLTO {
+			return res, backendFailure(errOut.String(), mfile, err)
+		}
+		if opts.Verbose {
+			fmt.Fprintln(os.Stderr, "teyru: retrying without -flto")
+		}
+		retry := exec.Command(cc, base...)
+		retry.Stderr = os.Stderr
+		if err2 := retry.Run(); err2 != nil {
+			return res, backendFailure(errOut.String(), mfile, err)
+		}
+	}
+	res.Exe = opts.Out
+	return res, nil
+}
+
+// backendFailure reports a failed build. A module this compiler wrote that the
+// LLVM parser rejects is a defect in the back end, so it is named as one: the
+// diagnostic says which line did not verify, and says that the file is the
+// compiler's output rather than the program.
+func backendFailure(errText, mfile string, err error) error {
+	if strings.Contains(errText, mfile) {
+		line := ""
+		for _, l := range strings.Split(errText, "\n") {
+			if strings.HasPrefix(l, mfile) {
+				line = l
+				break
+			}
+		}
+		return fmt.Errorf("the llvm backend emitted a module that does not verify, which is a bug in the backend and not a limit of it: %s", line)
+	}
+	return fmt.Errorf("llvm backend failed: %w", err)
 }
 
 // writeLLVMIR asks the C compiler for the LLVM module of the generated C. The
