@@ -86,6 +86,24 @@
  * own -- the lists are append-only, so a reader that loads a bucket head and
  * walks it is always looking at a list that cannot change under it -- and an
  * entry's own mutex guards its fields.
+ *
+ * Two invariants hold this together, and both of them were broken by the first
+ * version of it, in ways that cost no more than a race on a slow machine:
+ *
+ *   - An object has exactly one entry. The entry is the whole of its monitor's
+ *     state, so two entries for one object are two monitors, and threads that
+ *     synchronize on the same object then neither exclude each other nor find
+ *     each other's ownership: a thread that wakes from wait() and leaves the
+ *     synchronized block it waited in is told it is not the owner, and two
+ *     threads that wait on one object and are notified find only the waiters
+ *     that happen to share their entry. mon_get (below) is where that is kept.
+ *
+ *   - Waiting to enter a monitor and waiting inside Object.wait are different
+ *     waits and sleep on different condition variables: notify() has to wake a
+ *     thread that was waiting in wait(), and it must not be spent on a thread
+ *     that was only waiting for the monitor to be free. Object.wait is a count
+ *     of notifications that only moves forward, never a count of unclaimed
+ *     ones. The tymon comment below says the rest.
  */
 
 #include "tyrt.h"
@@ -544,12 +562,36 @@ int64_t ty_thread_start0(void *obj, int64_t id, tystr *name, int32_t sel) {
 typedef struct tymon {
   void *key; /* the object, never NULL for a live entry */
   pthread_mutex_t mtx;
+  /* Two condition variables, because the entry has two different sets of
+     sleepers and one variable cannot tell them apart. cv carries "the monitor
+     is free": everybody waiting to enter it, and everybody that gave it up in
+     wait() and is waiting to take it back. wcv carries Object.wait's own
+     notification, and only the threads inside wait() ever sleep on it.
+
+     One variable for both was the second bug here. notify() signals one thread,
+     and with a single variable the one it signalled could be a thread that was
+     only waiting to enter the monitor: that thread would look at its own
+     condition, find the monitor still held, and go back to sleep, while the
+     thread the notification was for was never woken -- and a notification is
+     not repeated, so a program that hands a value over with notify() and then
+     waits with no timeout never ran again. */
   pthread_cond_t cv;
+  pthread_cond_t wcv;
   pthread_t owner;
   int32_t owned;
   int32_t count;   /* recursion depth */
   int32_t waiters; /* threads inside wait() */
-  int32_t tokens;  /* notify()s that no waiter has consumed yet */
+  /* How many notifications this monitor has raised. A waiter takes this
+     counter before it gives the monitor up and returns when it has moved, which
+     is what makes a notification unlosable: notify() runs under the mutex, so
+     every thread that registered itself as waiting before it did has this
+     counter at its old value and cannot miss the change, and a thread that
+     enters wait() afterwards takes the new value and sleeps for the next one.
+     A count of unclaimed notifications -- which is what this was -- cannot
+     promise that: a notification raised for one waiter can be claimed by
+     another that arrived later, and notifyAll() writing the count of waiters
+     over it discards any that were still unclaimed. */
+  int64_t notified;
   struct tymon *next;
 } tymon;
 
@@ -575,6 +617,7 @@ static tymon *mon_make(void *obj) {
      that does not jump: ty_nanos (tyrt2.c) reads the same one. */
   pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
   pthread_cond_init(&m->cv, &ca);
+  pthread_cond_init(&m->wcv, &ca);
   pthread_condattr_destroy(&ca);
   m->key = obj;
   return m;
@@ -582,25 +625,43 @@ static tymon *mon_make(void *obj) {
 
 /* The monitor of an object, created on first use. The lists are append-only --
    entries are never freed -- so this needs no lock: a reader walks a list that
-   cannot change under it, and the entry it finds is the one anybody else finds,
-   because a loser of the compare-and-swap below throws its own entry away. */
+   cannot change under it.
+
+   One object has exactly one monitor, and that is the invariant this function
+   has to keep, because every other function here works out of the entry it
+   finds and the entry it finds is the whole of the monitor's state. The two
+   reads of the bucket head below are therefore one read: the head a caller
+   walks to look for the object is the head its compare-and-swap has to still
+   find unchanged. Reading the head a second time for the swap -- which is what
+   this did, and the bug that made the monitors lose their state -- let two
+   threads that both missed the object publish an entry for it: the first one's
+   swap succeeded against the head it had read, the second one's swap, taken
+   against a head read after the first had published, succeeded too, and from
+   then on mon_get handed one of the two to each caller. Two threads that took
+   different entries for the same object did not exclude each other, and each
+   found the other's thread not to be the owner of the monitor it held. A swap
+   against the head that was walked fails when anybody else has published
+   anything since, the losing entry is thrown away, and the loop looks again and
+   finds the winner's. */
 static tymon *mon_get(void *obj) {
   uint32_t b = mon_bucket(obj);
   for (;;) {
-    for (tymon *m = __atomic_load_n(&mon_buckets[b], __ATOMIC_ACQUIRE); m; m = m->next) {
+    tymon *head = __atomic_load_n(&mon_buckets[b], __ATOMIC_ACQUIRE);
+    tymon *m;
+    for (m = head; m; m = m->next) {
       if (m->key == obj) return m;
     }
-    tymon *m = mon_make(obj);
-    tymon *head = __atomic_load_n(&mon_buckets[b], __ATOMIC_ACQUIRE);
+    m = mon_make(obj);
     m->next = head;
     if (__atomic_compare_exchange_n(&mon_buckets[b], &head, m, 0, __ATOMIC_RELEASE,
                                     __ATOMIC_ACQUIRE)) {
       return m;
     }
-    /* Somebody inserted the same object's monitor first: use theirs. Nothing
-       has seen this one, so it can go. */
+    /* Somebody inserted an entry -- for this object or any other -- first: use
+       the list as it is now. Nothing has seen this one, so it can go. */
     pthread_mutex_destroy(&m->mtx);
     pthread_cond_destroy(&m->cv);
+    pthread_cond_destroy(&m->wcv);
     free(m);
   }
 }
@@ -647,9 +708,17 @@ void ty_mon_wait(void *obj, int64_t millis) {
   /* wait() gives the monitor up: the notification can only arrive from another
      thread if this one is not holding the lock while it waits. */
   int32_t saved = m->count;
+  /* Taken before the monitor is given up, and under it: a notification that
+     arrives from here on moves this, so this wait cannot miss one, and one that
+     arrived before it does not wake this wait -- which is what Object.wait
+     says. */
+  int64_t mine = m->notified;
   m->owned = 0;
   m->count = 0;
   m->waiters++;
+  /* The monitor is free now, and everybody waiting to enter it -- or to take it
+     back after a wait of their own -- has to be told, because that is a
+     different wait from this one. */
   pthread_cond_broadcast(&m->cv);
   /* The object stays a root while this thread waits on it: notify() has to be
      able to find the monitor, and the monitor is keyed by the object's address.
@@ -657,10 +726,10 @@ void ty_mon_wait(void *obj, int64_t millis) {
      register whose spill the scan of this stopped thread may not reach. */
   TY_ROOT_PUSH(obj);
   int64_t deadline = millis < 0 ? -1 : ty_nanos() + millis * 1000000;
-  while (m->tokens == 0) {
+  while (m->notified == mine) {
     if (deadline < 0) {
       ty_thread_stopped_begin();
-      pthread_cond_wait(&m->cv, &m->mtx);
+      pthread_cond_wait(&m->wcv, &m->mtx);
       ty_thread_stopped_end();
     } else {
       if (ty_nanos() >= deadline) break;
@@ -674,12 +743,11 @@ void ty_mon_wait(void *obj, int64_t millis) {
       ts.tv_sec = (time_t)(deadline / 1000000000);
       ts.tv_nsec = (long)(deadline % 1000000000);
       ty_thread_stopped_begin();
-      int rc = pthread_cond_timedwait(&m->cv, &m->mtx, &ts);
+      int rc = pthread_cond_timedwait(&m->wcv, &m->mtx, &ts);
       ty_thread_stopped_end();
       if (rc == ETIMEDOUT) break;
     }
   }
-  if (m->tokens > 0) m->tokens--;
   m->waiters--;
   TY_ROOT_POP();
   /* Take the monitor back, exactly as entering it does. */
@@ -701,11 +769,17 @@ void ty_mon_notify(void *obj) {
     pthread_mutex_unlock(&m->mtx);
     ty_throw(ty_make_ex(TY_ILLMON, "current thread is not owner"));
   }
-  /* One waiting thread. A notify with nobody waiting is lost, which is what
-     java.lang.Object.notify says. */
-  if (m->waiters > m->tokens) {
-    m->tokens++;
-    pthread_cond_signal(&m->cv);
+  /* One notification, and one sleeper on wcv is woken. A notify with nobody
+     waiting is lost, which is what java.lang.Object.notify says -- nobody took
+     the old value of the counter, so nobody sees it change. The counter is a
+     level and not a claim on one particular thread, so a waiter that wakes by
+     itself, or that the operating system wakes, can also see it move and return
+     from a wait sound with no notification being lost; Java allows a wait to
+     return for no reason at all, which is why every wait has to be written in a
+     loop with its condition re-tested. */
+  if (m->waiters > 0) {
+    m->notified++;
+    pthread_cond_signal(&m->wcv);
   }
   pthread_mutex_unlock(&m->mtx);
 }
@@ -718,8 +792,10 @@ void ty_mon_notify_all(void *obj) {
     ty_throw(ty_make_ex(TY_ILLMON, "current thread is not owner"));
   }
   if (m->waiters > 0) {
-    m->tokens = m->waiters;
-    pthread_cond_broadcast(&m->cv);
+    /* Every thread that is waiting now is waiting for the counter as it was
+       before this line, so one move of it releases all of them. */
+    m->notified++;
+    pthread_cond_broadcast(&m->wcv);
   }
   pthread_mutex_unlock(&m->mtx);
 }
