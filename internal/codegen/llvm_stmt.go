@@ -592,6 +592,10 @@ func (e *llvmEmitter) leaveFinallys(f *fb, loopDepth int) {
 // ---------------------------------------------------------------- try
 
 func (e *llvmEmitter) tryStmt(f *fb, v *ast.Try) {
+	// From here on every access to this function's own slots is volatile: the
+	// catch runs on the path setjmp's second return takes, and only memory is
+	// guaranteed to be there.
+	f.volatile = true
 	if len(v.Resources) > 0 {
 		e.refuse(noPos, "try-with-resources: the llvm back end does not lower interface dispatch (AutoCloseable.close)")
 	}

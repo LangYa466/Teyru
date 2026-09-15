@@ -298,8 +298,17 @@ func (e *llvmEmitter) load(f *fb, ptr string, t ast.Type) lval {
 
 func (e *llvmEmitter) loadRaw(f *fb, ty, ptr string, align int64) string {
 	r := f.reg()
-	f.ins(fmt.Sprintf("%s = load %s, ptr %s, align %d", r, ty, ptr, align))
+	f.ins(fmt.Sprintf("%s = load %s%s, ptr %s, align %d", r, volOf(f, ptr), ty, ptr, align))
 	return r
+}
+
+// volOf is `volatile ` for an access the optimiser must not keep in a register
+// or prove dead: a slot of a function that has opened a try frame.
+func volOf(f *fb, ptr string) string {
+	if f.volatile && f.slots[ptr] {
+		return "volatile "
+	}
+	return ""
 }
 
 func (e *llvmEmitter) store(f *fb, ptr string, t ast.Type, v lval) {
@@ -312,7 +321,7 @@ func (e *llvmEmitter) store(f *fb, ptr string, t ast.Type, v lval) {
 		// program, and emitting it would be a module that does not verify.
 		e.refuse(noPos, "an internal lowerer error: storing %s where %s goes", got, want)
 	}
-	f.ins(fmt.Sprintf("store %s %s, ptr %s, align %d", want, v.v, ptr, alignOf(t, e)))
+	f.ins(fmt.Sprintf("store %s%s %s, ptr %s, align %d", volOf(f, ptr), want, v.v, ptr, alignOf(t, e)))
 }
 
 // gepBytes is a byte-offset address, which is how this back end reaches the
