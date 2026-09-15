@@ -172,154 +172,18 @@ int32_t ty_str_tobool(tystr *s) { return s && strcmp(s->data, "true") == 0; }
 
 /* ---- boxing helpers ---------------------------------------------------- */
 
-tystr *ty_int_tostr(void *o) { return ty_str_of_int(ty_unbox_int(o)); }
-/* Byte.toString and Short.toString are the decimal spelling of the value, so
-   they share the int formatter. */
-tystr *ty_byte_tostr(void *o) { return ty_str_of_int(ty_unbox_byte(o)); }
-tystr *ty_short_tostr(void *o) { return ty_str_of_int(ty_unbox_short(o)); }
-tystr *ty_bool_tostr(void *o) { return ty_str_of_bool(ty_unbox_bool(o)); }
-tystr *ty_char_tostr(void *o) { return ty_str_of_char(ty_unbox_char(o)); }
-tystr *ty_long_tostr(void *o) { return ty_str_of_long(ty_unbox_long(o)); }
-tystr *ty_double_tostr(void *o) { return ty_str_of_double(ty_unbox_double(o)); }
-tystr *ty_float_tostr(void *o) { return ty_str_of_float(ty_unbox_float(o)); }
+/* Nothing here any more: the wrappers' text forms, equality, ordering, hashes
+   and the six Number conversions are methods of the wrapper classes
+   (lib/04_boxing.teyru), each written over the class's own `value` field.
 
-int32_t ty_int_equals(void *a, void *b) {
-  if (b == NULL) return 0;
-  return ty_unbox_int(a) == ty_unbox_int(b);
-}
-int32_t ty_long_equals(void *a, void *b) {
-  if (b == NULL) return 0;
-  return ty_unbox_long(a) == ty_unbox_long(b);
-}
-/* Java's doubleToLongBits and floatToIntBits: the bit pattern with every NaN
-   collapsed to one value and the sign of zero kept. Double.equals,
-   Double.hashCode and Double.compare are all defined through it, so the two
-   zeros differ, NaN equals NaN, and equal values hash alike. */
-static int64_t dbl_bits(double d) {
-  if (d != d) return (int64_t)0x7ff8000000000000LL;
-  int64_t b;
-  memcpy(&b, &d, 8);
-  return b;
-}
-static int32_t flt_bits(float f) {
-  if (f != f) return (int32_t)0x7fc00000;
-  int32_t b;
-  memcpy(&b, &f, 4);
-  return b;
-}
-int32_t ty_double_equals(void *a, void *b) {
-  if (b == NULL) return 0;
-  return dbl_bits(ty_unbox_double(a)) == dbl_bits(ty_unbox_double(b));
-}
-int32_t ty_float_equals(void *a, void *b) {
-  if (b == NULL) return 0;
-  return flt_bits(ty_unbox_float(a)) == flt_bits(ty_unbox_float(b));
-}
-int32_t ty_char_equals(void *a, void *b) {
-  if (b == NULL) return 0;
-  return ty_unbox_char(a) == ty_unbox_char(b);
-}
-int32_t ty_bool_equals(void *a, void *b) {
-  if (b == NULL) return 0;
-  return ty_unbox_bool(a) == ty_unbox_bool(b);
-}
-int32_t ty_int_compare(void *a, void *b) {
-  int32_t x = ty_unbox_int(a), y = ty_unbox_int(b);
-  return x < y ? -1 : (x > y ? 1 : 0);
-}
-int32_t ty_long_compare(int64_t a, int64_t b) { return a < b ? -1 : (a > b ? 1 : 0); }
-int32_t ty_prim_cmp_int(int32_t a, int32_t b) { return a < b ? -1 : (a > b ? 1 : 0); }
-int32_t ty_prim_cmp_long(int64_t a, int64_t b) { return a < b ? -1 : (a > b ? 1 : 0); }
-int32_t ty_prim_cmp_double(double a, double b) { return a < b ? -1 : (a > b ? 1 : 0); }
-/* Java's Double.compare/Float.compare: the numeric order first, and only for
-   values that compare equal numerically (the two zeros, NaN) the bit order,
-   which puts -0.0 below 0.0 and NaN above everything. */
-int32_t ty_double_compare(double a, double b) {
-  if (a < b) return -1;
-  if (a > b) return 1;
-  int64_t x = dbl_bits(a), y = dbl_bits(b);
-  return x == y ? 0 : (x < y ? -1 : 1);
-}
-int32_t ty_float_compare(float a, float b) {
-  if (a < b) return -1;
-  if (a > b) return 1;
-  int32_t x = flt_bits(a), y = flt_bits(b);
-  return x == y ? 0 : (x < y ? -1 : 1);
-}
-/* Long.compareTo and Double.compareTo take the other box as an argument, so the
-   `_obj` forms unbox it first; a null argument raises a NullPointerException,
-   like an intrinsic in Java. */
-int32_t ty_long_compare_obj(void *a, void *b) {
-  return ty_long_compare(ty_unbox_long(a), ty_unbox_long(b));
-}
-int32_t ty_double_compare_obj(void *a, void *b) {
-  return ty_double_compare(ty_unbox_double(a), ty_unbox_double(b));
-}
-int32_t ty_float_compare_obj(void *a, void *b) {
-  return ty_float_compare(ty_unbox_float(a), ty_unbox_float(b));
-}
-int32_t ty_char_compare_obj(void *a, void *b) {
-  uint16_t x = ty_unbox_char(a), y = ty_unbox_char(b);
-  return x < y ? -1 : (x > y ? 1 : 0);
-}
-int32_t ty_long_hash(void *o) {
-  int64_t v = ty_unbox_long(o);
-  return (int32_t)(v ^ ((uint64_t)v >> 32));
-}
-int32_t ty_dhash_bits(double d) {
-  int64_t bits = dbl_bits(d);
-  return (int32_t)(bits ^ ((uint64_t)bits >> 32));
-}
-int32_t ty_double_hash(void *o) { return ty_dhash_bits(ty_unbox_double(o)); }
-int32_t ty_float_hash(void *o) { return flt_bits(ty_unbox_float(o)); }
-int32_t ty_char_hash(void *o) { return (int32_t)ty_unbox_char(o); }
-int32_t ty_long_toint(void *o) { return (int32_t)ty_unbox_long(o); }
-
-int32_t ty_fhash_bits(float f) { return flt_bits(f); }
-
-/* ---- Number conversions ------------------------------------------------- */
-/* Java's Number declares six conversions and every numeric wrapper implements
-   all of them, narrowing the way Java narrows: `Integer.byteValue()` is
-   `(byte) this.intValue()`. The receiver is always a box whose kind can be read
-   from its class, so one helper per target type serves every wrapper. */
-static int32_t num_kind(void *o) {
-  if (!o) return 0;
-  tyclass *c = ((tyobj *)o)->cls;
-  if (!(c->flags & 4)) return 0; /* not a box */
-  for (int32_t i = 1; i <= 8; i++) {
-    if (c == TY_BOX[i]) return i;
-  }
-  return 0;
-}
-
-static int64_t num_int64(void *o) {
-  switch (num_kind(o)) {
-  case 1: return ((tyboolbox *)o)->v;
-  case 2: return ((tybytebox *)o)->v;
-  case 3: return ((tyshortbox *)o)->v;
-  case 4: return ((tycharbox *)o)->v;
-  case 5: return ((tyintbox *)o)->v;
-  case 6: return ((tylongbox *)o)->v;
-  case 7: return (int64_t)((tyfloatbox *)o)->v;
-  case 8: return (int64_t)((tydoublebox *)o)->v;
-  }
-  return 0;
-}
-
-static double num_double(void *o) {
-  switch (num_kind(o)) {
-  case 7: return (double)((tyfloatbox *)o)->v;
-  case 8: return ((tydoublebox *)o)->v;
-  }
-  return (double)num_int64(o);
-}
-
-int32_t ty_num_int(void *o) { return (int32_t)num_int64(o); }
-int64_t ty_num_long(void *o) { return num_int64(o); }
-double ty_num_double(void *o) { return num_double(o); }
-float ty_num_float(void *o) { return (float)num_double(o); }
-int8_t ty_num_byte(void *o) { return (int8_t)num_int64(o); }
-int16_t ty_num_short(void *o) { return (int16_t)num_int64(o); }
+   What that moved is worth recording, because the shape of the old code is the
+   reason the new code is shorter. One helper per *target* type served all eight
+   wrappers here (ty_num_int, ty_long_compare_obj, ty_box_equals), reading the
+   receiver's class out of TY_BOX to find out which wrapper it was; the language
+   does that with a method of the class. The bit views the floating-point rules
+   are built on stay in C, where a memcpy is the only way to see them:
+   ty_double_bits and ty_float_bits, plus the raw forms beside them, which
+   Double.equals, Double.compare and Double.hashCode now call from Teyru. */
 
 
 /* ---- math -------------------------------------------------------------- */

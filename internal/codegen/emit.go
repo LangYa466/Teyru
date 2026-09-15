@@ -304,7 +304,7 @@ func (e *Emitter) declareClass(cl *ast.Class) {
 	// the special classes are typedefs of runtime types, and they must be
 	// visible before any struct that has a field of that type
 	switch cl.Special {
-	case "String", "box", "sb":
+	case "String", "sb":
 		e.types.WriteString(e.structOf(cl))
 		return
 	}
@@ -317,8 +317,6 @@ func (e *Emitter) structOf(cl *ast.Class) string {
 		return "typedef tystr " + cname(cl) + ";\n"
 	case "sb":
 		return "typedef tySB " + cname(cl) + ";\n"
-	case "box":
-		return "typedef " + boxStruct(cl) + " " + cname(cl) + ";\n"
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "struct %s {\n  tyobj obj;\n", cname(cl))
@@ -329,11 +327,26 @@ func (e *Emitter) structOf(cl *ast.Class) string {
 		fmt.Fprintf(&b, "  %s cap_%s;\n", e.ctype(v.Type), mangle(v.Name))
 	}
 	b.WriteString("};\n")
+	// A primitive wrapper is an ordinary class with one field holding its value
+	// (lib/04_boxing.teyru), and its struct is written from that field list like
+	// any other. The runtime keeps a second name for the same bytes -- tyintbox,
+	// tylongbox, and so on -- because the reflection path opens a box through a
+	// raw pointer, and a field read that lands one byte off reads another
+	// object rather than failing. So the two views of one layout are tied
+	// together here, where neither can drift without the build saying so.
+	if cl.Special == "box" && len(cl.InstFields) == 1 {
+		if rt := boxStruct(cl); rt != "" {
+			fmt.Fprintf(&b, "_Static_assert(sizeof(%s) == sizeof(%s), \"%s is the size of the runtime's %s\");\n",
+				cname(cl), rt, cl.Full, rt)
+			fmt.Fprintf(&b, "_Static_assert(offsetof(%s, f_%s) == offsetof(%s, v), \"%s keeps its value where the runtime's %s does\");\n",
+				cname(cl), mangle(cl.InstFields[0].Name), rt, cl.Full, rt)
+		}
+	}
 	return b.String()
 }
 
 func (e *Emitter) emitClassMeta(cl *ast.Class) {
-	if cl.Special != "String" && cl.Special != "box" && cl.Special != "sb" {
+	if cl.Special != "String" && cl.Special != "sb" {
 		// special classes were declared with their typedef in the first pass
 		e.types.WriteString(e.structOf(cl))
 	}
@@ -464,6 +477,9 @@ func (e *Emitter) emitClassMeta(cl *ast.Class) {
 	e.data.WriteString("};\n")
 }
 
+// boxStruct is the runtime's C type for a wrapper's bytes, which is what the
+// generated struct of that wrapper is asserted against. The runtime's own view
+// of the layout is stated once, in internal/runtime/src/tyrt.h.
 func boxStruct(cl *ast.Class) string {
 	switch cl.Name {
 	case "Integer":
@@ -483,7 +499,7 @@ func boxStruct(cl *ast.Class) string {
 	case "Short":
 		return "tyshortbox"
 	}
-	return "tyintbox"
+	return ""
 }
 
 // bindCaptures points the captured variables of an anonymous class at the

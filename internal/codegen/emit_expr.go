@@ -152,8 +152,8 @@ func (e *Emitter) classObject(v *ast.ClassLit) string {
 }
 
 func (e *Emitter) boxCall(v string, p *ast.PrimType, dst ast.Type) string {
-	fn := boxFn(p.Kind)
-	if fn == "" {
+	call := e.boxedValue(p.Kind, v)
+	if call == "" {
 		return v
 	}
 	// The formal a boxed argument is passed to is the *erased* one: an
@@ -166,60 +166,116 @@ func (e *Emitter) boxCall(v string, p *ast.PrimType, dst ast.Type) string {
 	// passes a bare `int` where the pointer goes.
 	switch d := dst.(type) {
 	case *ast.ClassType:
-		return "(" + cname(d.Class) + "*)" + fn + "(" + v + ")"
+		return "(" + cname(d.Class) + "*)" + call
 	case *ast.TypeVarType:
-		return "(void*)" + fn + "(" + v + ")"
+		return "(void*)" + call
 	}
 	return v
 }
 
-func boxFn(k ast.PrimKind) string {
-	switch k {
-	case ast.Boolean:
-		return "ty_box_bool"
-	case ast.Byte:
-		return "ty_box_byte"
-	case ast.Short:
-		return "ty_box_short"
-	case ast.Char:
-		return "ty_box_char"
-	case ast.Int:
-		return "ty_box_int"
-	case ast.Long:
-		return "ty_box_long"
-	case ast.Float:
-		return "ty_box_float"
-	case ast.Double:
-		return "ty_box_double"
+// boxedValue renders `v`, a primitive of kind k, as the wrapper object the
+// prelude's Xxx.valueOf builds, and "" when the program has no wrapper for the
+// kind. It is the C back end's whole boxing story: where the emitter used to
+// call ty_box_int and its seven siblings in the runtime, it now calls the
+// method the language spells out in lib/04_boxing.teyru, so the wrapper's
+// value is the class's own field and nothing about it is a runtime secret.
+//
+// The class is initialized first, which is what a static call does anywhere
+// else; a wrapper whose statics are all constants needs no guard and gets none
+// (clinitCall answers "").
+func (e *Emitter) boxedValue(k ast.PrimKind, v string) string {
+	return e.wrapperCall(e.wrapperStatic(k, "valueOf"), v)
+}
+
+// wrapperStatic is the static method of a primitive's wrapper class that takes
+// one parameter of that primitive: valueOf for boxing, hashCode for the
+// synthesized record hash. nil when the program has no wrapper for the kind.
+func (e *Emitter) wrapperStatic(k ast.PrimKind, name string) *ast.Method {
+	cl := e.prog.Builtins.Boxes[k]
+	if cl == nil {
+		return nil
 	}
-	return ""
+	for _, m := range cl.Methods[name] {
+		if !m.IsStatic() || len(m.Params) != 1 {
+			continue
+		}
+		if p, ok := m.Params[0].(*ast.PrimType); ok && p.Kind == k {
+			return m
+		}
+	}
+	return nil
+}
+
+// wrapperCall renders a call to a prelude method the emitter itself makes,
+// initializing the class first as any other static call site does, and "" for
+// a method the program does not have.
+func (e *Emitter) wrapperCall(m *ast.Method, args string) string {
+	if m == nil {
+		return ""
+	}
+	return "(" + e.clinitCall(m.Owner) + e.cfunc(m) + "(" + args + "))"
 }
 
 func (e *Emitter) unboxCall(v string, src ast.Type, p *ast.PrimType) string {
 	if ct, ok := src.(*ast.ClassType); ok {
-		if _, ok2 := e.prog.Builtins.Unbox[ct.Class]; ok2 {
-			recv := v
-			switch p.Kind {
-			case ast.Boolean:
-				return "ty_unbox_bool((void*)" + recv + ")"
-			case ast.Byte:
-				return "ty_unbox_byte((void*)" + recv + ")"
-			case ast.Short:
-				return "ty_unbox_short((void*)" + recv + ")"
-			case ast.Char:
-				return "ty_unbox_char((void*)" + recv + ")"
-			case ast.Int:
-				return "ty_unbox_int((void*)" + recv + ")"
-			case ast.Long:
-				return "ty_unbox_long((void*)" + recv + ")"
-			case ast.Float:
-				return "ty_unbox_float((void*)" + recv + ")"
-			case ast.Double:
-				return "ty_unbox_double((void*)" + recv + ")"
+		kind, ok2 := e.prog.Builtins.Unbox[ct.Class]
+		if ok2 {
+			if m := e.unboxAccessor(ct.Class, kind); m != nil {
+				// The wrapper's own accessor reads the box, which is what an
+				// unboxing conversion means; a destination of another primitive
+				// type is the conversion from that value, so `double d = anInt`
+				// is (double) anInt.intValue() and not a look at the int's
+				// bytes as a double.
+				//
+				// A null reference raises here, where Java raises it: the
+				// generated call cannot test the receiver the way a call site
+				// does (the accessor reads its own field, and `this` is null
+				// only for a call the generator bound without a test), so the
+				// test is written into the statement expression.
+				n := e.tmpName()
+				call := "({ " + cname(ct.Class) + "* " + n + " = (" + cname(ct.Class) + "*)" + v + "; " +
+					n + " ? " + e.cfunc(m) + "(" + n + ") : (" + e.ctype(&ast.PrimType{Kind: kind}) +
+					")(intptr_t)ty_npe(); })"
+				if kind == p.Kind {
+					return call
+				}
+				return "((" + e.ctype(p) + ")(" + call + "))"
 			}
 		}
 	}
 	return v
+}
+
+// unboxAccessor is the wrapper method that reads a box of its own kind: the
+// intValue/longValue/... Java's Number declares and each wrapper implements.
+func (e *Emitter) unboxAccessor(cl *ast.Class, k ast.PrimKind) *ast.Method {
+	name := ""
+	switch k {
+	case ast.Boolean:
+		name = "booleanValue"
+	case ast.Byte:
+		name = "byteValue"
+	case ast.Short:
+		name = "shortValue"
+	case ast.Char:
+		name = "charValue"
+	case ast.Int:
+		name = "intValue"
+	case ast.Long:
+		name = "longValue"
+	case ast.Float:
+		name = "floatValue"
+	case ast.Double:
+		name = "doubleValue"
+	default:
+		return nil
+	}
+	for _, m := range cl.Methods[name] {
+		if !m.IsStatic() && len(m.Params) == 0 {
+			return m
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------- expressions
@@ -773,30 +829,44 @@ func (e *Emitter) unaryInner(v *ast.Unary) string {
 	xt := v.X.GetType()
 	switch v.Op {
 	case "+":
+		// A boxed operand is unboxed and promoted, so `+someByte` is an int:
+		// the checker types every unary operand through unboxOrPrim and
+		// promoteUnary, and the emitter has to answer in the same type.
+		if k, ok := e.boxKindOf(xt); ok {
+			return e.unboxCall(x, xt, promoteOf(k))
+		}
 		return "(" + x + ")"
 	case "-":
 		// Negating the most negative value is undefined in C and a compiler
 		// may fold it away -- clang turns `-INT64_MIN` into 0 where Java says
 		// it wraps to itself. Integer negation goes through an unsigned value
 		// instead, where every input is defined.
+		if k, ok := e.boxKindOf(xt); ok {
+			return negate(e.unboxCall(x, xt, promoteOf(k)), promoteOf(k))
+		}
 		if p, ok := xt.(*ast.PrimType); ok && p.IsIntegral() {
-			if p.Kind == ast.Long {
-				return "((int64_t)(0ull - (uint64_t)(" + x + ")))"
-			}
-			return "((int32_t)(0u - (uint32_t)(" + x + ")))"
+			return negate(x, p)
 		}
 		return "(-(" + x + "))"
 	case "!":
 		if _, ok := xt.(*ast.PrimType); !ok {
-			return "(!ty_unbox_bool((void*)(" + x + ")))"
+			return "(!(" + e.unboxCall("("+x+")", xt, ast.TBoolean) + "))"
 		}
 		return "(!(" + x + "))"
 	case "~":
-		if _, ok := xt.(*ast.PrimType); !ok {
-			return "(~(int32_t)ty_unbox_int((void*)(" + x + ")))"
-		}
+		// No boxed case: the checker refuses `~` on anything but a primitive
+		// (TY-TYP-0053), where Java unboxes. The other four operators accept a
+		// wrapper through unboxOrPrim, which is why they are here.
 		return "(~(" + x + "))"
 	case "++", "--":
+		// `++` on a wrapper replaces the wrapper: Java's update unboxes, does
+		// the arithmetic in the promoted type and boxes the result back, and a
+		// wrapper is immutable, so another variable holding the same one must
+		// not see the change. Written the way C reads it, `(*_p) += 1` would be
+		// pointer arithmetic on the box.
+		if k, ok := e.boxKindOf(xt); ok {
+			return e.boxedUpdate(v, k, xt)
+		}
 		op := "+ 1"
 		if v.Op == "--" {
 			op = "- 1"
@@ -809,6 +879,81 @@ func (e *Emitter) unaryInner(v *ast.Unary) string {
 		return "({ " + decl + ref + " += " + op + "; })"
 	}
 	return x
+}
+
+// promoteOf is the type a unary operator works in: JLS 5.6 promotes byte,
+// short and char to int and leaves the rest alone. It is sema's promoteUnary,
+// restated for the emitter (which cannot import the checker).
+func promoteOf(k ast.PrimKind) *ast.PrimType {
+	switch k {
+	case ast.Long:
+		return ast.TLong
+	case ast.Float:
+		return ast.TFloat
+	case ast.Double:
+		return ast.TDouble
+	}
+	return ast.TInt
+}
+
+// negate renders -x, where x is an expression of type p. An integral negation
+// goes through an unsigned value, because C leaves the negation of the most
+// negative one undefined and clang folds it away where Java wraps; a floating
+// one is the operator itself, which is what negates the zero and the infinities
+// the way Java does.
+func negate(x string, p *ast.PrimType) string {
+	if !p.IsIntegral() {
+		return "(-(" + x + "))"
+	}
+	if p.Kind == ast.Long {
+		return "((int64_t)(0ull - (uint64_t)(" + x + ")))"
+	}
+	return "((int32_t)(0u - (uint32_t)(" + x + ")))"
+}
+
+// boxKindOf is the primitive an operand carries when its static type is one of
+// the eight wrappers, boxed.
+func (e *Emitter) boxKindOf(t ast.Type) (ast.PrimKind, bool) {
+	ct, ok := e.prog.Erased(t).(*ast.ClassType)
+	if !ok || ct.Class == nil {
+		return ast.Void, false
+	}
+	k, ok := e.prog.Builtins.Unbox[ct.Class]
+	return k, ok
+}
+
+// boxedUpdate renders `++` and `--` on a boxed variable. The value of the
+// expression is the new wrapper for a prefix update and the old one for a
+// postfix update, which is the wrapper the variable held -- so the old one is
+// bound before the store.
+func (e *Emitter) boxedUpdate(v *ast.Unary, k ast.PrimKind, xt ast.Type) string {
+	decl, ref := e.lvalueTemp(v.X)
+	promoted := promoteOf(k)
+	// The read is unboxCall's: it tests the receiver, so a null wrapper raises
+	// NullPointerException here rather than reading a field of address zero, and
+	// it promotes byte, short and char to int the way the checker types them.
+	read := e.unboxCall(ref, xt, promoted)
+	step := " + 1"
+	if v.Op == "--" {
+		step = " - 1"
+	}
+	value := "(" + read + step + ")"
+	if k != ast.Float && k != ast.Double {
+		// Java wraps where C leaves signed overflow undefined, so the
+		// arithmetic goes through an unsigned value of the promoted width.
+		ut := "uint32_t"
+		if k == ast.Long {
+			ut = "uint64_t"
+		}
+		value = "(" + e.ctype(promoted) + ")((" + ut + ")(" + read + ")" + step + ")"
+	}
+	back := e.wrapperCall(e.wrapperStatic(k, "valueOf"), "("+e.ctype(&ast.PrimType{Kind: k})+")("+value+")")
+	if v.Postfix {
+		old := e.tmpName()
+		return "({ " + decl + e.ctype(xt) + " " + old + " = " + ref + "; " +
+			ref + " = " + back + "; " + old + "; })"
+	}
+	return "({ " + decl + ref + " = " + back + "; " + ref + "; })"
 }
 
 // lvalueTemp binds an lvalue to a temporary pointer. An update or a compound
@@ -1408,15 +1553,63 @@ func (e *Emitter) callExpr(v *ast.Call) string {
 		return name + "(" + a + ")"
 	}
 	if v.Recv == nil {
-		if m.Selector >= 0 || m.VIndex >= 0 {
+		if (m.Selector >= 0 || m.VIndex >= 0) && !directBind(m) {
 			return e.virtCall(m, cname(m.Owner)+"*", e.thisExpr(), v.Args, v)
 		}
 		return name + "(" + a + ")"
 	}
 	if (m.Selector >= 0 || m.VIndex >= 0) && !m.Mods.Has(ast.ModPrivate) {
+		if directBind(m) {
+			return e.bindCall(m, cname(m.Owner)+"*", v.Recv, v.Args, v)
+		}
 		return e.virtCallTemp(v.Recv, m, v.Args, v)
 	}
 	return name + "(" + a + ")"
+}
+
+// directBind reports whether a virtual call can be bound at compile time
+// instead of read out of the receiver's vtable.
+//
+// A method that cannot be overridden -- because it is final, or because its
+// class is -- has one implementation per slot, so the lookup can only answer
+// with the method resolved here. That is the reasoning nativeIsFinal applies to
+// a native helper, and it is what keeps a call to a wrapper's intValue() as
+// cheap as the runtime helper it replaced: the wrapper classes are declared
+// final (lib/04_boxing.teyru), as they are in Java.
+//
+// An interface method is never bound this way: a class implements an interface
+// by being listed in it rather than by extending it, so Subclasses records
+// nothing about the implementations an interface call can reach.
+//
+// "Nothing in this program extends it" would be a wider rule, and a sound one,
+// but it is deliberately not used here: it also binds the methods of a class
+// that merely happens not to have a subclass yet, which lets the optimiser drop
+// the allocation behind a call like `new Cell(i).value()` -- measured on
+// examples/bench_alloc, the program then allocates nothing at all and the
+// benchmark stops measuring allocation (0.1325s -> 0.0234s for a hundred
+// million iterations). What a program may rely on is the declaration it wrote.
+func directBind(m *ast.Method) bool {
+	return m.Selector < 0 && m.VIndex >= 0 && (m.Mods.Has(ast.ModFinal) ||
+		(m.Owner != nil && m.Owner.Mods.Has(ast.ModFinal)))
+}
+
+// bindCall calls a method that cannot dispatch anywhere else. The receiver is
+// bound once and tested, exactly as the vtable lookup would have tested it: a
+// call on a null receiver is a NullPointerException in Java, and the generated
+// callee reads its own fields without a test of its own -- the gap virtCall's
+// comment describes for a call the generator never entered through.
+func (e *Emitter) bindCall(m *ast.Method, recvT string, recv ast.Expr, args []ast.Expr, call *ast.Call) string {
+	if recvT == "" {
+		recvT = "void*"
+	}
+	n := e.tmpName()
+	inner := e.cfunc(m) + "(" + e.argsFor(n, args, m, call) + ")"
+	if ret := e.ctype(m.Result); ret != "void" {
+		return "({ " + recvT + " " + n + " = (" + recvT + ")" + e.expr(recv) + "; " +
+			"((" + n + ") ? " + inner + " : (" + ret + ")((intptr_t)ty_npe())); })"
+	}
+	return "({ " + recvT + " " + n + " = (" + recvT + ")" + e.expr(recv) + "; " +
+		"((" + n + ") ? (void)" + inner + " : (void)ty_npe()); })"
 }
 
 // virtCallTemp dispatches a virtual call whose receiver may be an expression

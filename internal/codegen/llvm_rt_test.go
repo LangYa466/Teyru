@@ -43,8 +43,6 @@ func TestRuntimeProtos(t *testing.T) {
 		{"ty_init", "void", nil},
 		{"ty_println_str", "void", []string{"ptr"}},
 		{"ty_ps_println_int", "void", []string{"ptr", "i64"}},
-		{"ty_box_long", "ptr", []string{"i64"}},
-		{"ty_unbox_long", "i64", []string{"ptr"}},
 		{"ty_class_of_cls", "ptr", []string{"ptr", "ptr"}},
 		{"ty_class_name", "ptr", []string{"ptr"}},
 		{"ty_make_ex", "ptr", []string{"ptr", "ptr"}},

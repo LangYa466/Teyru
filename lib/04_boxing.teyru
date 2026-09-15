@@ -12,18 +12,34 @@ abstract class Number extends Object {
   public abstract short shortValue()
 }
 
-/* The parsing helpers every wrapper shares. Java's parseXxx throws
-   NumberFormatException for a string that is not a number of that type, and the
-   throw has to happen in Teyru: the runtime cannot raise a class whose tyclass
-   the generated startup does not install (see the TY_* table in emit.go). So
-   each parse is a test -- a native predicate that answers "is this string a
-   number of this type in this radix" -- followed by a native conversion that
-   assumes the answer was yes, and the exception in between.
+/* The wrappers carry their own value.
+ *
+ * Every wrapper in this file has one instance field, `value`, and the
+ * constructor that fills it; `valueOf` allocates one, and each conversion,
+ * hash, comparison, equality and text form below is written over that field.
+ * The runtime used to own the payload: `ty_box_int` allocated a `tyintbox` and
+ * `ty_unbox_int` read it, and the seventy-odd helpers around them were C
+ * functions the compiler called by name. The class is the wrapper now, the field
+ * is the box, and the only thing left in C is the allocation underneath `new`
+ * (see AGENTS.md section 10).
+ *
+ * The field is named `value` and typed with the wrapper's own primitive, so the
+ * generated C struct is the same size and shape the runtime's `tyintbox`,
+ * `tylongbox`, ... are: the compiler checks that agreement where the struct is
+ * written (emit.go's structOf), and the runtime keeps its own view of the same
+ * bytes for the reflection path, which reads a field through a raw pointer.
+ *
+ * The classes are final, as they are in Java. That is what makes `o instanceof
+ * Integer` the class test Java's equals contract asks for -- an Integer never
+ * equals a Long, and neither of them a subclass -- and it is the reason a call
+ * to intValue() is a direct call rather than a dispatch.
+ *
+ * Java's parse helpers stay: the parsing methods below are still written the way
+ * the JDK writes them, a native predicate followed by a native conversion, so
+ * that the NumberFormatException they raise is the prelude's own class and not
+ * one the runtime cannot name. */
 
-   The messages are Java's, down to the quotes and the radix suffix, because a
-   program that prints the exception's message should print what Java prints. */
-
-class Byte extends Number implements Comparable<Byte> {
+final class Byte extends Number implements Comparable<Byte> {
   /* Java's Byte.TYPE: the class byte.class denotes, so a program that writes one
      and a program that writes the other are holding the same object. */
   public static final Class TYPE = byte.class
@@ -32,7 +48,17 @@ class Byte extends Number implements Comparable<Byte> {
   public static final int SIZE = 8
   public static final int BYTES = 1
 
-  public static native Byte valueOf(byte v)
+  /* The value is the wrapper's whole state, and `valueOf` is the only thing
+     that fills it: no constructor is declared, so `new Byte()` and
+     `Class.newInstance()` build the same zero-valued wrapper they built when
+     the runtime owned the payload, and `valueOf` is the one factory. */
+  private byte value
+
+  public static Byte valueOf(byte v) {
+    Byte b = new Byte()
+    b.value = v
+    return b
+  }
   public static Byte valueOf(String s) {
     return valueOf(parseByte(s))
   }
@@ -52,9 +78,15 @@ class Byte extends Number implements Comparable<Byte> {
     }
     return (byte) v
   }
-  public static native String toString(byte v)
-  public static native int compare(byte a, byte b)
-  public static native int hashCode(byte v)
+  public static String toString(byte v) {
+    return Integer.toString((int) v)
+  }
+  public static int compare(byte a, byte b) {
+    return a < b ? -1 : (a > b ? 1 : 0)
+  }
+  public static int hashCode(byte v) {
+    return v
+  }
   public static int toUnsignedInt(byte x) {
     return x & 0xFF
   }
@@ -62,21 +94,45 @@ class Byte extends Number implements Comparable<Byte> {
     return x & 0xFFL
   }
 
-  public native byte byteValue()
-  public native int hashCode()
-  public native String toString()
-  public native int intValue()
-  public native long longValue()
-  public native double doubleValue()
-  public native float floatValue()
-  public native short shortValue()
-  public native boolean equals(Object o)
+  public byte byteValue() {
+    return value
+  }
+  public int hashCode() {
+    return value
+  }
+  public String toString() {
+    return Integer.toString((int) value)
+  }
+  public int intValue() {
+    return value
+  }
+  public long longValue() {
+    return value
+  }
+  public double doubleValue() {
+    return value
+  }
+  public float floatValue() {
+    return value
+  }
+  public short shortValue() {
+    return value
+  }
+  /* Every wrapper's equals is the Java contract -- the class first, the value
+     second -- which is why an Integer never equals a Long and a Boolean.TRUE
+     never equals an Integer holding 1. The runtime used to decide the class
+     test once for all eight wrappers by comparing the two boxes' tyclass
+     pointers (ty_box_equals); with the class final, `instanceof` says the same
+     thing and says it in the language. */
+  public boolean equals(Object o) {
+    return o instanceof Byte && ((Byte) o).value == value
+  }
   public int compareTo(Byte o) {
     return compare(byteValue(), o.byteValue())
   }
 }
 
-class Short extends Number implements Comparable<Short> {
+final class Short extends Number implements Comparable<Short> {
   /* Java's Short.TYPE: the class short.class denotes, so a program that writes one
      and a program that writes the other are holding the same object. */
   public static final Class TYPE = short.class
@@ -85,7 +141,17 @@ class Short extends Number implements Comparable<Short> {
   public static final int SIZE = 16
   public static final int BYTES = 2
 
-  public static native Short valueOf(short v)
+  /* The value is the wrapper's whole state, and `valueOf` is the only thing
+     that fills it: no constructor is declared, so `new Short()` and
+     `Class.newInstance()` build the same zero-valued wrapper they built when
+     the runtime owned the payload, and `valueOf` is the one factory. */
+  private short value
+
+  public static Short valueOf(short v) {
+    Short b = new Short()
+    b.value = v
+    return b
+  }
   public static Short valueOf(String s) {
     return valueOf(parseShort(s))
   }
@@ -102,9 +168,15 @@ class Short extends Number implements Comparable<Short> {
     }
     return (short) v
   }
-  public static native String toString(short v)
-  public static native int compare(short a, short b)
-  public static native int hashCode(short v)
+  public static String toString(short v) {
+    return Integer.toString((int) v)
+  }
+  public static int compare(short a, short b) {
+    return a < b ? -1 : (a > b ? 1 : 0)
+  }
+  public static int hashCode(short v) {
+    return v
+  }
   public static int toUnsignedInt(short x) {
     return x & 0xFFFF
   }
@@ -112,21 +184,39 @@ class Short extends Number implements Comparable<Short> {
     return x & 0xFFFFL
   }
 
-  public native short shortValue()
-  public native int hashCode()
-  public native String toString()
-  public native int intValue()
-  public native long longValue()
-  public native double doubleValue()
-  public native float floatValue()
-  public native byte byteValue()
-  public native boolean equals(Object o)
+  public short shortValue() {
+    return value
+  }
+  public int hashCode() {
+    return value
+  }
+  public String toString() {
+    return Integer.toString((int) value)
+  }
+  public int intValue() {
+    return value
+  }
+  public long longValue() {
+    return value
+  }
+  public double doubleValue() {
+    return value
+  }
+  public float floatValue() {
+    return value
+  }
+  public byte byteValue() {
+    return (byte) value
+  }
+  public boolean equals(Object o) {
+    return o instanceof Short && ((Short) o).value == value
+  }
   public int compareTo(Short o) {
     return compare(shortValue(), o.shortValue())
   }
 }
 
-class Integer extends Number implements Comparable<Integer> {
+final class Integer extends Number implements Comparable<Integer> {
   /* Java's Integer.TYPE: the class int.class denotes, so a program that writes one
      and a program that writes the other are holding the same object. */
   public static final Class TYPE = int.class
@@ -134,6 +224,12 @@ class Integer extends Number implements Comparable<Integer> {
   public static final int MAX_VALUE = 2147483647
   public static final int SIZE = 32
   public static final int BYTES = 4
+
+  /* The value is the wrapper's whole state, and `valueOf` is the only thing
+     that fills it: no constructor is declared, so `new Integer()` and
+     `Class.newInstance()` build the same zero-valued wrapper they built when
+     the runtime owned the payload, and `valueOf` is the one factory. */
+  private int value
 
   public static int parseInt(String s) {
     return parseInt(s, 10)
@@ -159,14 +255,20 @@ class Integer extends Number implements Comparable<Integer> {
   private static native boolean parsable(String s, int radix)
   private static native int parseIntDigits(String s, int radix)
 
-  public static native Integer valueOf(int v)
+  public static Integer valueOf(int v) {
+    Integer b = new Integer()
+    b.value = v
+    return b
+  }
   public static Integer valueOf(String s) {
     return valueOf(parseInt(s))
   }
   public static Integer valueOf(String s, int radix) {
     return valueOf(parseInt(s, radix))
   }
-  public static native int compare(int a, int b)
+  public static int compare(int a, int b) {
+    return a < b ? -1 : (a > b ? 1 : 0)
+  }
   public static native int compareUnsigned(int a, int b)
   public static int max(int a, int b) {
     return a >= b ? a : b
@@ -187,7 +289,9 @@ class Integer extends Number implements Comparable<Integer> {
   public static native int reverseBytes(int v)
   public static native int rotateLeft(int v, int distance)
   public static native int rotateRight(int v, int distance)
-  public static native int hashCode(int v)
+  public static int hashCode(int v) {
+    return v
+  }
 
   public static String toString(int v) {
     return String.valueOf(v)
@@ -210,19 +314,39 @@ class Integer extends Number implements Comparable<Integer> {
   }
   public static native String toUnsignedString(int v, int radix)
 
-  public native int intValue()
-  public native int hashCode()
-  public native boolean equals(Object o)
-  public native int compareTo(Integer o)
-  public native String toString()
-  public native long longValue()
-  public native double doubleValue()
-  public native float floatValue()
-  public native byte byteValue()
-  public native short shortValue()
+  public int intValue() {
+    return value
+  }
+  public int hashCode() {
+    return value
+  }
+  public boolean equals(Object o) {
+    return o instanceof Integer && ((Integer) o).value == value
+  }
+  public int compareTo(Integer o) {
+    return compare(value, o.value)
+  }
+  public String toString() {
+    return String.valueOf(value)
+  }
+  public long longValue() {
+    return value
+  }
+  public double doubleValue() {
+    return value
+  }
+  public float floatValue() {
+    return value
+  }
+  public byte byteValue() {
+    return (byte) value
+  }
+  public short shortValue() {
+    return (short) value
+  }
 }
 
-class Long extends Number implements Comparable<Long> {
+final class Long extends Number implements Comparable<Long> {
   /* Java's Long.TYPE: the class long.class denotes, so a program that writes one
      and a program that writes the other are holding the same object. */
   public static final Class TYPE = long.class
@@ -230,6 +354,12 @@ class Long extends Number implements Comparable<Long> {
   public static final long MAX_VALUE = 9223372036854775807L
   public static final int SIZE = 64
   public static final int BYTES = 8
+
+  /* The value is the wrapper's whole state, and `valueOf` is the only thing
+     that fills it: no constructor is declared, so `new Long()` and
+     `Class.newInstance()` build the same zero-valued wrapper they built when
+     the runtime owned the payload, and `valueOf` is the one factory. */
+  private long value
 
   public static long parseLong(String s) {
     return parseLong(s, 10)
@@ -252,14 +382,20 @@ class Long extends Number implements Comparable<Long> {
   private static native boolean parsableLong(String s, int radix)
   private static native long parseLongDigits(String s, int radix)
 
-  public static native Long valueOf(long v)
+  public static Long valueOf(long v) {
+    Long b = new Long()
+    b.value = v
+    return b
+  }
   public static Long valueOf(String s) {
     return valueOf(parseLong(s))
   }
   public static Long valueOf(String s, int radix) {
     return valueOf(parseLong(s, radix))
   }
-  public static native int compare(long a, long b)
+  public static int compare(long a, long b) {
+    return a < b ? -1 : (a > b ? 1 : 0)
+  }
   public static native int compareUnsigned(long a, long b)
   public static long max(long a, long b) {
     return a >= b ? a : b
@@ -280,7 +416,12 @@ class Long extends Number implements Comparable<Long> {
   public static native long reverseBytes(long v)
   public static native long rotateLeft(long v, int distance)
   public static native long rotateRight(long v, int distance)
-  public static native int hashCode(long v)
+  /* Long.hashCode(long) is the two halves folded together -- Java defines it
+     that way so that a map keyed by the box and a map keyed by the primitive
+     agree. */
+  public static int hashCode(long v) {
+    return (int) (v ^ (v >>> 32))
+  }
 
   public static String toString(long v) {
     return String.valueOf(v)
@@ -300,21 +441,41 @@ class Long extends Number implements Comparable<Long> {
   }
   public static native String toUnsignedString(long v, int radix)
 
-  public native long longValue()
-  public native int intValue()
-  public native int hashCode()
-  public native boolean equals(Object o)
-  public native int compareTo(Long o)
-  public native String toString()
-  public native double doubleValue()
-  public native float floatValue()
-  public native byte byteValue()
-  public native short shortValue()
+  public long longValue() {
+    return value
+  }
+  public int intValue() {
+    return (int) value
+  }
+  public int hashCode() {
+    return hashCode(value)
+  }
+  public boolean equals(Object o) {
+    return o instanceof Long && ((Long) o).value == value
+  }
+  public int compareTo(Long o) {
+    return compare(value, o.value)
+  }
+  public String toString() {
+    return String.valueOf(value)
+  }
+  public double doubleValue() {
+    return value
+  }
+  public float floatValue() {
+    return (float) value
+  }
+  public byte byteValue() {
+    return (byte) value
+  }
+  public short shortValue() {
+    return (short) value
+  }
 }
 
-class Float extends Number implements Comparable<Float> {
+final class Float extends Number implements Comparable<Float> {
   /* Java's Float.TYPE: the class float.class denotes, so a program that writes one
-     and a program that writes the other are holding the same object. */
+     and the program that writes the other are holding the same object. */
   public static final Class TYPE = float.class
   public static final float MAX_VALUE = 3.4028235E38f
   public static final float MIN_VALUE = 1.4E-45f
@@ -323,6 +484,12 @@ class Float extends Number implements Comparable<Float> {
   public static final float NaN = 0.0f / 0.0f
   public static final int SIZE = 32
   public static final int BYTES = 4
+
+  /* The value is the wrapper's whole state, and `valueOf` is the only thing
+     that fills it: no constructor is declared, so `new Float()` and
+     `Class.newInstance()` build the same zero-valued wrapper they built when
+     the runtime owned the payload, and `valueOf` is the one factory. */
+  private float value
 
   public static float parseFloat(String s) {
     if (s == null) {
@@ -336,11 +503,28 @@ class Float extends Number implements Comparable<Float> {
   private static native boolean parsableFloat(String s)
   private static native float parseFloatDigits(String s)
 
-  public static native Float valueOf(float v)
+  public static Float valueOf(float v) {
+    Float b = new Float()
+    b.value = v
+    return b
+  }
   public static Float valueOf(String s) {
     return valueOf(parseFloat(s))
   }
-  public static native int compare(float a, float b)
+  /* Java's Float.compare: the numeric order first, and only for values that
+     compare equal numerically (the two zeros, NaN) the bit order, which puts
+     -0.0 below 0.0 and NaN above everything. */
+  public static int compare(float a, float b) {
+    if (a < b) {
+      return -1
+    }
+    if (a > b) {
+      return 1
+    }
+    int x = floatToIntBits(a)
+    int y = floatToIntBits(b)
+    return x == y ? 0 : (x < y ? -1 : 1)
+  }
   public static native float max(float a, float b)
   public static native float min(float a, float b)
   public static float sum(float a, float b) {
@@ -349,26 +533,59 @@ class Float extends Number implements Comparable<Float> {
   public static native boolean isNaN(float v)
   public static native boolean isInfinite(float v)
   public static native boolean isFinite(float v)
-  public static native int hashCode(float v)
+  /* Float.hashCode(float) is the bits with every NaN collapsed to one value,
+     which is what floatToIntBits answers; a Float's hashCode used to fold the
+     raw bits, so the two zeros agreed and the NaNs did not. */
+  public static int hashCode(float v) {
+    return floatToIntBits(v)
+  }
   public static native int floatToIntBits(float v)
   public static native int floatToRawIntBits(float v)
   public static native float intBitsToFloat(int bits)
 
-  public static native String toString(float v)
+  public static String toString(float v) {
+    return String.valueOf(v)
+  }
 
-  public native float floatValue()
-  public native int hashCode()
-  public native boolean equals(Object o)
-  public native int compareTo(Float o)
-  public native String toString()
-  public native int intValue()
-  public native long longValue()
-  public native double doubleValue()
-  public native byte byteValue()
-  public native short shortValue()
+  public float floatValue() {
+    return value
+  }
+  public int hashCode() {
+    return hashCode(value)
+  }
+  public boolean equals(Object o) {
+    return o instanceof Float && floatToIntBits(value) == floatToIntBits(((Float) o).value)
+  }
+  public int compareTo(Float o) {
+    return compare(value, o.value)
+  }
+  public String toString() {
+    return String.valueOf(value)
+  }
+  /* The integral narrowings go through long, which is the chain the runtime has
+     always used for a floating payload -- the six Number conversions were one
+     helper per target type, `(int64_t)` first for a float or a double. Java's
+     floating-to-integral narrowing saturates where C's is undefined, and that
+     pre-existing difference is not this file's to change: written this way, a
+     program that narrowed an out-of-range value prints what it printed before. */
+  public int intValue() {
+    return (int) (long) value
+  }
+  public long longValue() {
+    return (long) value
+  }
+  public double doubleValue() {
+    return value
+  }
+  public byte byteValue() {
+    return (byte) (long) value
+  }
+  public short shortValue() {
+    return (short) (long) value
+  }
 }
 
-class Double extends Number implements Comparable<Double> {
+final class Double extends Number implements Comparable<Double> {
   /* Java's Double.TYPE: the class double.class denotes, so a program that writes one
      and a program that writes the other are holding the same object. */
   public static final Class TYPE = double.class
@@ -379,6 +596,12 @@ class Double extends Number implements Comparable<Double> {
   public static final double NaN = 0.0 / 0.0
   public static final int SIZE = 64
   public static final int BYTES = 8
+
+  /* The value is the wrapper's whole state, and `valueOf` is the only thing
+     that fills it: no constructor is declared, so `new Double()` and
+     `Class.newInstance()` build the same zero-valued wrapper they built when
+     the runtime owned the payload, and `valueOf` is the one factory. */
+  private double value
 
   public static double parseDouble(String s) {
     if (s == null) {
@@ -392,11 +615,27 @@ class Double extends Number implements Comparable<Double> {
   private static native boolean parsableDouble(String s)
   private static native double parseDoubleDigits(String s)
 
-  public static native Double valueOf(double v)
+  public static Double valueOf(double v) {
+    Double b = new Double()
+    b.value = v
+    return b
+  }
   public static Double valueOf(String s) {
     return valueOf(parseDouble(s))
   }
-  public static native int compare(double a, double b)
+  /* Java's Double.compare, and the reason Double.equals needs doubleToLongBits:
+     the two zeros differ, NaN equals NaN, and equal values hash alike. */
+  public static int compare(double a, double b) {
+    if (a < b) {
+      return -1
+    }
+    if (a > b) {
+      return 1
+    }
+    long x = doubleToLongBits(a)
+    long y = doubleToLongBits(b)
+    return x == y ? 0 : (x < y ? -1 : 1)
+  }
   public static native double max(double a, double b)
   public static native double min(double a, double b)
   public static double sum(double a, double b) {
@@ -405,28 +644,55 @@ class Double extends Number implements Comparable<Double> {
   public static native boolean isNaN(double v)
   public static native boolean isInfinite(double v)
   public static native boolean isFinite(double v)
-  public static native int hashCode(double v)
+  public static int hashCode(double v) {
+    long bits = doubleToLongBits(v)
+    return (int) (bits ^ (bits >>> 32))
+  }
   public static native long doubleToLongBits(double v)
   public static native long doubleToRawLongBits(double v)
   public static native double longBitsToDouble(long bits)
 
-  public static native String toString(double v)
+  public static String toString(double v) {
+    return String.valueOf(v)
+  }
 
-  public native double doubleValue()
-  public native int hashCode()
-  public native boolean equals(Object o)
-  public native int compareTo(Double o)
-  public native String toString()
-  public native int intValue()
-  public native long longValue()
-  public native float floatValue()
-  public native byte byteValue()
-  public native short shortValue()
+  public double doubleValue() {
+    return value
+  }
+  public int hashCode() {
+    return hashCode(value)
+  }
+  public boolean equals(Object o) {
+    return o instanceof Double && doubleToLongBits(value) == doubleToLongBits(((Double) o).value)
+  }
+  public int compareTo(Double o) {
+    return compare(value, o.value)
+  }
+  public String toString() {
+    return String.valueOf(value)
+  }
+  /* See Float: the integral narrowings go through long, the chain the runtime
+     has always used for a floating payload. */
+  public int intValue() {
+    return (int) (long) value
+  }
+  public long longValue() {
+    return (long) value
+  }
+  public float floatValue() {
+    return (float) value
+  }
+  public byte byteValue() {
+    return (byte) (long) value
+  }
+  public short shortValue() {
+    return (short) (long) value
+  }
 }
 
-class Character extends Object implements Comparable<Character> {
+final class Character extends Object implements Comparable<Character> {
   /* Java's Character.TYPE: the class char.class denotes, so a program that writes one
-     and a program that writes the other are holding the same object. */
+     and the program that writes the other are holding the same object. */
   public static final Class TYPE = char.class
   public static final char MIN_VALUE = 0
   public static final char MAX_VALUE = 65535
@@ -435,7 +701,17 @@ class Character extends Object implements Comparable<Character> {
   public static final int SIZE = 16
   public static final int BYTES = 2
 
-  public static native Character valueOf(char c)
+  /* The value is the wrapper's whole state, and `valueOf` is the only thing
+     that fills it: no constructor is declared, so `new Character()` and
+     `Class.newInstance()` build the same zero-valued wrapper they built when
+     the runtime owned the payload, and `valueOf` is the one factory. */
+  private char value
+
+  public static Character valueOf(char c) {
+    Character b = new Character()
+    b.value = c
+    return b
+  }
   public static native boolean isDigit(char c)
   public static native boolean isLetter(char c)
   public static native boolean isLetterOrDigit(char c)
@@ -447,42 +723,73 @@ class Character extends Object implements Comparable<Character> {
   public static native char toLowerCase(char c)
   public static native int getNumericValue(char c)
   public static native int digit(char c, int radix)
-  public static native int compare(char a, char b)
-  public static native String toString(char c)
-  public static native int hashCode(char c)
+  public static int compare(char a, char b) {
+    return a < b ? -1 : (a > b ? 1 : 0)
+  }
+  public static String toString(char c) {
+    return String.valueOf(c)
+  }
+  public static int hashCode(char c) {
+    return c
+  }
 
-  public native char charValue()
-  public native int hashCode()
-  public native boolean equals(Object o)
-  public native int compareTo(Character o)
-  public native String toString()
+  public char charValue() {
+    return value
+  }
+  public int hashCode() {
+    return value
+  }
+  public boolean equals(Object o) {
+    return o instanceof Character && ((Character) o).value == value
+  }
+  public int compareTo(Character o) {
+    return compare(value, o.value)
+  }
+  public String toString() {
+    return String.valueOf(value)
+  }
 }
 
-class Boolean extends Object implements Comparable<Boolean> {
+final class Boolean extends Object implements Comparable<Boolean> {
   /* Java's Boolean.TYPE: the class boolean.class denotes, so a program that writes one
-     and a program that writes the other are holding the same object. */
+     and the program that writes the other are holding the same object. */
   public static final Class TYPE = boolean.class
   public static final Boolean TRUE = Boolean.valueOf(true)
   public static final Boolean FALSE = Boolean.valueOf(false)
 
+  /* The value is the wrapper's whole state, and `valueOf` is the only thing
+     that fills it: no constructor is declared, so `new Boolean()` and
+     `Class.newInstance()` build the same zero-valued wrapper they built when
+     the runtime owned the payload, and `valueOf` is the one factory. */
+  private boolean value
+
   /* Java's parser is case-insensitive: only "true" in any case is true, and a
-     null is false. The runtime helper compares against "true" exactly, so the
-     fold happens here. */
+     null is false. */
   public static boolean parseBoolean(String s) {
     return s != null && s.equalsIgnoreCase("true")
   }
   public static Boolean valueOf(String s) {
     return parseBoolean(s) ? TRUE : FALSE
   }
-  public static native Boolean valueOf(boolean v)
-  public static native String toString(boolean v)
+  public static Boolean valueOf(boolean v) {
+    Boolean b = new Boolean()
+    b.value = v
+    return b
+  }
+  public static String toString(boolean v) {
+    return String.valueOf(v)
+  }
   public static int compare(boolean a, boolean b) {
     if (a == b) {
       return 0
     }
     return a ? 1 : -1
   }
-  public static native int hashCode(boolean v)
+  /* Boolean.hashCode is the class hash and not the raw value the unboxing
+     helper used to answer with; a Boolean's %h used to print 1. */
+  public static int hashCode(boolean v) {
+    return v ? 1231 : 1237
+  }
   public static boolean logicalAnd(boolean a, boolean b) {
     return a && b
   }
@@ -496,10 +803,18 @@ class Boolean extends Object implements Comparable<Boolean> {
     return !a
   }
 
-  public native boolean booleanValue()
-  public native int hashCode()
-  public native boolean equals(Object o)
-  public native String toString()
+  public boolean booleanValue() {
+    return value
+  }
+  public int hashCode() {
+    return hashCode(value)
+  }
+  public boolean equals(Object o) {
+    return o instanceof Boolean && ((Boolean) o).value == value
+  }
+  public String toString() {
+    return String.valueOf(value)
+  }
   public int compareTo(Boolean o) {
     return compare(booleanValue(), o.booleanValue())
   }

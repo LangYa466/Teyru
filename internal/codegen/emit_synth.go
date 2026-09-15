@@ -167,9 +167,13 @@ func (e *Emitter) recordHashCode(cl *ast.Class) {
 			case ast.Long:
 				e.line("_h = 31 * _h + (int32_t)(%s ^ ((uint64_t)%s >> 32));\n", n, n)
 			case ast.Double:
-				e.line("_h = 31 * _h + ty_dhash_bits(%s);\n", n)
+				// Java hashes a floating component through the wrapper's own
+				// hashCode, which is the bits with every NaN collapsed to one
+				// value -- the fold the runtime used to do, now written in the
+				// prelude beside Double.hashCode(double).
+				e.line("_h = 31 * _h + %s;\n", e.wrapperCall(e.wrapperStatic(ast.Double, "hashCode"), n))
 			case ast.Float:
-				e.line("_h = 31 * _h + ty_fhash_bits(%s);\n", n)
+				e.line("_h = 31 * _h + %s;\n", e.wrapperCall(e.wrapperStatic(ast.Float, "hashCode"), n))
 			}
 		} else {
 			e.line("_h = 31 * _h + ((%s) ? ((int32_t(*)(void*))((tyobj*)%s)->cls->vtable[1])((void*)%s) : 0);\n", n, n, n)
