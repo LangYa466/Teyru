@@ -1,0 +1,2643 @@
+package teyru
+
+/* The zone database: ZoneId, ZoneOffset, ZoneRules, ZoneOffsetTransition and
+   ZonedDateTime, over the operating system's own TZif files.
+
+   java.time's zone layer has one source of truth, the IANA time zone database,
+   and there are two ways to get at it. A JVM ships a compiled copy of the data
+   in java.home/lib/tzdb.dat. A C program does not: it asks the C library, which
+   asks the files under /usr/share/zoneinfo, which the distribution built from
+   the same database with zic. This file reads those files, in Teyru, with no
+   native code and no new C -- the format is a binary one (RFC 8536) and this
+   library can read a file into a byte[], which is all a reader needs.
+
+   What it depends on, exactly. The zoneinfo files of the host, in TZif format,
+   under $TZDIR (in the sense the C library means: the variable, when it is set
+   and not empty, is the directory the zone files are looked up in) and
+   /usr/share/zoneinfo otherwise. There is no fallback database: a host with no
+   tzdata (Windows, or a container that did not install it) has no zones, and
+   every operation that needs one raises ZoneRulesException with a message that
+   says which directory was not there. The two offsets that cannot be missing --
+   UTC, GMT, UT, and the numeric ids like +08:00 -- are built in and work with
+   no database at all, because a program that only needs UTC should not need
+   tzdata. Everything else is refused by name rather than answered wrongly; the
+   refusals are listed at the end of this comment.
+
+   The format. A TZif file is a 44-octet header, a variable-length data block,
+   and -- for version 2 and later -- a second header, a second data block with
+   64-bit transition times, and a footer. The version octet says which: 0x00 is a
+   version 1 file, which ends after the first block; '2', '3' and '4' are later
+   versions, whose first block exists only for obsolescent readers. Reading the
+   first block to get at the second would be reading the same times at 32 bits,
+   so this reader calculates the length of the first block from its header and
+   skips it (RFC 8536 section 3.2 and Appendix A say to), then parses the second
+   with 8-octet times. A version 1 file is parsed from its own block, and has no
+   footer: its transitions are limited to 1901..2038 by the width of a 32-bit
+   time, which is the reason the later versions exist.
+
+   A data block is four parallel series: the transition times (ascending UT
+   seconds), one type index per transition, the local time type records (a
+   4-octet utoff, a one-octet isdst, a one-octet index into the designations),
+   and the NUL-terminated designations. Leap-second records and the standard/wall
+   and UT/local indicators follow, and this reader steps over both: the leap
+   records are refused by name (below), and the indicators describe only how the
+   transition times were *written*, which is not a question a reader has to
+   answer. For an instant, the applicable type is the one the last transition at
+   or before it opened; before the first transition it is the first type that is
+   not DST (which in every file of the database this was written against is type
+   0, so the two readings of RFC 8536 and tzfile(5) agree here); and, when there
+   is a footer, at or after the last transition it is the footer that decides.
+
+   The footer is why this file exists in the shape it does. For most zones the
+   last transition in the file is in the past -- Asia/Taipei's is 1979, Europe/
+   Moscow's is 2014, New York's is 2037 -- so the offset for *now*, and every
+   offset after it, comes from the POSIX TZ string in the footer rather than from
+   the table. A reader that stops at the table is wrong about the present, and
+   wrong in the direction that looks right: it answers the last rule the zone
+   ever changed under, for ever. The string is whatever zic wrote, and this
+   reader parses the whole of POSIX's grammar for it plus RFC 8536's version 3
+   extensions:
+
+     * the two names, quoted <like this> (the form tzdata uses for the zones
+       whose abbreviation is not a name at all: <+0545>, <-02>) or unquoted and
+       at least three letters (CST, EST, ChST);
+     * the two offsets, in the printed form hh[:mm[:ss]] and in POSIX's inverted
+       sense: CST-8 is +08:00 east of UT and EST5 is -05:00. The seconds default
+       to zero, the DST offset defaults to one hour more than the standard one,
+       and an offset of more than 24 hours is refused;
+     * the two transition rules, in all three of POSIX's forms: Jn (day n of the
+       year, January 1 is 1, February 29 is never counted), n (day n of the year
+       counted from zero, February 29 counted), and Mm.w.d (month m, week w of
+       that month -- 5 is the last one -- on weekday d, Sunday is 0);
+     * the optional /time after either rule, defaulting to 02:00:00, given in the
+       wall time in force just before the transition (standard time for the start
+       of DST, DST for the end of it), which is what makes America/Nuuk's
+       M3.5.0/-1 mean 23:00 the day before;
+     * the version 3 extension that lets that time be negative or more than a
+       day: the hours may be -167..167, which is how a zone whose clocks move at
+       midnight or before it is written (America/Santiago's M9.1.6/24,
+       Africa/Cairo's M4.5.4/24, America/Nuuk's M3.5.0/-1).
+
+   Where the offsets, the DST flags and the names come from, in one sentence:
+   from the type table for every instant the table covers, from the footer rule
+   for every instant at or after the last transition, and for the instants before
+   the first transition from the first type. The abbreviation is the designation
+   the file names for that type, or the name on the appropriate side of the
+   footer rule -- the string the zone's own data carries, which is what the C
+   library's tm_zone answers and what a log line wants.
+
+   What is deliberately not here, and why each is a decision rather than an
+   omission.
+
+   * The parts of java.time.zone that describe a rule *object* rather than
+     answer a question about one: ZoneOffsetTransitionRule, and with it
+     ZoneRules.getTransitionRules (which returns those rules). This reader keeps
+     the parsed POSIX string instead -- PosixTz, which is not a public type of
+     java.time's -- and it answers the same questions (which half of the rule an
+     instant is in, and the two transitions of a year) without a second public
+     shape to keep in step. ZoneRules.toString, which in Java prints a one-line
+     summary of the current standard offset, is not here either; a program that
+     wants that prints getStandardOffset.
+
+   * ZoneId.getDisplayName and ZoneId.SHORT_IDS. The first needs the locale data
+     of the zone names (CLDR), which this library does not have and which would
+     answer a name the files do not carry; the second is a table of three-letter
+     aliases that no part of this reader needs.
+
+   * java.util.TimeZone is not implemented. It is the pre-java.time class for the
+     same thing, and this library's whole date and time layer is java.time's:
+     there is no Date and no Calendar for it to be handed to, its getOffset(int,
+     int, int, int, int, int) is the Calendar-era signature that needs era rules
+     this library has no other use for, and its surface is otherwise a subset of
+     ZoneId's and ZoneRules'. The shapes that fit this library are the java.time
+     ones, so ZoneId.getAvailableZoneIds() is the list of ids,
+     ZoneId.systemDefault() is the default zone, and ZoneRules.getOffset is the
+     offset for an instant -- the three things TimeZone would have been asked
+     for. ZoneId.getAvailableIDs() answers the same list as a sorted String[],
+     which is the shape java.util.TimeZone.getAvailableIDs has, because a sorted
+     array is what a script wants and a stable thing for a test to print.
+     ZoneId.setSystemDefault and ZoneId.setZoneInfoDir are this library's own
+     additions, in the shape TimeZone.setDefault and ZoneRulesProvider have.
+
+   * Leap seconds. A file whose selected data block carries leap-second records
+     is refused by name: the transition times in such a file ("right/" in a
+     tzdata installation) are UNIX *leap* seconds, so a reader that ignores the
+     corrections would be off by the number of leap seconds after 1972 -- one
+     answer that is wrong by 27 seconds is worse than no answer. No file under
+     the ordinary tree has any, so nothing a program normally asks for is
+     refused. The distance between TAI and UTC is not something this library
+     claims to model.
+
+   * A DST half with no transition rules, as in a bare "EST5EDT". POSIX leaves
+     the rules to the implementation (glibc reads them from a file it keeps for
+     that purpose), so there is nothing in the file to be right about; refused by
+     name. No zone in a tzdata 2026 installation writes one.
+
+   * A version octet other than 0x00, '2', '3' or '4'; a data block that runs
+     past the end of the file; a type index outside the type table; a
+     designation index outside the designations; a designation with no NUL;
+     transition times that are not strictly ascending; an isdst octet that is
+     neither 0 nor 1; a local time type offset outside the +/-18:00 a ZoneOffset
+     here can carry. Each is refused with a message naming the file and the
+     field. The point is the same in every case: a malformed file is a broken
+     answer to a question about time, and the honest thing to do with one is to
+     say so.
+
+   * The values that a *later* tzdata would change. This reader answers from the
+     host's files; the JVM answers from its own copy of the database, which can
+     be a different vintage. Where they agree -- every case t188 pins, all of
+     them fixed instants from the historical record -- they agree exactly; where
+     the host's data is newer than the JVM's, the host's is the one that
+     describes the machine the program is running on.
+
+   Two places where this file deliberately answers differently from a JVM, both
+   because the data is not the same data.
+
+   * Negative DST. tzdata models Ireland's winter as DST with -1 hour of saving
+     (the footer of Europe/Dublin is IST-1GMT0,M10.5.0,M3.5.0/1) and marks the
+     winter type isdst=1. The JVM's copy of the database flattens that: it
+     answers isDaylightSavings false for a January instant and calls the winter
+     the standard offset. This library follows the file, so Dublin's winter is
+     DST here, its standard offset is IST (+01:00) all year, and glibc's
+     localtime agrees with this library rather than with the JVM. The offsets
+     themselves are the same either way; only the flag and the standard offset
+     differ.
+
+   * Abbreviations. The JVM has no API that answers a tzfile's designation:
+     DateTimeFormatter's "z" and ZoneId.getDisplayName answer CLDR's name for the
+     zone, which is "NPT" for Asia/Kathmandu where the file says "+0545", "WGST"
+     for America/Nuuk where the file says "-01", and "CST" for the exact era in
+     which the file says "JST". ZoneRules.getAbbreviation here answers the file.
+
+   The one security-shaped thing in this file is the id. A zone id is a path
+   under the search directory, and an id that begins with '/' or contains ".." is
+   refused with ZoneRulesException before any file is opened: "Asia/Taipei" is a
+   name, "../../etc/passwd" is not, and the difference has to be decided by a
+   reader rather than by whatever open() does with it. Every other id is checked
+   the way ZoneId.of checks it in Java (letters, digits, and '/', '.', '_', '-',
+   '+', '~' after the first character), and an id the database does not have is
+   the JVM's own message: "Unknown time-zone ID: <id>".
+
+   Which tests pin which claim. tests/programs/t188_timezone.teyru is the same
+   program as the javac 21 program in t188_timezone.java.ref, and its
+   expectations are that program's output on a JVM: the offsets, the DST flags,
+   the gap and overlap answers, the transition boundaries, the arithmetic across
+   a boundary and the toString of a zoned date are all Java's answers, and the
+   zones were chosen so that the host's files and the JVM's data agree on them.
+   tests/programs/t189_timezone_lookup.teyru is the policy side: the id list, the
+   refusals, TZDIR and TZ, and the abbreviations and DST flags that are the
+   *file's* answers rather than a JVM's (the negative-DST case above is asserted
+   there, against the file). tests/programs/t190_timezone_tzif.teyru writes the files it
+   reads, so that the format's own corners are held still -- a version 1 file, a
+   version 2 file whose two blocks disagree, an empty footer, a footer with a DST
+   half and no rules, a file with leap-second records, one with the indicator
+   series -- and then checks the host's odd rules past the end of every table
+   (Cairo's 00:00 and 24:00 transition times, Gaza's 50 hours, Chatham's 45
+   minutes, Santiago's Saturday rule, Nuuk's negative time, Lord Howe's half hour
+   of DST) against zdump, and the local-time answers for the gaps and overlaps
+   those rules make against a JVM.
+
+   Between them the three tests also carry the evidence this reader was written
+   against. All 599 zones of a tzdata 2026b installation, at every transition of
+   their history and every two years from 1890 to 2060 -- 175777 instants -- were
+   read for their offset, DST flag and abbreviation and compared with glibc's
+   answers for the same files: no difference. And 47169 local date-times in
+   sixteen zones, chosen at the gaps and overlaps of every transition in them and
+   in the footer era, were read for getValidOffsets, getTransition and
+   ZonedDateTime.of and compared with a JVM's: no difference either.
+
+   One thing this file does not fix, because it is not this file's to fix:
+   lib/20_time.teyru says at the top that there is no zone database and that
+   LocalDate.now() and LocalDateTime.now() read the clock as UTC. Those two still
+   do -- this file adds the zone layer beside them rather than changing them --
+   so LocalDateTime.now() is UTC while ZonedDateTime.now() is in the default
+   zone. */
+
+// ---------------------------------------------------------------- the exception
+
+/* java.time.zone.ZoneRulesException, which extends DateTimeException, which
+   extends RuntimeException. The hierarchy is Java's, and this class is what
+   every refusal below raises: a zone that is not there, a file that is not a
+   zone file, a file that is a broken one, an id that is a path traversal. */
+class ZoneRulesException extends DateTimeException {
+  public ZoneRulesException(String message) {
+    super(message)
+  }
+}
+
+// ---------------------------------------------------------------- the arithmetic both halves need
+
+/* TzMath is the one conversion this file needs everywhere: between a UT second
+   and the local date and time an offset makes of it, and between a local date
+   and time and the UT second it would be at zero offset. A transition in a TZif
+   file is a UT second and the local time on either side of it is that second
+   plus the offset on that side, so every question about a gap or an overlap is
+   asked on the local second and comes back through here.
+
+   It is a final class holding nothing but statics, as this library's other
+   helpers are: a method needs a class to live in, and there is no state in
+   these. */
+final class TzMath {
+  public static final long SECONDS_PER_DAY = 86400L
+
+  // The local second of a date-time, counted from 1970-01-01T00:00 in the local
+  // calendar with no offset applied: the same number as the epoch second of the
+  // date-time read as if it were UT, which is the number a transition's local
+  // boundary is compared against.
+  public static long localSecond(LocalDateTime dt) {
+    return dt.toLocalDate().toEpochDay() * SECONDS_PER_DAY + dt.toLocalTime().toSecondOfDay()
+  }
+
+  public static LocalDateTime localDateTime(long second, int nanos, int offsetSeconds) {
+    long local = second + offsetSeconds
+    long day = Math.floorDiv(local, SECONDS_PER_DAY)
+    long s = Math.floorMod(local, SECONDS_PER_DAY)
+    LocalDate date = LocalDate.ofEpochDay(day)
+    LocalTime time = LocalTime.of((int) (s / 3600), (int) ((s % 3600) / 60), (int) (s % 60), nanos)
+    return LocalDateTime.of(date, time)
+  }
+
+  public static LocalDateTime localDateTime(long second, int offsetSeconds) {
+    return localDateTime(second, 0, offsetSeconds)
+  }
+
+  /* A local date-time moved by whole seconds while keeping its fraction. The gap
+     of an hour that a spring-forward transition leaves is closed by moving a
+     local time through it, and LocalDateTime.plusSeconds cannot do it: it goes
+     through LocalTime.plusSeconds, which rebuilds the time from the second of
+     the day and drops the nanos. A zoned time of 01:30:00.500 in a gap has to
+     come out as 03:30:00.500. */
+  public static LocalDateTime plusSeconds(LocalDateTime dt, long seconds) {
+    long local = localSecond(dt) + seconds
+    long day = Math.floorDiv(local, SECONDS_PER_DAY)
+    long s = Math.floorMod(local, SECONDS_PER_DAY)
+    int nano = dt.toLocalTime().getNano()
+    LocalDate date = LocalDate.ofEpochDay(day)
+    LocalTime time = LocalTime.of((int) (s / 3600), (int) ((s % 3600) / 60), (int) (s % 60), nano)
+    return LocalDateTime.of(date, time)
+  }
+
+  /* The year a UT second falls in, read in the local calendar of the offset
+     passed with it: a DST rule is a rule about a year, and which year is the
+     question that has to be answered before either transition of it can be
+     found. */
+  public static int yearOf(long second, int offsetSeconds) {
+    return (int) TimeMath.civilFromDays(Math.floorDiv(second + offsetSeconds, SECONDS_PER_DAY))[0]
+  }
+}
+
+// ---------------------------------------------------------------- ZoneId, and ZoneOffset under it
+
+/* java.time.ZoneId: a name for a set of rules. Two kinds of name live under it,
+   as in Java. A region id names a file in the zone database, and its rules are
+   read from that file the first time they are asked for. An offset id -- "Z",
+   "+08:00", "UTC", "GMT", "UTC+05:45" -- names an offset with no database behind
+   it, and ZoneOffset, its subclass here as it is in Java, is what those answer
+   with.
+
+   ZoneOffset extends ZoneId rather than standing beside it because that is what
+   Java does and because it is what makes ZonedDateTime.of(local, ZoneOffset.UTC)
+   compile: a ZoneOffset *is* a ZoneId, so one method takes both. The subclass
+   keeps its own totalSeconds, inherits the id, and overrides getRules to build a
+   fixed rule set -- exactly the split the JDK has.
+
+   One shape this class has that Java's does not: it is Comparable, ordered by
+   id, because an id is a string and a list of zones sorted by name is a thing
+   programs want (Java's ZoneId has no order, which is why sorting zones there
+   needs a Comparator). ZoneOffset's own compareTo, by total seconds, is Java's.
+
+   The three static things that are not in a JVM. TZDIR is honoured, because that
+   is where the C library reads its zone files from and this reader reads the C
+   library's files: set it and the search path is that directory, unset it and it
+   is /usr/share/zoneinfo. TZ is honoured for the default zone, which is POSIX's
+   rule and not Java's -- a JVM ignores TZ entirely -- so a program run with
+   TZ=Asia/Taipei behaves like a C program run with it, whether TZ names a zone
+   ("Asia/Taipei", ":Asia/Taipei") or is the rule itself ("CST-8"). With TZ unset
+   the default comes from /etc/localtime. And setZoneInfoDir is this library's
+   own: a way to point the reader at another database, which is what TZDIR does
+   for a C library and what java.time.zone.ZoneRulesProvider does, less
+   elaborately, for a JVM. */
+class ZoneId implements Comparable<ZoneId> {
+  private static final String DEFAULT_ZONE_INFO_DIR = "/usr/share/zoneinfo"
+  private static final String LOCAL_TIME_FILE = "/etc/localtime"
+  // The errno of a file that is not there, which is the one answer of a read
+  // that means "no such zone" rather than "this file cannot be read at all".
+  private static final int ENOENT = 2
+
+  /* Package-level, not private, and the same fields a subclass would inherit in
+     Java: ZoneOffset sets the id through its super constructor and has no id of
+     its own, and both classes cache the rules under this name. */
+  String id
+  ZoneRules rules
+
+  // The search path when the environment has not named one, the cache of files
+  // already read, the id list, the environment's default zone once it has been
+  // worked out, and the process's override of it.
+  private static String zoneInfoDir = null
+  private static Map<String, ZoneRules> cache = null
+  private static String[] available = null
+  private static Set<String> availableSet = null
+  private static ZoneId environmentDefault = null
+  private static ZoneId overriddenDefault = null
+
+  ZoneId(String id) {
+    this.id = id
+  }
+
+  ZoneId(String id, ZoneRules rules) {
+    this.id = id
+    this.rules = rules
+  }
+
+  // ---- the shape of an id ----
+
+  /* Java's ZoneRegion.checkName, message for message. It is what makes
+     ZoneId.of("Asia Taipei") a DateTimeException rather than a failed lookup,
+     and what the traversal rule below is *not*: this one admits ".." and a
+     leading '/', so the check that refuses those is separate and runs first. */
+  private static void checkName(String id) {
+    int n = id.length()
+    if (n < 2) {
+      throw new DateTimeException("Invalid ID for region-based ZoneId, invalid format: " + id)
+    }
+    for (int i = 0 : i < n : i++) {
+      char c = id.charAt(i)
+      if (c >= 'a' && c <= 'z') {
+        continue
+      }
+      if (c >= 'A' && c <= 'Z') {
+        continue
+      }
+      if (c == '/' && i != 0) {
+        continue
+      }
+      if (c >= '0' && c <= '9' && i != 0) {
+        continue
+      }
+      if (c == '~' && i != 0) {
+        continue
+      }
+      if (c == '.' && i != 0) {
+        continue
+      }
+      if (c == '_' && i != 0) {
+        continue
+      }
+      if (c == '+' && i != 0) {
+        continue
+      }
+      if (c == '-' && i != 0) {
+        continue
+      }
+      throw new DateTimeException("Invalid ID for region-based ZoneId, invalid format: " + id)
+    }
+  }
+
+  /* The one rule of this file that is about a path rather than about time. A
+     zone id is turned into a path under the search directory, so an id that
+     starts with '/' would leave that directory and an id holding ".." could walk
+     out of it; both are refused before anything is opened, with a message that
+     says which of the two it was. Java does not have this check -- it admits
+     ".." and fails the lookup afterwards, and it rejects a leading '/' only as a
+     malformed id -- so this is this library's own and its tests state it as
+     such. */
+  private static void checkSafe(String id) {
+    if (id.startsWith("/")) {
+      String why = " (a zone id is a path under the zone directory, so it cannot be absolute)"
+      throw new ZoneRulesException("Invalid zone id: " + id + why)
+    }
+    if (id.contains("..")) {
+      String why = " (a zone id is a path under the zone directory, so it cannot contain \"..\")"
+      throw new ZoneRulesException("Invalid zone id: " + id + why)
+    }
+  }
+
+  // ---- the search path ----
+
+  /* Where the zone files are. TZDIR is the C library's variable and means the
+     same thing here: the directory the zone files are looked up in, when it is
+     set and not empty. */
+  public static String getZoneInfoDir() {
+    if (zoneInfoDir != null) {
+      return zoneInfoDir
+    }
+    String env = System.getenv("TZDIR")
+    if (env != null && env.length() > 0) {
+      return env
+    }
+    return DEFAULT_ZONE_INFO_DIR
+  }
+
+  /* Point the reader at another database, or pass null to go back to what the
+     environment says. This is this library's own addition -- glibc has no such
+     call and the JDK's equivalent is ZoneRulesProvider.registerProvider -- and
+     it is what lets a test use a directory of its own. */
+  public static void setZoneInfoDir(String dir) {
+    zoneInfoDir = dir
+    cache = null
+    available = null
+    availableSet = null
+    environmentDefault = null
+  }
+
+  private static Map<String, ZoneRules> rulesCache() {
+    if (cache == null) {
+      cache = new HashMap<String, ZoneRules>()
+    }
+    return cache
+  }
+
+  /* The message every operation that needs the database gives when there is not
+     one. There is no fallback data, so this is where a Windows host or a
+     container without tzdata ends up, and the message says what to install or
+     set rather than failing later with a wrong offset. */
+  private static ZoneRulesException noDatabase(String dir) {
+    StringBuilder why = new StringBuilder()
+    why.append("no time zone database: ").append(dir).append(" is not a directory")
+    why.append(" (this library reads the system's own TZif files")
+    why.append("; install tzdata, or set TZDIR to where they are)")
+    return new ZoneRulesException(why.toString())
+  }
+
+  private static ZoneRules load(String id) {
+    String dir = getZoneInfoDir()
+    if (Fs.kind0(dir) != Fs.TY_FILE_DIR) {
+      throw noDatabase(dir)
+    }
+    String path = dir + "/" + id
+    /* The kind first, because a directory named like a zone is not a zone and a
+       file that cannot be read is not an unknown zone: the first is the JVM's
+       "Unknown time-zone ID", the second a failure with the errno in it. */
+    int kind = Fs.kind0(path)
+    if (kind == Fs.TY_FILE_NONE || (kind > 0 && kind != Fs.TY_FILE_REG)) {
+      throw new ZoneRulesException("Unknown time-zone ID: " + id)
+    }
+    if (kind < 0) {
+      throw new ZoneRulesException("cannot read " + path + ": " + Net.strerror(kind))
+    }
+    int[] err = new int[1]
+    byte[] data = Fs.readBytes0(path, err)
+    if (data == null) {
+      if (err[0] == ENOENT) {
+        throw new ZoneRulesException("Unknown time-zone ID: " + id)
+      }
+      throw new ZoneRulesException("cannot read " + path + ": " + Net.strerror(err[0]))
+    }
+    return new ZoneRules(TzifData.parse(data, path))
+  }
+
+  private static ZoneRules rulesFor(String id) {
+    Map<String, ZoneRules> c = rulesCache()
+    ZoneRules r = c.get(id)
+    if (r == null) {
+      r = load(id)
+      c.put(id, r)
+    }
+    return r
+  }
+
+  // ---- the list of ids ----
+
+  private static boolean isTzif(String path) {
+    try {
+      byte[] b = Files.readAllBytes(path)
+      return b.length >= 4 && b[0] == 'T' && b[1] == 'Z' && b[2] == 'i' && b[3] == 'f'
+    } catch (IOException e) {
+      // A file that cannot be read is not a zone this list can offer. Looking
+      // that id up will say why in its own words.
+      return false
+    }
+  }
+
+  /* The ids are the files under the search path whose first four octets are the
+     TZif magic. That is what makes the list the *system's* rather than a
+     compiled-in one: a distribution that ships a zone this library has never
+     heard of gets it for free, and the files that are not zones -- tzdata.zi,
+     zone.tab, zone1970.tab, iso3166.tab, leapseconds, leap-seconds.list -- are
+     exactly the ones the magic test leaves out, so no list of names has to be
+     kept correct over time.
+
+     The two alternate trees are skipped. posix/ and right/ hold the same zones
+     in other representations (right/ carries the leap-second corrections), and
+     neither is an id in glibc's sense: TZ=CET does not find posix/CET. */
+  private static void collect(String path, String prefix, List<String> out) {
+    String[] names = new File(path).list()
+    if (names == null) {
+      return
+    }
+    for (int i = 0 : i < names.length : i++) {
+      String name = names[i]
+      String child = path + "/" + name
+      String id = prefix.length() == 0 ? name : prefix + "/" + name
+      int kind = Fs.kind0(child)
+      if (kind == Fs.TY_FILE_DIR) {
+        if (prefix.length() == 0 && (name.equals("posix") || name.equals("right"))) {
+          continue
+        }
+        collect(child, id, out)
+      } else if (kind == Fs.TY_FILE_REG && isTzif(child)) {
+        out.add(id)
+      }
+    }
+  }
+
+  private static String[] idList() {
+    if (available == null) {
+      String dir = getZoneInfoDir()
+      if (Fs.kind0(dir) != Fs.TY_FILE_DIR) {
+        throw noDatabase(dir)
+      }
+      List<String> out = new ArrayList<String>()
+      collect(dir, "", out)
+      String[] ids = new String[out.size()]
+      for (int i = 0 : i < out.size() : i++) {
+        ids[i] = out.get(i)
+      }
+      Arrays.sort(ids)
+      available = ids
+    }
+    return available
+  }
+
+  /* The Set java.time answers with, as a TreeSet so that it has an order: Java's
+     own Set is unordered, which is why a program that prints it gets whatever
+     its hash order happens to be. */
+  public static Set<String> getAvailableZoneIds() {
+    if (availableSet == null) {
+      String[] ids = idList()
+      Set<String> out = new TreeSet<String>()
+      for (int i = 0 : i < ids.length : i++) {
+        out.add(ids[i])
+      }
+      availableSet = out
+    }
+    return availableSet
+  }
+
+  /* The same list as a sorted array. java.util.TimeZone.getAvailableIDs is where
+     this shape comes from; java.time has only the Set. */
+  public static String[] getAvailableIDs() {
+    return idList()
+  }
+
+  // ---- the names ----
+
+  /* The prefix forms: "UTC", "GMT", "UT", and the same three with an offset
+     after them ("UTC+08:00"). All three are built in rather than looked up, so a
+     program that only needs UTC works on a host with no tzdata -- which is the
+     case ZoneOffset.UTC also covers. An offset of zero after a prefix folds back
+     to the bare prefix ("UTC+00:00" is "UTC"), as in Java. */
+  private static ZoneId withPrefix(String id, int length) {
+    String prefix = id.substring(0, length)
+    if (id.length() == length) {
+      return new ZoneId(prefix, ZoneRules.ofNamedOffset(ZoneOffset.UTC, prefix))
+    }
+    char next = id.charAt(length)
+    if (next != '+' && next != '-') {
+      return region(id)
+    }
+    ZoneOffset offset
+    try {
+      offset = ZoneOffset.of(id.substring(length))
+    } catch (DateTimeException e) {
+      throw new DateTimeException("Invalid ID for offset-based ZoneId: " + id)
+    }
+    if (offset.getTotalSeconds() == 0) {
+      return new ZoneId(prefix, ZoneRules.ofNamedOffset(ZoneOffset.UTC, prefix))
+    }
+    return new ZoneId(prefix + offset.getId(), ZoneRules.ofNamedOffset(offset, prefix + offset.getId()))
+  }
+
+  private static ZoneId region(String id) {
+    checkSafe(id)
+    checkName(id)
+    return new ZoneId(id, rulesFor(id))
+  }
+
+  /* Java's ZoneId.of, branch for branch: an id of one character or one that
+     starts with a sign is an offset; UTC, GMT and UT are the three prefixes; and
+     everything else is a region. The id a caller writes comes back from getId
+     unchanged, so ZoneId.of("Europe/Kiev") is still named Europe/Kiev even
+     though the file it reads is the one Europe/Kyiv links to. */
+  public static ZoneId of(String id) {
+    if (id == null) {
+      throw new NullPointerException("zoneId")
+    }
+    if (id.length() <= 1 || id.startsWith("+") || id.startsWith("-")) {
+      return ZoneOffset.of(id)
+    }
+    if (id.startsWith("UTC") || id.startsWith("GMT")) {
+      return withPrefix(id, 3)
+    }
+    if (id.startsWith("UT")) {
+      return withPrefix(id, 2)
+    }
+    return region(id)
+  }
+
+  public String getId() {
+    return id
+  }
+
+  public String toString() {
+    return id
+  }
+
+  public ZoneRules getRules() {
+    if (rules == null) {
+      rules = ZoneId.rulesFor(id)
+    }
+    return rules
+  }
+
+  /* Java's: the ZoneOffset of a zone whose rules never move, and this, itself,
+     for one that does. ZoneId.of("UTC").normalized() is ZoneOffset.UTC, which
+     prints as Z. */
+  public ZoneId normalized() {
+    ZoneRules r = getRules()
+    if (r.isFixedOffset()) {
+      return r.getOffset(Instant.ofEpochSecond(0))
+    }
+    return this
+  }
+
+  /* Two ids are equal when they are the same characters, and an offset is never
+     equal to a region with the same name: ZoneId.of("UTC").equals(ZoneOffset.UTC)
+     is false, as in Java, because they are different kinds of name for the same
+     instant. */
+  public boolean equals(Object o) {
+    if (this == o) {
+      return true
+    }
+    if (o instanceof ZoneOffset) {
+      return false
+    }
+    if (o instanceof ZoneId) {
+      return id.equals(((ZoneId) o).id)
+    }
+    return false
+  }
+
+  public int hashCode() {
+    return id.hashCode()
+  }
+
+  public int compareTo(ZoneId other) {
+    return id.compareTo(other.id)
+  }
+
+  // ---- the default zone ----
+
+  /* The id of the zone whose file is byte for byte the file at /etc/localtime,
+     or null when none is. A JVM learns the default zone's *name* from native
+     code that follows the /etc/localtime link; there is no readlink in this
+     library, so the name is found by content instead: the ids are searched in
+     sorted order and the first file that matches is the answer. Two ids can name
+     the same file (Europe/Kiev is a link to Europe/Kyiv in the database this was
+     written against), and then the first in sorted order wins, which is a stable
+     answer for a name the file itself does not carry. */
+  private static String matchingId(byte[] data) {
+    String dir = getZoneInfoDir()
+    String[] ids = idList()
+    for (int i = 0 : i < ids.length : i++) {
+      String path = dir + "/" + ids[i]
+      if (Fs.size0(path) != data.length) {
+        continue
+      }
+      try {
+        byte[] other = Files.readAllBytes(path)
+        if (other.length == data.length) {
+          boolean same = true
+          for (int k = 0 : k < data.length : k++) {
+            if (other[k] != data[k]) {
+              same = false
+              break
+            }
+          }
+          if (same) {
+            return ids[i]
+          }
+        }
+      } catch (IOException e) {
+        // A file this reader cannot compare cannot be the one asked for.
+      }
+    }
+    return null
+  }
+
+  private static ZoneId fromLocalTimeFile() {
+    String dir = getZoneInfoDir()
+    if (Fs.kind0(dir) != Fs.TY_FILE_DIR) {
+      throw noDatabase(dir)
+    }
+    int kind = Fs.kind0(LOCAL_TIME_FILE)
+    if (kind == Fs.TY_FILE_NONE) {
+      // No /etc/localtime at all: UTC, which is what the C library falls back to
+      // as well.
+      return of("UTC")
+    }
+    if (kind < 0) {
+      throw new ZoneRulesException("cannot read " + LOCAL_TIME_FILE + ": " + Net.strerror(kind))
+    }
+    int[] err = new int[1]
+    byte[] data = Fs.readBytes0(LOCAL_TIME_FILE, err)
+    if (data == null) {
+      throw new ZoneRulesException("cannot read " + LOCAL_TIME_FILE + ": " + Net.strerror(err[0]))
+    }
+    String id = matchingId(data)
+    if (id == null) {
+      StringBuilder why = new StringBuilder()
+      why.append(LOCAL_TIME_FILE).append(" is not the same file as any zone under ").append(dir)
+      why.append(" (there is no readlink here, so the local zone is named by its contents:")
+      why.append(" set TZ to the id of the zone /etc/localtime is a copy of)")
+      throw new ZoneRulesException(why.toString())
+    }
+    return of(id)
+  }
+
+  /* TZ, then /etc/localtime, then UTC -- POSIX's order and POSIX's meanings,
+     which are not Java's: a JVM ignores TZ and reads its own database. An empty
+     TZ is UTC, TZ=":name" is the same as TZ="name", and a TZ that names no zone
+     in the database is read as the rule itself, which is glibc's other form. */
+  private static ZoneId resolveDefault() {
+    String tz = System.getenv("TZ")
+    if (tz != null && tz.length() == 0) {
+      return of("UTC")
+    }
+    if (tz != null) {
+      String name = tz
+      if (name.startsWith(":")) {
+        name = name.substring(1)
+      }
+      try {
+        return of(name)
+      } catch (DateTimeException e) {
+        PosixTz parsed = PosixTz.parse(tz, "TZ=" + tz)
+        return new ZoneId(tz, ZoneRules.fromPosix(parsed))
+      }
+    }
+    return fromLocalTimeFile()
+  }
+
+  public static ZoneId systemDefault() {
+    if (overriddenDefault != null) {
+      return overriddenDefault
+    }
+    if (environmentDefault == null) {
+      environmentDefault = resolveDefault()
+    }
+    return environmentDefault
+  }
+
+  /* This library's addition, the shape java.util.TimeZone.setDefault has: hand
+     the process a default zone, or hand it null to go back to the environment's
+     answer. */
+  public static void setSystemDefault(ZoneId zone) {
+    overriddenDefault = zone
+  }
+}
+
+// ---------------------------------------------------------------- ZoneOffset
+
+/* java.time.ZoneOffset: a fixed offset from UT, in whole seconds, and the only
+   zone whose offset does not depend on when it is asked.
+
+   The range is Java's +/-(18:00), which is wider than any civil offset and
+   narrower than what a TZif file may carry (RFC 8536 allows -25 to +26 hours,
+   and this reader refuses a file that uses one: an offset this class cannot hold
+   would otherwise have to be answered with a number it would have to check
+   anyway). The printed form is Java's too: "Z" for zero, "+HH:MM" to the minute,
+   and "+HH:MM:SS" when there are seconds to print, with a negative sub-minute
+   offset printing as "-00:00:30" rather than losing its sign. */
+class ZoneOffset extends ZoneId {
+  private static final int MIN_TOTAL_SECONDS = -18 * 3600
+  private static final int MAX_TOTAL_SECONDS = 18 * 3600
+
+  public static final ZoneOffset UTC = new ZoneOffset(0)
+  public static final ZoneOffset MIN = new ZoneOffset(MIN_TOTAL_SECONDS)
+  public static final ZoneOffset MAX = new ZoneOffset(MAX_TOTAL_SECONDS)
+
+  private final int totalSeconds
+
+  private ZoneOffset(int totalSeconds) {
+    super(ZoneOffset.buildId(totalSeconds))
+    this.totalSeconds = totalSeconds
+  }
+
+  private static String buildId(int totalSeconds) {
+    if (totalSeconds == 0) {
+      return "Z"
+    }
+    int abs = totalSeconds < 0 ? -totalSeconds : totalSeconds
+    StringBuilder b = new StringBuilder()
+    b.append(totalSeconds < 0 ? "-" : "+")
+    int hours = abs / 3600
+    int minutes = (abs / 60) % 60
+    if (hours < 10) {
+      b.append("0")
+    }
+    b.append(hours)
+    if (minutes < 10) {
+      b.append(":0")
+    } else {
+      b.append(":")
+    }
+    b.append(minutes)
+    int seconds = abs % 60
+    if (seconds != 0) {
+      if (seconds < 10) {
+        b.append(":0")
+      } else {
+        b.append(":")
+      }
+      b.append(seconds)
+    }
+    return b.toString()
+  }
+
+  // Java's parseNumber: two digits at a position. The messages are Java's, so a
+  // caller that prints what a bad id raised gets the same sentence a JVM does.
+  private static int parseNumber(String id, int pos) {
+    char c1 = id.charAt(pos)
+    char c2 = id.charAt(pos + 1)
+    if (c1 < '0' || c1 > '9' || c2 < '0' || c2 > '9') {
+      throw new DateTimeException("Invalid ID for ZoneOffset, non numeric characters found: " + id)
+    }
+    return (c1 - 48) * 10 + (c2 - 48)
+  }
+
+  private static void validate(int hours, int minutes, int seconds) {
+    if (hours < -18 || hours > 18) {
+      throw new DateTimeException("Zone offset hours not in valid range: value " + hours + " is not in the range -18 to 18")
+    }
+    if (minutes < -59 || minutes > 59) {
+      throw new DateTimeException("Zone offset minutes not in valid range: value " + minutes + " is not in the range -59 to 59")
+    }
+    if (seconds < -59 || seconds > 59) {
+      throw new DateTimeException("Zone offset seconds not in valid range: value " + seconds + " is not in the range -59 to 59")
+    }
+    if (hours > 0 && (minutes < 0 || seconds < 0)) {
+      throw new DateTimeException("Zone offset minutes and seconds must be positive because hours is positive")
+    }
+    if (hours < 0 && (minutes > 0 || seconds > 0)) {
+      throw new DateTimeException("Zone offset minutes and seconds must be negative because hours is negative")
+    }
+    if (hours == 0 && ((minutes > 0 && seconds < 0) || (minutes < 0 && seconds > 0))) {
+      throw new DateTimeException("Zone offset minutes and seconds must have the same sign")
+    }
+  }
+
+  public static ZoneOffset ofTotalSeconds(int totalSeconds) {
+    if (totalSeconds < MIN_TOTAL_SECONDS || totalSeconds > MAX_TOTAL_SECONDS) {
+      throw new DateTimeException("Zone offset not in valid range: -18:00 to +18:00")
+    }
+    if (totalSeconds == 0) {
+      return UTC
+    }
+    return new ZoneOffset(totalSeconds)
+  }
+
+  public static ZoneOffset ofHoursMinutesSeconds(int hours, int minutes, int seconds) {
+    validate(hours, minutes, seconds)
+    return ofTotalSeconds(hours * 3600 + minutes * 60 + seconds)
+  }
+
+  public static ZoneOffset ofHoursMinutes(int hours, int minutes) {
+    return ofHoursMinutesSeconds(hours, minutes, 0)
+  }
+
+  public static ZoneOffset ofHours(int hours) {
+    return ofHoursMinutesSeconds(hours, 0, 0)
+  }
+
+  /* The id forms Java accepts, and only those: Z; +h and +hh (three characters
+     after the sign is folded in); +hhmm (five); +hh:mm (six); +hhmmss (seven);
+     and +hh:mm:ss (nine). Eight characters is not a form, which is what makes
+     "+0800:00" and "+08:0000" invalid rather than half-read. Anything else is a
+     DateTimeException whose message is Java's. */
+  public static ZoneOffset of(String offsetId) {
+    if (offsetId == null) {
+      throw new NullPointerException("offsetId")
+    }
+    if (offsetId.equals("Z")) {
+      return UTC
+    }
+    String text = offsetId
+    int hours
+    int minutes = 0
+    int seconds = 0
+    int length = text.length()
+    if (length == 2) {
+      text = text.substring(0, 1) + "0" + text.substring(1)
+      length = 3
+    }
+    if (length == 3) {
+      hours = parseNumber(text, 1)
+    } else if (length == 5) {
+      hours = parseNumber(text, 1)
+      minutes = parseNumber(text, 3)
+    } else if (length == 6) {
+      hours = parseNumber(text, 1)
+      minutes = parseNumber(text, 4)
+    } else if (length == 7) {
+      hours = parseNumber(text, 1)
+      minutes = parseNumber(text, 3)
+      seconds = parseNumber(text, 5)
+    } else if (length == 9) {
+      hours = parseNumber(text, 1)
+      minutes = parseNumber(text, 4)
+      seconds = parseNumber(text, 7)
+    } else {
+      throw new DateTimeException("Invalid ID for ZoneOffset, invalid format: " + offsetId)
+    }
+    char first = text.charAt(0)
+    if (first != '+' && first != '-') {
+      throw new DateTimeException("Invalid ID for ZoneOffset, plus/minus not found when expected: " + offsetId)
+    }
+    if (first == '-') {
+      return ofHoursMinutesSeconds(-hours, -minutes, -seconds)
+    }
+    return ofHoursMinutesSeconds(hours, minutes, seconds)
+  }
+
+  public int getTotalSeconds() {
+    return totalSeconds
+  }
+
+  public String getId() {
+    return id
+  }
+
+  public String toString() {
+    return id
+  }
+
+  /* A fixed rule set whose one offset is *this* object, which is what makes the
+     identity test in ZonedDateTime.toString work: an offset zone's zone and its
+     offset are the same object, so no "[+08:00]" is printed after it. */
+  public ZoneRules getRules() {
+    if (rules == null) {
+      rules = ZoneRules.fixed(this)
+    }
+    return rules
+  }
+
+  public int compareTo(ZoneOffset other) {
+    return totalSeconds - other.totalSeconds
+  }
+
+  public boolean equals(Object o) {
+    if (this == o) {
+      return true
+    }
+    if (o instanceof ZoneOffset) {
+      return totalSeconds == ((ZoneOffset) o).totalSeconds
+    }
+    return false
+  }
+
+  public int hashCode() {
+    return totalSeconds
+  }
+}
+
+// ---------------------------------------------------------------- the transition object
+
+/* java.time.zone.ZoneOffsetTransition: one instant at which the offset changes,
+   with the offset on either side of it. It is what a gap and an overlap *are* --
+   the local times that do not exist are the ones between the two local times
+   this object answers, and the local times that exist twice are the ones between
+   them when the offset went backwards.
+
+   The local date-time on either side is the instant plus that side's offset, and
+   the toString is Java's own: "Transition[Gap at 2021-03-14T02:00-05:00 to
+   -04:00]" -- the gap case of New York's spring forward, which is the string
+   t188 pins. */
+class ZoneOffsetTransition implements Comparable<ZoneOffsetTransition> {
+  private final long epochSecond
+  private final ZoneOffset before
+  private final ZoneOffset after
+
+  ZoneOffsetTransition(long epochSecond, ZoneOffset before, ZoneOffset after) {
+    this.epochSecond = epochSecond
+    this.before = before
+    this.after = after
+  }
+
+  /* Java's factory, for a transition written as the local time it happened at
+     plus the offset in force before it. */
+  public static ZoneOffsetTransition of(LocalDateTime transition, ZoneOffset offsetBefore, ZoneOffset offsetAfter) {
+    return new ZoneOffsetTransition(TzMath.localSecond(transition) - offsetBefore.getTotalSeconds(), offsetBefore, offsetAfter)
+  }
+
+  public long toEpochSecond() {
+    return epochSecond
+  }
+
+  public Instant getInstant() {
+    return Instant.ofEpochSecond(epochSecond)
+  }
+
+  public ZoneOffset getOffsetBefore() {
+    return before
+  }
+
+  public ZoneOffset getOffsetAfter() {
+    return after
+  }
+
+  public LocalDateTime getDateTimeBefore() {
+    return TzMath.localDateTime(epochSecond, before.getTotalSeconds())
+  }
+
+  public LocalDateTime getDateTimeAfter() {
+    return TzMath.localDateTime(epochSecond, after.getTotalSeconds())
+  }
+
+  public Duration getDuration() {
+    return Duration.ofSeconds((long) after.getTotalSeconds() - before.getTotalSeconds())
+  }
+
+  // A gap is a transition the clocks jumped over, so the local time after it is
+  // later than the local time before; an overlap is the reverse.
+  public boolean isGap() {
+    return after.getTotalSeconds() > before.getTotalSeconds()
+  }
+
+  public boolean isOverlap() {
+    return after.getTotalSeconds() < before.getTotalSeconds()
+  }
+
+  /* Whether a local time with this offset is one of the two this transition
+     makes ambiguous. A gap has no valid offset at all, which is why this is
+     false for every offset when it is one. */
+  public boolean isValidOffset(ZoneOffset offset) {
+    if (isGap()) {
+      return false
+    }
+    return before.equals(offset) || after.equals(offset)
+  }
+
+  public int compareTo(ZoneOffsetTransition other) {
+    if (epochSecond < other.epochSecond) {
+      return -1
+    }
+    return epochSecond > other.epochSecond ? 1 : 0
+  }
+
+  public boolean equals(Object o) {
+    if (this == o) {
+      return true
+    }
+    if (o instanceof ZoneOffsetTransition) {
+      ZoneOffsetTransition d = (ZoneOffsetTransition) o
+      return epochSecond == d.epochSecond && before.equals(d.before) && after.equals(d.after)
+    }
+    return false
+  }
+
+  public int hashCode() {
+    return (int) (epochSecond ^ before.hashCode() ^ Integer.rotateLeft(after.hashCode(), 16))
+  }
+
+  public String toString() {
+    return "Transition[" + (isGap() ? "Gap" : "Overlap") + " at " + getDateTimeBefore() + before + " to " + after + "]"
+  }
+}
+
+// ---------------------------------------------------------------- the footer rule
+
+/* The POSIX TZ string that decides every instant at or after a file's last
+   transition, and the same grammar for a TZ environment variable that names a
+   rule rather than a zone.
+
+   The grammar is the one in POSIX's TZ definition plus the extensions RFC 8536
+   section 3.3.1 allows in a version 3 file, and all of it is parsed rather than
+   the parts the current database happens to use, because the parts it does not
+   use are the parts the next release may.
+
+     name:      <quoted> or at least three letters. The quoted form is what a
+                name with digits or a sign in it has to use -- <+0545>, <-02>,
+                <+1030> -- and its contents may not hold a digit or a sign,
+                which is POSIX's rule for it.
+     offset:    [+-]h[h][:mm[:ss]], in POSIX's inverted sense: it counts west, so
+                CST-8 is +08:00 east of UT. More than 24 hours is refused.
+     dst:       the same, optional, and defaulting to one hour more than the
+                standard offset.
+     rule:      Jn (January 1 is 1, February 29 never counted), n (days counted
+                from zero, February 29 counted), or Mm.w.d (month, week with 5
+                meaning the last, weekday with Sunday 0).
+     /time:     the wall time of the transition, in the offset in force just
+                before it, defaulting to 02:00:00, and running from -167 to +167
+                hours in a version 3 file: America/Nuuk's M3.5.0/-1 is 23:00 the
+                day before and America/Santiago's M9.1.6/24 is midnight at the
+                end of the day.
+
+   What is *not* accepted, and refused by name: a DST half with no rule at all (a
+   bare "EST5EDT"), where POSIX leaves the rule to the implementation and glibc
+   reads a file this library does not have; an offset of more than 24 hours; a
+   transition time outside -167..167 hours; a name shorter than three letters or
+   a quoted one holding a digit; a month outside 1..12, a week outside 1..5, a
+   weekday outside 0..6, a day of the year outside its range; anything left over
+   at the end of the string. Each is a file that cannot be answered from, and the
+   message names the part of the string that was wrong.
+
+   Two rules of POSIX's that are not obvious, and both are implemented. The
+   transition time is in the wall time of the *before* side (standard time for
+   the start of DST, DST for the end), which is why a rule's two transitions are
+   computed with different offsets. And the year a rule applies to is the year
+   the *local* time falls in, which is why a southern-hemisphere rule (Sydney's
+   AEST-10AEDT,M10.1.0,M4.1.0/3) is not simply one interval per year: this
+   implementation asks the year and its two neighbours for their transitions and
+   answers with the half the latest transition at or before the instant
+   established, which is the same answer without the special cases. */
+final class PosixTz {
+  private static final int JULIAN_ONE = 0
+  private static final int DAY_OF_YEAR = 1
+  private static final int MONTH_WEEK_DAY = 2
+  private static final int DEFAULT_DST_START = 7200
+
+  private final String text
+  private final String stdName
+  private final int stdOffset
+  private final String dstName
+  private final int dstOffset
+  private final int[] start
+  private final int[] end
+
+  private PosixTz(String text, String stdName, int stdOffset, String dstName, int dstOffset, int[] start, int[] end) {
+    this.text = text
+    this.stdName = stdName
+    this.stdOffset = stdOffset
+    this.dstName = dstName
+    this.dstOffset = dstOffset
+    this.start = start
+    this.end = end
+  }
+
+  // ---- the parser ----
+
+  private static ZoneRulesException bad(String where, String why) {
+    return new ZoneRulesException("cannot read the TZ string in " + where + ": " + why)
+  }
+
+  private static int digits(String s, int[] pos, int max, String where) {
+    int out = 0
+    int n = 0
+    while (n < max && pos[0] < s.length()) {
+      char c = s.charAt(pos[0])
+      if (c < '0' || c > '9') {
+        break
+      }
+      out = out * 10 + (c - 48)
+      pos[0] = pos[0] + 1
+      n = n + 1
+    }
+    if (n == 0) {
+      throw bad(where, "a number is missing")
+    }
+    return out
+  }
+
+  private static String name(String s, int[] pos, String where) {
+    if (pos[0] >= s.length()) {
+      throw bad(where, "a name is missing")
+    }
+    char c = s.charAt(pos[0])
+    if (c == '<') {
+      int close = s.indexOf(62, pos[0] + 1)
+      if (close < 0) {
+        throw bad(where, "a quoted name is not closed")
+      }
+      String out = s.substring(pos[0] + 1, close)
+      if (out.length() == 0) {
+        throw bad(where, "a quoted name is empty")
+      }
+      pos[0] = close + 1
+      return out
+    }
+    int from = pos[0]
+    while (pos[0] < s.length()) {
+      char q = s.charAt(pos[0])
+      if ((q >= 'a' && q <= 'z') || (q >= 'A' && q <= 'Z')) {
+        pos[0] = pos[0] + 1
+      } else {
+        break
+      }
+    }
+    if (pos[0] - from < 3) {
+      throw bad(where, "a name is shorter than three letters")
+    }
+    return s.substring(from, pos[0])
+  }
+
+  /* hh[:mm[:ss]] with an optional sign, answered as the number the string
+     carries: an *offset* in a TZ string is POSIX's, which counts west positive,
+     so its two callers negate this and the transition time after '/' does not
+     (that one is a wall clock, not a sense). */
+  private static int clock(String s, int[] pos, String where, int maxHours, int maxDigits) {
+    boolean west = false
+    if (pos[0] < s.length()) {
+      char c = s.charAt(pos[0])
+      if (c == '+' || c == '-') {
+        west = c == '-'
+        pos[0] = pos[0] + 1
+      }
+    }
+    int hours = digits(s, pos, maxDigits, where)
+    int minutes = 0
+    int seconds = 0
+    if (pos[0] < s.length() && s.charAt(pos[0]) == ':') {
+      pos[0] = pos[0] + 1
+      minutes = digits(s, pos, 2, where)
+      if (pos[0] < s.length() && s.charAt(pos[0]) == ':') {
+        pos[0] = pos[0] + 1
+        seconds = digits(s, pos, 2, where)
+      }
+    }
+    if (hours > maxHours) {
+      throw bad(where, "an offset of more than " + maxHours + " hours")
+    }
+    if (minutes > 59 || seconds > 59) {
+      throw bad(where, "an offset with more than 59 minutes or seconds")
+    }
+    int total = hours * 3600 + minutes * 60 + seconds
+    return west ? -total : total
+  }
+
+  // Jn, n or Mm.w.d, with the optional /time, as six numbers: the kind, the
+  // month, the week, the weekday, the day of the year, and the time in seconds.
+  private static int[] rule(String s, int[] pos, String where) {
+    if (pos[0] >= s.length()) {
+      throw bad(where, "a transition rule is missing")
+    }
+    char c = s.charAt(pos[0])
+    int kind
+    int month = 0
+    int week = 0
+    int day = 0
+    int dayOfYear = 0
+    if (c == 'J') {
+      pos[0] = pos[0] + 1
+      kind = JULIAN_ONE
+      dayOfYear = digits(s, pos, 3, where)
+      if (dayOfYear < 1 || dayOfYear > 365) {
+        throw bad(where, "a Julian day outside 1..365")
+      }
+    } else if (c == 'M') {
+      pos[0] = pos[0] + 1
+      kind = MONTH_WEEK_DAY
+      month = digits(s, pos, 2, where)
+      if (pos[0] >= s.length() || s.charAt(pos[0]) != '.') {
+        throw bad(where, "a month is not followed by '.'")
+      }
+      pos[0] = pos[0] + 1
+      week = digits(s, pos, 1, where)
+      if (pos[0] >= s.length() || s.charAt(pos[0]) != '.') {
+        throw bad(where, "a week is not followed by '.'")
+      }
+      pos[0] = pos[0] + 1
+      day = digits(s, pos, 1, where)
+      if (month < 1 || month > 12) {
+        throw bad(where, "a month outside 1..12")
+      }
+      if (week < 1 || week > 5) {
+        throw bad(where, "a week outside 1..5")
+      }
+      if (day < 0 || day > 6) {
+        throw bad(where, "a weekday outside 0..6")
+      }
+    } else {
+      kind = DAY_OF_YEAR
+      dayOfYear = digits(s, pos, 3, where)
+      if (dayOfYear > 365) {
+        throw bad(where, "a day of the year outside 0..365")
+      }
+    }
+    int seconds = DEFAULT_DST_START
+    if (pos[0] < s.length() && s.charAt(pos[0]) == '/') {
+      pos[0] = pos[0] + 1
+      seconds = clock(s, pos, where, 167, 3)
+    }
+    int[] out = new int[6]
+    out[0] = kind
+    out[1] = month
+    out[2] = week
+    out[3] = day
+    out[4] = dayOfYear
+    out[5] = seconds
+    return out
+  }
+
+  /* Parse a whole TZ string. `where` names the thing the string came from -- a
+     file path, or "TZ=..." for an environment variable -- because a message
+     about a rule that cannot be read is useless without it. */
+  public static PosixTz parse(String s, String where) {
+    if (s.length() == 0) {
+      throw bad(where, "the string is empty")
+    }
+    int[] pos = new int[1]
+    String stdName = name(s, pos, where)
+    // POSIX prints the offset west positive: CST-8 is eight hours east of UT.
+    int stdOffset = -clock(s, pos, where, 24, 3)
+    if (pos[0] >= s.length()) {
+      return new PosixTz(s, stdName, stdOffset, null, 0, null, null)
+    }
+    String dstName = name(s, pos, where)
+    int dstOffset = stdOffset + 3600
+    if (pos[0] < s.length() && s.charAt(pos[0]) != ',') {
+      dstOffset = -clock(s, pos, where, 24, 3)
+    }
+    if (pos[0] >= s.length()) {
+      throw bad(where, "\"" + dstName + "\" has no transition rules, and POSIX leaves those" + " to the implementation")
+    }
+    if (s.charAt(pos[0]) != ',') {
+      throw bad(where, "the rules do not begin with ','")
+    }
+    pos[0] = pos[0] + 1
+    int[] start = rule(s, pos, where)
+    if (pos[0] >= s.length() || s.charAt(pos[0]) != ',') {
+      throw bad(where, "the second transition rule is missing")
+    }
+    pos[0] = pos[0] + 1
+    int[] end = rule(s, pos, where)
+    if (pos[0] != s.length()) {
+      throw bad(where, "the string does not end after the second rule")
+    }
+    return new PosixTz(s, stdName, stdOffset, dstName, dstOffset, start, end)
+  }
+
+  // ---- the evaluation ----
+
+  /* The day of a month the week-th weekday falls on, where week 5 means the last
+     one. POSIX's Mm.w.d, and the reason a month is not a whole number of weeks:
+     a fifth weekday exists in some months and not others, so "the last Sunday of
+     March" is either the 4th or the 5th and has to be computed. */
+  private static int weekDayOfMonth(int year, int month, int week, int day) {
+    int firstWeekday = TimeMath.dayOfWeek(TimeMath.daysFromCivil(year, month, 1)).getValue() % 7
+    int first = 1 + Math.floorMod(day - firstWeekday, 7)
+    int out = first + (week - 1) * 7
+    if (out > TimeMath.daysInMonth(year, month)) {
+      out = out - 7
+    }
+    return out
+  }
+
+  // The local second of a rule in a year: the rule's date at midnight plus its
+  // time, which may be negative or more than a day and so may leave the date the
+  // rule names.
+  private static long ruleSecond(int[] r, int year) {
+    long firstOfYear = TimeMath.daysFromCivil(year, 1, 1)
+    long epochDay
+    if (r[0] == JULIAN_ONE) {
+      epochDay = firstOfYear + (r[4] - 1)
+      if (r[4] >= 60 && TimeMath.isLeapYear(year)) {
+        epochDay = epochDay + 1
+      }
+    } else if (r[0] == DAY_OF_YEAR) {
+      epochDay = firstOfYear + r[4]
+    } else {
+      epochDay = TimeMath.daysFromCivil(year, r[1], 1) + (weekDayOfMonth(year, r[1], r[2], r[3]) - 1)
+    }
+    return epochDay * 86400 + r[5]
+  }
+
+  // ---- what the callers use ----
+
+  public String toString() {
+    return text
+  }
+
+  public boolean hasDst() {
+    return dstName != null
+  }
+
+  public int getStdOffset() {
+    return stdOffset
+  }
+
+  public int getDstOffset() {
+    return dstOffset
+  }
+
+  public String getName(boolean dst) {
+    return dst ? dstName : stdName
+  }
+
+  /* The UT second at which the rule's start -- standard time to DST -- falls in
+     a year, and the same for its end. The start's local time is in standard time
+     because that is the offset in force before it, and the end's is in DST,
+     which is POSIX's rule and the reason the two calls use different offsets. */
+  public long startSecond(int year) {
+    return ruleSecond(start, year) - stdOffset
+  }
+
+  public long endSecond(int year) {
+    return ruleSecond(end, year) - dstOffset
+  }
+
+  public ZoneOffsetTransition startTransition(int year) {
+    ZoneOffset from = ZoneOffset.ofTotalSeconds(stdOffset)
+    ZoneOffset to = ZoneOffset.ofTotalSeconds(dstOffset)
+    return new ZoneOffsetTransition(startSecond(year), from, to)
+  }
+
+  public ZoneOffsetTransition endTransition(int year) {
+    ZoneOffset from = ZoneOffset.ofTotalSeconds(dstOffset)
+    ZoneOffset to = ZoneOffset.ofTotalSeconds(stdOffset)
+    return new ZoneOffsetTransition(endSecond(year), from, to)
+  }
+
+  /* The rule's answer for one UT second: DST, or standard time. The transitions
+     of the year the second falls in, and of the years either side of it, are all
+     computed, and the answer is the half that the latest of them at or before
+     the second established. Asking the neighbours is what makes a rule with a
+     negative or over-a-day transition time, and a rule whose DST is the winter
+     (the southern hemisphere), fall out without a special case. */
+  public boolean isDstAt(long second) {
+    if (dstName == null) {
+      return false
+    }
+    int year = TzMath.yearOf(second, stdOffset)
+    boolean dst = false
+    long latest = 0
+    boolean found = false
+    for (int y = year - 1 : y <= year + 1 : y++) {
+      long s = startSecond(y)
+      long e = endSecond(y)
+      if (s <= second && (!found || s > latest)) {
+        latest = s
+        dst = true
+        found = true
+      }
+      if (e <= second && (!found || e > latest)) {
+        latest = e
+        dst = false
+        found = true
+      }
+    }
+    return dst
+  }
+
+  public String nameAt(long second) {
+    if (dstName == null) {
+      return stdName
+    }
+    return isDstAt(second) ? dstName : stdName
+  }
+}
+
+// ---------------------------------------------------------------- the file
+
+/* One data block of a TZif file, as it was read: the transition times, the type
+   each of them opens, and the type table itself with the designations resolved
+   to strings. `end` is the offset in the file just past the block, which is what
+   a version 2+ reader needs of the version 1 block -- its length -- and where
+   the second block's end, and so the footer, is found. */
+final class TzifBlock {
+  public long[] times
+  public int[] types
+  public int[] offsets
+  public boolean[] dst
+  public String[] names
+  public int end
+}
+
+/* A parsed TZif file: the version, the block that was read, and the footer rule
+   if there is one. The parse is where every refusal about a malformed file
+   lives, so the rest of this library can assume the numbers are consistent. */
+final class TzifData {
+  public final int version
+  public final long[] transitions
+  public final int[] transitionType
+  public final int[] typeOffset
+  public final boolean[] typeDst
+  public final String[] typeName
+  public final PosixTz rule
+
+  private TzifData(int version, TzifBlock b, PosixTz rule) {
+    this.version = version
+    this.transitions = b.times
+    this.transitionType = b.types
+    this.typeOffset = b.offsets
+    this.typeDst = b.dst
+    this.typeName = b.names
+    this.rule = rule
+  }
+
+  private static ZoneRulesException bad(String path, String why) {
+    return new ZoneRulesException(path + " is not a TZif file this reader can use: " + why)
+  }
+
+  /* RFC 8536 stores every multi-octet number big-endian with all bits
+     significant and two's complement for the signed ones, which is why these
+     three are written by hand rather than read through a stream: this library's
+     DataInputStream is java.io's and is big-endian too, but a DataInputStream of
+     a byte[] would have to be built, and four shifts are cheaper than that. */
+  private static int be32(byte[] b, int off) {
+    return ((b[off] & 0xFF) << 24) | ((b[off + 1] & 0xFF) << 16) | ((b[off + 2] & 0xFF) << 8) | (b[off + 3] & 0xFF)
+  }
+
+  private static long be64(byte[] b, int off) {
+    return ((long) be32(b, off) << 32) | (be32(b, off + 4) & 0xFFFFFFFFL)
+  }
+
+  /* The six counts of the header at an offset, in the order the format lists
+     them: isutcnt, isstdcnt, leapcnt, timecnt, typecnt, charcnt. */
+  private static int[] counts(byte[] b, String path, int at) {
+    if ((long) at + 44L > b.length) {
+      throw bad(path, "a header runs past the end of the file")
+    }
+    if (b[at] != 'T' || b[at + 1] != 'Z' || b[at + 2] != 'i' || b[at + 3] != 'f') {
+      throw bad(path, "a header does not begin with the TZif magic")
+    }
+    int[] out = new int[6]
+    for (int i = 0 : i < 6 : i++) {
+      out[i] = be32(b, at + 20 + i * 4)
+      if (out[i] < 0) {
+        throw bad(path, "a header count overflows a signed 32 bit integer")
+      }
+    }
+    if (out[4] == 0) {
+      throw bad(path, "the type table is empty")
+    }
+    if (out[5] == 0) {
+      throw bad(path, "the designations are empty")
+    }
+    return out
+  }
+
+  // The length of a data block, which is all a version 2+ reader needs of the
+  // version 1 block: RFC 8536 asks a reader to calculate it and skip it rather
+  // than read the same transitions twice at two widths.
+  private static int blockLength(byte[] b, String path, int at, int timeSize) {
+    int[] c = counts(b, path, at)
+    long size = 44L + (long) c[3] * timeSize + c[3] + (long) c[4] * 6L + c[5] + (long) c[2] * (timeSize + 4L) + c[0] + c[1]
+    if ((long) at + size > b.length) {
+      throw bad(path, "a data block runs past the end of the file")
+    }
+    return (int) size
+  }
+
+  private static TzifBlock block(byte[] b, String path, int at, int timeSize) {
+    int[] c = counts(b, path, at)
+    int timecnt = c[3]
+    int typecnt = c[4]
+    int charcnt = c[5]
+    int p = at + 44
+    TzifBlock out = new TzifBlock()
+    out.times = new long[timecnt]
+    for (int i = 0 : i < timecnt : i++) {
+      long t = timeSize == 4 ? (long) be32(b, p) : be64(b, p)
+      if (i > 0 && t <= out.times[i - 1]) {
+        throw bad(path, "the transition times are not strictly ascending")
+      }
+      out.times[i] = t
+      p = p + timeSize
+    }
+    out.types = new int[timecnt]
+    for (int i = 0 : i < timecnt : i++) {
+      int t = b[p + i] & 0xFF
+      if (t >= typecnt) {
+        throw bad(path, "a transition names a local time type that does not exist")
+      }
+      out.types[i] = t
+    }
+    p = p + timecnt
+    out.offsets = new int[typecnt]
+    out.dst = new boolean[typecnt]
+    out.names = new String[typecnt]
+    int desigStart = p + typecnt * 6
+    for (int i = 0 : i < typecnt : i++) {
+      int utoff = be32(b, p + i * 6)
+      int isdst = b[p + i * 6 + 4] & 0xFF
+      int idx = b[p + i * 6 + 5] & 0xFF
+      if (utoff < -64800 || utoff > 64800) {
+        String why = " seconds is outside the +/-18:00 this library's ZoneOffset carries"
+        throw bad(path, "a local time type offset of " + utoff + why)
+      }
+      if (isdst != 0 && isdst != 1) {
+        throw bad(path, "the isdst octet of a local time type is " + isdst + ", which is neither 0 nor 1")
+      }
+      if (idx >= charcnt) {
+        throw bad(path, "a local time type names a designation that does not exist")
+      }
+      int end = desigStart + idx
+      while (end < desigStart + charcnt && b[end] != 0) {
+        end = end + 1
+      }
+      if (end >= desigStart + charcnt) {
+        throw bad(path, "a designation is not terminated by a NUL octet")
+      }
+      out.offsets[i] = utoff
+      out.dst[i] = isdst == 1
+      out.names[i] = Net.stringFrom(b, desigStart + idx, end - desigStart - idx)
+    }
+    /* The leap-second records and the two indicator series are stepped over.
+       The indicators say how the transition times were *written* -- as UT, as
+       standard time or as wall time -- which is a question a reader never asks.
+       The leap records are refused, because a file that has them counts its
+       times in UNIX leap seconds and ignoring the corrections would put every
+       instant after 1972 out by the number of leap seconds. */
+    if (c[2] != 0) {
+      String why = " apply the corrections they describe"
+      throw bad(path, "it carries " + c[2] + " leap-second records, and this reader does not" + why)
+    }
+    out.end = desigStart + charcnt + c[1] + c[0]
+    return out
+  }
+
+  /* Read a file. The version octet decides which block is the file's data and
+     whether there is a footer: a version 1 file is its first block alone, and a
+     version 2, 3 or 4 file is its second block plus the footer, with the first
+     block skipped by its calculated length. */
+  public static TzifData parse(byte[] b, String path) {
+    if (b.length < 44) {
+      throw bad(path, "it is shorter than a header")
+    }
+    if (b[0] != 'T' || b[1] != 'Z' || b[2] != 'i' || b[3] != 'f') {
+      throw bad(path, "its magic is not TZif")
+    }
+    byte v = b[4]
+    if (v == 0) {
+      return new TzifData(1, block(b, path, 0, 4), null)
+    }
+    if (v != '2' && v != '3' && v != '4') {
+      throw bad(path, "its version octet is " + (int) v + ", which is not 0x00, '2', '3' or '4'")
+    }
+    int second = blockLength(b, path, 0, 4)
+    TzifBlock b2 = block(b, path, second, 8)
+    int at = b2.end
+    if (at >= b.length || b[at] != '\n') {
+      throw bad(path, "its footer does not begin with a newline")
+    }
+    int close = -1
+    for (int i = at + 1 : i < b.length : i++) {
+      if (b[i] == 0) {
+        throw bad(path, "its footer holds a NUL octet")
+      }
+      if (b[i] == '\n') {
+        close = i
+        break
+      }
+    }
+    if (close < 0) {
+      throw bad(path, "its footer does not end with a newline")
+    }
+    if (close + 1 != b.length) {
+      throw bad(path, "there are octets after its footer")
+    }
+    int version = v == '2' ? 2 : (v == '3' ? 3 : 4)
+    if (close == at + 1) {
+      // An empty TZ string: RFC 8536 says the information is not available, and
+      // the block's own last transition is then the last word on the zone.
+      return new TzifData(version, b2, null)
+    }
+    String tz = Net.stringFrom(b, at + 1, close - at - 1)
+    return new TzifData(version, b2, PosixTz.parse(tz, path))
+  }
+}
+
+// ---------------------------------------------------------------- the rules
+
+/* java.time.zone.ZoneRules, over one parsed file: the offset, the standard
+   offset, the DST flag, the abbreviation, and the transitions themselves.
+
+   Per instant, the answer is a window. There is one window per transition (the
+   transition opens it), one before the first transition, and, when the file has
+   a footer, one open-ended window after the last transition that the footer rule
+   decides -- and that last one is the reason the footer is parsed at all. The
+   windows are precomputed at construction: the offset and the standard offset of
+   each, the DST flag and the designation, so a lookup is a binary search and
+   nothing more.
+
+   The standard offset of a window is the offset of the most recent local time
+   type that is not DST, which is Java's definition of it ("the offset that
+   applies when daylight saving is not in operation") and what makes New York's
+   standard offset -05:00 in July. The DST flag is the isdst octet of the type
+   the file names, and for the footer window, which side of the rule the instant
+   falls on -- the answer glibc's tm_isdst gives, and the answer a JVM gives
+   except where its own copy of the database flattens negative DST (the note at
+   the top of this file).
+
+   One Java shape is deliberately not matched. Java's ZoneRules objects are
+   shared between the ids that alias one zone (Europe/Kiev and Europe/Kyiv answer
+   the same object, so getRules().equals is true), because its provider indexes
+   its compiled database by the data. Here the rules are cached by id, and two
+   ids that read the same file read it twice and hold two objects: the equals a
+   Java program would get is identity, and identity of two ids' rules is not
+   something this reader promises. */
+class ZoneRules {
+  // The window codes: the two that are not a transition index.
+  private static final int BEFORE_FIRST = -1
+  private static final int USE_RULE = -2
+
+  // The offsets a local time could be in, one per distinct offset the file uses.
+  // The candidate set of getValidOffsets, which then keeps only the ones the
+  // zone really is in at the instant the local time would make.
+  private static int[] distinctOffsets(TzifData data) {
+    int[] out = new int[data.typeOffset.length + 2]
+    int n = 0
+    for (int i = 0 : i < data.typeOffset.length : i++) {
+      boolean seen = false
+      for (int k = 0 : k < n : k++) {
+        if (out[k] == data.typeOffset[i]) {
+          seen = true
+          break
+        }
+      }
+      if (!seen) {
+        out[n] = data.typeOffset[i]
+        n = n + 1
+      }
+    }
+    if (data.rule != null) {
+      int[] more = new int[2]
+      more[0] = data.rule.getStdOffset()
+      more[1] = data.rule.hasDst() ? data.rule.getDstOffset() : data.rule.getStdOffset()
+      for (int i = 0 : i < 2 : i++) {
+        boolean seen = false
+        for (int k = 0 : k < n : k++) {
+          if (out[k] == more[i]) {
+            seen = true
+            break
+          }
+        }
+        if (!seen) {
+          out[n] = more[i]
+          n = n + 1
+        }
+      }
+    }
+    int[] trimmed = new int[n]
+    for (int i = 0 : i < n : i++) {
+      trimmed[i] = out[i]
+    }
+    return trimmed
+  }
+
+  private final long[] transitions
+  private final int[] afterOffset
+  private final int[] afterStandard
+  private final boolean[] afterDst
+  private final String[] afterName
+  private final int beforeOffset
+  private final int beforeStandard
+  private final boolean beforeDst
+  private final String beforeName
+  private final long[] localBefore
+  private final long[] localAfter
+  private final int[] distinct
+  private final PosixTz rule
+  private final ZoneOffset ruleStd
+  private final ZoneOffset ruleDst
+
+  private ZoneOffset[] cache
+  private int cacheCount
+  private List<ZoneOffsetTransition> history
+
+  // ---- construction ----
+
+  ZoneRules(TzifData data) {
+    int n = data.transitions.length
+    this.transitions = data.transitions
+    this.rule = data.rule
+    this.afterOffset = new int[n]
+    this.afterStandard = new int[n]
+    this.afterDst = new boolean[n]
+    this.afterName = new String[n]
+    this.localBefore = new long[n]
+    this.localAfter = new long[n]
+    /* The type in force before the first transition is the first type that is
+       not DST, or type 0 when the table has no such type. RFC 8536 says type 0
+       and tzfile(5) says the first non-DST one, and in every file of the
+       database this was written against they are the same type -- but the second
+       reading is the one the C library uses, so it is the one here. */
+    int firstType = 0
+    for (int i = 0 : i < data.typeDst.length : i++) {
+      if (!data.typeDst[i]) {
+        firstType = i
+        break
+      }
+    }
+    this.beforeOffset = data.typeOffset[firstType]
+    this.beforeDst = data.typeDst[firstType]
+    this.beforeName = data.typeName[firstType]
+    this.beforeStandard = data.typeOffset[firstType]
+    int standard = this.beforeStandard
+    int previous = firstType
+    for (int i = 0 : i < n : i++) {
+      int type = data.transitionType[i]
+      this.afterOffset[i] = data.typeOffset[type]
+      this.afterDst[i] = data.typeDst[type]
+      this.afterName[i] = data.typeName[type]
+      if (data.typeDst[type]) {
+        this.afterStandard[i] = standard
+      } else {
+        standard = data.typeOffset[type]
+        this.afterStandard[i] = standard
+      }
+      this.localBefore[i] = this.transitions[i] + data.typeOffset[previous]
+      this.localAfter[i] = this.transitions[i] + this.afterOffset[i]
+      previous = type
+    }
+    this.ruleStd = data.rule == null ? null : ZoneOffset.ofTotalSeconds(data.rule.getStdOffset())
+    this.ruleDst = data.rule == null || !data.rule.hasDst() ? null : ZoneOffset.ofTotalSeconds(data.rule.getDstOffset())
+    this.distinct = distinctOffsets(data)
+    this.cache = new ZoneOffset[4]
+    this.cacheCount = 0
+  }
+
+  /* A rule set that never moves: UTC, GMT, UT and every numeric offset id. The
+     name is the zone id rather than the offset's own spelling of itself, because
+     the abbreviation of the zone named UTC is "UTC" (which is what the file for
+     it carries, and what glibc answers for TZ=UTC) while the id of its offset is
+     "Z". */
+  private ZoneRules(ZoneOffset offset, String name) {
+    this.transitions = new long[0]
+    this.afterOffset = new int[0]
+    this.afterStandard = new int[0]
+    this.afterDst = new boolean[0]
+    this.afterName = new String[0]
+    this.localBefore = new long[0]
+    this.localAfter = new long[0]
+    this.beforeOffset = offset.getTotalSeconds()
+    this.beforeStandard = offset.getTotalSeconds()
+    this.beforeDst = false
+    this.beforeName = name
+    this.distinct = new int[1]
+    this.distinct[0] = offset.getTotalSeconds()
+    this.rule = null
+    this.ruleStd = null
+    this.ruleDst = null
+    this.cache = new ZoneOffset[1]
+    this.cache[0] = offset
+    this.cacheCount = 1
+  }
+
+  /* A rule set that is nothing but a TZ string's rule, for a TZ environment
+     variable that is a rule rather than a zone id: no table, one open-ended
+     window, and the rule's own transitions from then on. */
+  private ZoneRules(PosixTz rule) {
+    this.transitions = new long[0]
+    this.afterOffset = new int[0]
+    this.afterStandard = new int[0]
+    this.afterDst = new boolean[0]
+    this.afterName = new String[0]
+    this.localBefore = new long[0]
+    this.localAfter = new long[0]
+    this.rule = rule
+    this.ruleStd = ZoneOffset.ofTotalSeconds(rule.getStdOffset())
+    this.ruleDst = rule.hasDst() ? ZoneOffset.ofTotalSeconds(rule.getDstOffset()) : null
+    this.beforeOffset = rule.getStdOffset()
+    this.beforeStandard = rule.getStdOffset()
+    this.beforeDst = false
+    this.beforeName = rule.getName(false)
+    int count = rule.hasDst() ? 2 : 1
+    this.distinct = new int[count]
+    this.distinct[0] = rule.getStdOffset()
+    if (count == 2) {
+      this.distinct[1] = rule.getDstOffset()
+    }
+    this.cache = new ZoneOffset[2]
+    this.cacheCount = 0
+  }
+
+  public static ZoneRules fixed(ZoneOffset offset) {
+    return new ZoneRules(offset, offset.getId())
+  }
+
+  public static ZoneRules ofNamedOffset(ZoneOffset offset, String name) {
+    return new ZoneRules(offset, name)
+  }
+
+  public static ZoneRules fromPosix(PosixTz rule) {
+    return new ZoneRules(rule)
+  }
+
+  // ---- the small pieces ----
+
+  private ZoneOffset zone(int totalSeconds) {
+    for (int i = 0 : i < cacheCount : i++) {
+      if (cache[i].getTotalSeconds() == totalSeconds) {
+        return cache[i]
+      }
+    }
+    ZoneOffset out = ZoneOffset.ofTotalSeconds(totalSeconds)
+    if (cacheCount == cache.length) {
+      ZoneOffset[] bigger = new ZoneOffset[cache.length * 2]
+      for (int i = 0 : i < cacheCount : i++) {
+        bigger[i] = cache[i]
+      }
+      cache = bigger
+    }
+    cache[cacheCount] = out
+    cacheCount = cacheCount + 1
+    return out
+  }
+
+  /* Which window an instant falls in: BEFORE_FIRST before the first transition,
+     USE_RULE at or after the last one when there is a footer, and otherwise the
+     index of the transition that opened the window. */
+  private int windowOf(long second) {
+    int n = transitions.length
+    if (n == 0) {
+      return rule == null ? BEFORE_FIRST : USE_RULE
+    }
+    if (second < transitions[0]) {
+      return BEFORE_FIRST
+    }
+    if (second >= transitions[n - 1]) {
+      return rule == null ? n - 1 : USE_RULE
+    }
+    int lo = 0
+    int hi = n - 1
+    while (lo < hi) {
+      int mid = (lo + hi + 1) / 2
+      if (transitions[mid] <= second) {
+        lo = mid
+      } else {
+        hi = mid - 1
+      }
+    }
+    return lo
+  }
+
+  private ZoneOffset offsetAt(long second) {
+    int w = windowOf(second)
+    if (w == USE_RULE) {
+      return rule.isDstAt(second) ? ruleDst : ruleStd
+    }
+    if (w == BEFORE_FIRST) {
+      return zone(beforeOffset)
+    }
+    return zone(afterOffset[w])
+  }
+
+  private ZoneOffsetTransition transitionAt(int i) {
+    int before = i == 0 ? beforeOffset : afterOffset[i - 1]
+    return new ZoneOffsetTransition(transitions[i], zone(before), zone(afterOffset[i]))
+  }
+
+  // The index of the last element of a non-decreasing array that is at most a
+  // value, or -1 when there is none. A transition's two local times are monotone
+  // in the transition index, so this is what finds the one whose local window a
+  // local time falls in.
+  private static int lastAtMost(long[] a, long v) {
+    int lo = 0
+    int hi = a.length - 1
+    int out = -1
+    while (lo <= hi) {
+      int mid = (lo + hi) / 2
+      if (a[mid] <= v) {
+        out = mid
+        lo = mid + 1
+      } else {
+        hi = mid - 1
+      }
+    }
+    return out
+  }
+
+  private static int firstAbove(long[] a, long v) {
+    for (int i = 0 : i < a.length : i++) {
+      if (a[i] > v) {
+        return i
+      }
+    }
+    return -1
+  }
+
+  private static int lastBelow(long[] a, long v) {
+    int out = -1
+    for (int i = 0 : i < a.length : i++) {
+      if (a[i] < v) {
+        out = i
+      }
+    }
+    return out
+  }
+
+  /* The rule's transition whose local window holds a local second, or null when
+     none does: the same question getTransition asks of the table, asked of the
+     rule, for a local time past the end of the table. */
+  private ZoneOffsetTransition ruleTransitionFor(long local) {
+    // A rule with no DST half (CST-8, <+01>-1) makes no transitions at all, so
+    // no local time can be in a gap or an overlap that one of them left.
+    if (rule == null || !rule.hasDst()) {
+      return null
+    }
+    int year = TzMath.yearOf(local, -rule.getStdOffset())
+    for (int y = year - 1 : y <= year + 1 : y++) {
+      ZoneOffsetTransition start = rule.startTransition(y)
+      long startBefore = start.toEpochSecond() + start.getOffsetBefore().getTotalSeconds()
+      long startAfter = start.toEpochSecond() + start.getOffsetAfter().getTotalSeconds()
+      if (local >= Math.min(startBefore, startAfter) && local < Math.max(startBefore, startAfter)) {
+        return start
+      }
+      if (rule.hasDst()) {
+        ZoneOffsetTransition end = rule.endTransition(y)
+        long endBefore = end.toEpochSecond() + end.getOffsetBefore().getTotalSeconds()
+        long endAfter = end.toEpochSecond() + end.getOffsetAfter().getTotalSeconds()
+        if (local >= Math.min(endBefore, endAfter) && local < Math.max(endBefore, endAfter)) {
+          return end
+        }
+      }
+    }
+    return null
+  }
+
+  private ZoneOffsetTransition firstRuleTransitionAfter(long t) {
+    int year = TzMath.yearOf(t, offsetAt(t).getTotalSeconds())
+    for (int y = year - 1 : y <= year + 2 : y++) {
+      ZoneOffsetTransition best = null
+      ZoneOffsetTransition start = rule.startTransition(y)
+      if (start.toEpochSecond() > t) {
+        best = start
+      }
+      if (rule.hasDst()) {
+        ZoneOffsetTransition end = rule.endTransition(y)
+        if (end.toEpochSecond() > t && (best == null || end.toEpochSecond() < best.toEpochSecond())) {
+          best = end
+        }
+      }
+      if (best != null) {
+        return best
+      }
+    }
+    return null
+  }
+
+  private ZoneOffsetTransition lastRuleTransitionBefore(long t) {
+    int year = TzMath.yearOf(t, offsetAt(t).getTotalSeconds())
+    for (int y = year + 1 : y >= year - 2 : y--) {
+      ZoneOffsetTransition best = null
+      if (rule.hasDst()) {
+        ZoneOffsetTransition end = rule.endTransition(y)
+        if (end.toEpochSecond() < t) {
+          best = end
+        }
+      }
+      ZoneOffsetTransition start = rule.startTransition(y)
+      if (start.toEpochSecond() < t && (best == null || start.toEpochSecond() > best.toEpochSecond())) {
+        best = start
+      }
+      if (best != null) {
+        return best
+      }
+    }
+    return null
+  }
+
+  // ---- what an instant asks ----
+
+  public ZoneOffset getOffset(Instant instant) {
+    return offsetAt(instant.getEpochSecond())
+  }
+
+  public ZoneOffset getStandardOffset(Instant instant) {
+    long second = instant.getEpochSecond()
+    int w = windowOf(second)
+    if (w == USE_RULE) {
+      return ruleStd
+    }
+    if (w == BEFORE_FIRST) {
+      return zone(beforeStandard)
+    }
+    return zone(afterStandard[w])
+  }
+
+  public boolean isDaylightSavings(Instant instant) {
+    long second = instant.getEpochSecond()
+    int w = windowOf(second)
+    if (w == USE_RULE) {
+      return rule.hasDst() && rule.isDstAt(second)
+    }
+    if (w == BEFORE_FIRST) {
+      return beforeDst
+    }
+    return afterDst[w]
+  }
+
+  /* The zone's abbreviation for an instant: the designation the file names for
+     the type in force, or the name on the rule's side. java.time has no such
+     method -- a JVM reaches an abbreviation through a formatter, which answers a
+     locale's name for the zone rather than the file's designation -- so this is
+     this library's own spelling of the thing the data carries. */
+  public String getAbbreviation(Instant instant) {
+    long second = instant.getEpochSecond()
+    int w = windowOf(second)
+    if (w == USE_RULE) {
+      return rule.nameAt(second)
+    }
+    if (w == BEFORE_FIRST) {
+      return beforeName
+    }
+    return afterName[w]
+  }
+
+  public boolean isFixedOffset() {
+    if (transitions.length == 0) {
+      return rule == null || !rule.hasDst()
+    }
+    return false
+  }
+
+  // ---- what a local date-time asks ----
+
+  /* The offsets a local date-time can be in: none, one, or two. A local time
+     inside a spring-forward gap is in none of them, which is why
+     ZonedDateTime.of has to move it; a local time inside a fall-back overlap is
+     in two, and they come back in the order of the transition -- the one in
+     force before it first -- which is Java's order and the one
+     ZonedDateTime.of uses to pick the earlier. */
+  public List<ZoneOffset> getValidOffsets(LocalDateTime dt) {
+    long local = TzMath.localSecond(dt)
+    List<ZoneOffset> out = new ArrayList<ZoneOffset>()
+    for (int i = 0 : i < distinct.length : i++) {
+      ZoneOffset offset = zone(distinct[i])
+      if (offsetAt(local - distinct[i]).equals(offset)) {
+        out.add(offset)
+      }
+    }
+    if (out.size() == 2 && out.get(0).getTotalSeconds() < out.get(1).getTotalSeconds()) {
+      ZoneOffset first = out.get(0)
+      out.set(0, out.get(1))
+      out.set(1, first)
+    }
+    return out
+  }
+
+  /* The offset of a local date-time, which for a gap or an overlap is the one in
+     force *before* the transition: Java's answer, and the reason a local time in
+     a gap maps to the offset it would have had rather than the one it will. */
+  public ZoneOffset getOffset(LocalDateTime dt) {
+    List<ZoneOffset> valid = getValidOffsets(dt)
+    if (valid.size() == 1) {
+      return valid.get(0)
+    }
+    ZoneOffsetTransition trans = getTransition(dt)
+    if (trans != null) {
+      return trans.getOffsetBefore()
+    }
+    // Unreachable for any file this reader accepts: a local time is in no offset
+    // or in two only because a transition put it there, and that transition is
+    // what getTransition found. Refused rather than guessed if it ever happens.
+    throw new ZoneRulesException("no offset applies to " + dt + " and no transition explains it")
+  }
+
+  /* The transition a local date-time falls in, or null when it falls in none.
+     The local window of a transition is between the local time just before it and
+     the local time just after: empty for a change of a second or less, a gap when
+     the clocks went forward, an overlap when they went back. */
+  public ZoneOffsetTransition getTransition(LocalDateTime dt) {
+    long local = TzMath.localSecond(dt)
+    int n = transitions.length
+    if (n > 0) {
+      int before = lastAtMost(localBefore, local)
+      int after = lastAtMost(localAfter, local)
+      if (before != after) {
+        return transitionAt(Math.max(before, after))
+      }
+      if (local < Math.max(localBefore[n - 1], localAfter[n - 1])) {
+        return null
+      }
+    }
+    return ruleTransitionFor(local)
+  }
+
+  /* The table's transitions, oldest first: what Java answers, and the same list
+     of *this* reader's transitions. Java's list is unmodifiable and this one is
+     the rules' own, which a caller could mutate -- the alternative is a copy on
+     every call for a list that is usually asked for once in a test. */
+  public List<ZoneOffsetTransition> getTransitions() {
+    if (history == null) {
+      List<ZoneOffsetTransition> out = new ArrayList<ZoneOffsetTransition>()
+      for (int i = 0 : i < transitions.length : i++) {
+        out.add(transitionAt(i))
+      }
+      history = out
+    }
+    return history
+  }
+
+  /* The next transition strictly after an instant, which past the end of the
+     table is one the footer rule will make: Java answers those too, from the
+     rules it derives the same way, so a program can ask what the clocks do next
+     year as well as what they did in 1979. */
+  public ZoneOffsetTransition nextTransition(Instant instant) {
+    long t = instant.getEpochSecond()
+    int n = transitions.length
+    if (n > 0 && t < transitions[n - 1]) {
+      int i = firstAbove(transitions, t)
+      return i < 0 ? null : transitionAt(i)
+    }
+    if (rule == null || !rule.hasDst()) {
+      return null
+    }
+    return firstRuleTransitionAfter(t)
+  }
+
+  public ZoneOffsetTransition previousTransition(Instant instant) {
+    long t = instant.getEpochSecond()
+    if (instant.getNano() > 0) {
+      // Java's rule: an instant inside a second counts as the next second for
+      // this question, so a transition exactly at the start of it is not "the
+      // previous" one.
+      t = t + 1
+    }
+    int n = transitions.length
+    if (n > 0 && (t <= transitions[n - 1] || rule == null || !rule.hasDst())) {
+      int i = lastBelow(transitions, t)
+      return i < 0 ? null : transitionAt(i)
+    }
+    if (rule == null || !rule.hasDst()) {
+      return null
+    }
+    return lastRuleTransitionBefore(t)
+  }
+}
+
+// ---------------------------------------------------------------- the zoned date
+
+/* java.time.ZonedDateTime: a local date and time with the offset it is at and
+   the zone it is in.
+
+   The three fields are the whole of it, and the interesting part is what happens
+   when a local time does not determine the offset. A local time in a gap -- 02:30
+   on the morning New York springs forward -- is moved forward by the length of
+   the gap and takes the offset after it, so 2021-03-14T02:30 in New York is
+   03:30-04:00; a local time in an overlap -- 01:30 on the morning it falls back
+   -- keeps the offset in force *before* the transition, so 2021-11-07T01:30 is
+   01:30-04:00, the first of the two times that wall clock says. Both are Java's
+   rules, and both show up in what a program prints rather than in the
+   arithmetic, which is why the tests pin them.
+
+   The arithmetic is Java's split, and the split is the point. Adding days,
+   months or years is calendar arithmetic on the local date and time, and then the
+   offset is resolved again against the *old* offset preferred: a day later at
+   12:00 is 12:00 the next day even when that day is 23 hours long, and a day
+   later at 01:30 inside a fall-back overlap is still 01:30-04:00, because the
+   offset it was at is one of the two that are still valid there. Adding hours,
+   minutes, seconds or milliseconds is arithmetic on the instant, and the answer
+   is the local time the zone shows at the new instant: 24 hours after noon on the
+   day before a spring forward is 13:00, not 12:00, which is the difference
+   between a day and a day's worth of seconds.
+
+   What this class does not have, and why, in the shape this library already has.
+   No ofStrict/ofLenient (they exist in Java to refuse and to repair a local time
+   that does not resolve, and of() here always resolves the way Java's lenient
+   path does). No ChronoUnit or ChronoField accessors, no TemporalAdjuster, no
+   formatter: those are java.time's general machinery, and this library does not
+   have it. And no plusWeeks, minusWeeks, plusNanos or minusNanos, because
+   lib/20_time.teyru does not have them either -- its LocalDate's arithmetic is
+   days, months and years and its LocalDateTime's is days, hours, minutes and
+   seconds, so a zoned date here has the same set plus the two units (hours and
+   below) that the zone itself needs to get right. What it *does* have that Java
+   also has is withEarlierOffsetAtOverlap and withLaterOffsetAtOverlap, which are
+   the only public way to choose between the two offsets of an overlap.
+
+   One precision note, because toString and toInstant do not agree for a value
+   below a millisecond: this library's Instant is a System.currentTimeMillis and
+   cannot carry more than milliseconds, so a zoned date built from a local time
+   with microseconds loses them in toInstant(), while its toString prints them.
+   Java's Instant carries nanoseconds and has no such seam. */
+class ZonedDateTime implements Comparable<ZonedDateTime> {
+  private final LocalDateTime dateTime
+  private final ZoneOffset offset
+  private final ZoneId zone
+
+  private ZonedDateTime(LocalDateTime dateTime, ZoneOffset offset, ZoneId zone) {
+    this.dateTime = dateTime
+    this.offset = offset
+    this.zone = zone
+  }
+
+  /* Java's ofLocal: a local date and time is placed in a zone, and the offset
+     comes from the valid offsets, from the gap (the local time is moved through
+     it), or from the overlap (the preferred offset when it is one of the two, the
+     earlier one otherwise). */
+  private static ZonedDateTime ofLocal(LocalDateTime dateTime, ZoneId zone, ZoneOffset preferred) {
+    if (zone instanceof ZoneOffset) {
+      return new ZonedDateTime(dateTime, (ZoneOffset) zone, zone)
+    }
+    ZoneRules rules = zone.getRules()
+    List<ZoneOffset> valid = rules.getValidOffsets(dateTime)
+    ZoneOffset offset
+    if (valid.size() == 1) {
+      offset = valid.get(0)
+    } else if (valid.size() == 0) {
+      ZoneOffsetTransition trans = rules.getTransition(dateTime)
+      dateTime = TzMath.plusSeconds(dateTime, trans.getDuration().getSeconds())
+      offset = trans.getOffsetAfter()
+    } else {
+      if (preferred != null && valid.contains(preferred)) {
+        offset = preferred
+      } else {
+        offset = valid.get(0)
+      }
+    }
+    return new ZonedDateTime(dateTime, offset, zone)
+  }
+
+  /* Java's create: an instant is placed in a zone. The offset is looked up at
+     the second -- a TZif transition is a whole second, so the fraction cannot
+     change which offset applies -- and the local time is that second plus it. */
+  private static ZonedDateTime create(long second, int nanos, ZoneId zone) {
+    ZoneOffset offset = zone.getRules().getOffset(Instant.ofEpochSecond(second))
+    return new ZonedDateTime(TzMath.localDateTime(second, nanos, offset.getTotalSeconds()), offset, zone)
+  }
+
+  private long toEpochSecond() {
+    return TzMath.localSecond(dateTime) - offset.getTotalSeconds()
+  }
+
+  private ZonedDateTime resolveLocal(LocalDateTime dt) {
+    return ofLocal(dt, zone, offset)
+  }
+
+  // ---- the factories ----
+
+  public static ZonedDateTime of(LocalDateTime dateTime, ZoneId zone) {
+    if (zone == null) {
+      throw new NullPointerException("zone")
+    }
+    if (dateTime == null) {
+      throw new NullPointerException("localDateTime")
+    }
+    return ofLocal(dateTime, zone, null)
+  }
+
+  public static ZonedDateTime of(LocalDate date, LocalTime time, ZoneId zone) {
+    return of(LocalDateTime.of(date, time), zone)
+  }
+
+  public static ZonedDateTime of(int year, int month, int day, int hour, int minute, int second, int nanoOfSecond, ZoneId zone) {
+    return of(LocalDateTime.of(LocalDate.of(year, month, day), LocalTime.of(hour, minute, second, nanoOfSecond)), zone)
+  }
+
+  public static ZonedDateTime ofInstant(Instant instant, ZoneId zone) {
+    if (zone == null) {
+      throw new NullPointerException("zone")
+    }
+    return create(instant.getEpochSecond(), instant.getNano(), zone)
+  }
+
+  /* now and now(zone) read the clock -- one instant, shown in the zone asked
+     for: the default zone for now(), which is this class's one use of it, and the
+     zone given for now(zone). */
+  public static ZonedDateTime now() {
+    return ofInstant(Instant.now(), ZoneId.systemDefault())
+  }
+
+  public static ZonedDateTime now(ZoneId zone) {
+    return ofInstant(Instant.now(), zone)
+  }
+
+  // ---- the parts ----
+
+  public LocalDateTime toLocalDateTime() {
+    return dateTime
+  }
+
+  public LocalDate toLocalDate() {
+    return dateTime.toLocalDate()
+  }
+
+  public LocalTime toLocalTime() {
+    return dateTime.toLocalTime()
+  }
+
+  public ZoneOffset getOffset() {
+    return offset
+  }
+
+  public ZoneId getZone() {
+    return zone
+  }
+
+  public int getYear() {
+    return dateTime.toLocalDate().getYear()
+  }
+
+  public int getMonthValue() {
+    return dateTime.toLocalDate().getMonthValue()
+  }
+
+  public Month getMonth() {
+    return dateTime.toLocalDate().getMonth()
+  }
+
+  public int getDayOfMonth() {
+    return dateTime.toLocalDate().getDayOfMonth()
+  }
+
+  public DayOfWeek getDayOfWeek() {
+    return dateTime.toLocalDate().getDayOfWeek()
+  }
+
+  public int getHour() {
+    return dateTime.toLocalTime().getHour()
+  }
+
+  public int getMinute() {
+    return dateTime.toLocalTime().getMinute()
+  }
+
+  public int getSecond() {
+    return dateTime.toLocalTime().getSecond()
+  }
+
+  public int getNano() {
+    return dateTime.toLocalTime().getNano()
+  }
+
+  /* The instant this zoned date is at, to the millisecond: every Instant in this
+     library is a System.currentTimeMillis, so a local time carrying microseconds
+     or nanoseconds loses the part below the millisecond here. Java keeps it; this
+     library's Instant cannot hold it, and saying so is better than a toString
+     that prints a fraction toInstant does not return. */
+  public Instant toInstant() {
+    return Instant.ofEpochMilli(toEpochSecond() * 1000L + dateTime.toLocalTime().getNano() / 1000000)
+  }
+
+  // ---- the arithmetic ----
+
+  public ZonedDateTime plusDays(long days) {
+    return resolveLocal(dateTime.plusDays(days))
+  }
+
+  public ZonedDateTime plusMonths(long months) {
+    return resolveLocal(LocalDateTime.of(dateTime.toLocalDate().plusMonths(months), dateTime.toLocalTime()))
+  }
+
+  public ZonedDateTime plusYears(long years) {
+    return resolveLocal(LocalDateTime.of(dateTime.toLocalDate().plusYears(years), dateTime.toLocalTime()))
+  }
+
+  public ZonedDateTime plusHours(long hours) {
+    return create(toEpochSecond() + hours * 3600L, getNano(), zone)
+  }
+
+  public ZonedDateTime plusMinutes(long minutes) {
+    return create(toEpochSecond() + minutes * 60L, getNano(), zone)
+  }
+
+  public ZonedDateTime plusSeconds(long seconds) {
+    return create(toEpochSecond() + seconds, getNano(), zone)
+  }
+
+  public ZonedDateTime plusMillis(long millis) {
+    long nanos = (long) getNano() + millis * 1000000L
+    return create(toEpochSecond() + Math.floorDiv(nanos, 1000000000L), (int) Math.floorMod(nanos, 1000000000L), zone)
+  }
+
+  public ZonedDateTime minusDays(long days) {
+    return plusDays(-days)
+  }
+
+  public ZonedDateTime minusMonths(long months) {
+    return plusMonths(-months)
+  }
+
+  public ZonedDateTime minusYears(long years) {
+    return plusYears(-years)
+  }
+
+  public ZonedDateTime minusHours(long hours) {
+    return plusHours(-hours)
+  }
+
+  public ZonedDateTime minusMinutes(long minutes) {
+    return plusMinutes(-minutes)
+  }
+
+  public ZonedDateTime minusSeconds(long seconds) {
+    return plusSeconds(-seconds)
+  }
+
+  public ZonedDateTime minusMillis(long millis) {
+    return plusMillis(-millis)
+  }
+
+  // ---- the zone ----
+
+  /* The same instant, shown in another zone. The instant does not move, so the
+     local time and the offset both do. */
+  public ZonedDateTime withZoneSameInstant(ZoneId newZone) {
+    if (newZone == null) {
+      throw new NullPointerException("zone")
+    }
+    return create(toEpochSecond(), getNano(), newZone)
+  }
+
+  /* The two ways to choose between the offsets of an overlap, which is the one
+     case where a zoned date's local time and its instant do not settle which
+     offset it carries: 01:30 on the morning New York falls back is at -04:00 and
+     at -05:00, and of() takes the earlier one. These move to the other one, and
+     do nothing at all when the local time is not in an overlap. */
+  public ZonedDateTime withEarlierOffsetAtOverlap() {
+    ZoneOffsetTransition trans = zone.getRules().getTransition(dateTime)
+    if (trans != null && trans.isOverlap() && !trans.getOffsetBefore().equals(offset)) {
+      return new ZonedDateTime(dateTime, trans.getOffsetBefore(), zone)
+    }
+    return this
+  }
+
+  public ZonedDateTime withLaterOffsetAtOverlap() {
+    ZoneOffsetTransition trans = zone.getRules().getTransition(dateTime)
+    if (trans != null && trans.isOverlap() && !trans.getOffsetAfter().equals(offset)) {
+      return new ZonedDateTime(dateTime, trans.getOffsetAfter(), zone)
+    }
+    return this
+  }
+
+  /* The same local date and time, read in another zone: the wall clock does not
+     move, the instant does. */
+  public ZonedDateTime withZoneSameLocal(ZoneId newZone) {
+    if (newZone == null) {
+      throw new NullPointerException("zone")
+    }
+    return ofLocal(dateTime, newZone, offset)
+  }
+
+  // ---- the comparisons ----
+
+  /* isBefore and isAfter compare the instants, not the local times: 03:30 in New
+     York is before 03:30 at -05:00, because it is an hour earlier in the world. */
+  public boolean isBefore(ZonedDateTime other) {
+    long a = toEpochSecond()
+    long b = other.toEpochSecond()
+    if (a != b) {
+      return a < b
+    }
+    return getNano() < other.getNano()
+  }
+
+  public boolean isAfter(ZonedDateTime other) {
+    long a = toEpochSecond()
+    long b = other.toEpochSecond()
+    if (a != b) {
+      return a > b
+    }
+    return getNano() > other.getNano()
+  }
+
+  public boolean isEqual(ZonedDateTime other) {
+    return toEpochSecond() == other.toEpochSecond() && getNano() == other.getNano()
+  }
+
+  /* equals is the local date and time, the offset and the zone: the same instant
+     in two zones is not equal, which is Java's rule and the reason compareTo and
+     equals disagree for zoned values. compareTo compares the instant first, then
+     the local date and time, then the zone id -- Java's order, so a sorted list
+     of zoned dates is sorted by the moment each is at. */
+  public boolean equals(Object o) {
+    if (this == o) {
+      return true
+    }
+    if (o instanceof ZonedDateTime == false) {
+      return false
+    }
+    ZonedDateTime other = (ZonedDateTime) o
+    return dateTime.equals(other.dateTime) && offset.equals(other.offset) && zone.equals(other.zone)
+  }
+
+  public int hashCode() {
+    return dateTime.hashCode() ^ offset.hashCode() ^ Integer.rotateLeft(zone.hashCode(), 3)
+  }
+
+  public int compareTo(ZonedDateTime other) {
+    long a = toEpochSecond()
+    long b = other.toEpochSecond()
+    if (a < b) {
+      return -1
+    }
+    if (a > b) {
+      return 1
+    }
+    if (getNano() < other.getNano()) {
+      return -1
+    }
+    if (getNano() > other.getNano()) {
+      return 1
+    }
+    int c = dateTime.compareTo(other.dateTime)
+    if (c != 0) {
+      return c
+    }
+    return zone.getId().compareTo(other.zone.getId())
+  }
+
+  /* Java's toString: the local date and time, the offset, and -- unless the zone
+     *is* the offset -- the zone's id in brackets. That last test is what makes
+     "2021-03-14T07:30Z" from a date in ZoneOffset.UTC and
+     "2021-03-14T07:30Z[UTC]" from the same instant in the zone named UTC. */
+  public String toString() {
+    String out = dateTime.toString() + offset.toString()
+    if (zone instanceof ZoneOffset == false) {
+      out = out + "[" + zone.getId() + "]"
+    }
+    return out
+  }
+}
