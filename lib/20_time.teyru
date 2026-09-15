@@ -10,11 +10,14 @@ package teyru
 // date uses Howard Hinnant's well-known algorithm, which is exact for every
 // year the calendar has.
 //
-// Deviations from java.time, all because there is no zone database here:
+// Deviations from java.time:
 //
-//   - `now()` reads the system clock as UTC. Java's LocalDate.now() uses the
-//     default zone, so a program in UTC+8 gets a different day for eight hours
-//     of every day. There is no zone id, no offset and no daylight saving.
+//   - `now()` reads the system clock as UTC, where Java's LocalDate.now() uses
+//     the default zone -- so a program in UTC+8 gets a different day for eight
+//     hours of every day. That is a deviation still, and it is the one left in
+//     this file: the zone database itself is `lib/46_timezone.teyru` now, which
+//     has ZoneId, ZoneOffset, ZoneRules and ZonedDateTime over the host's own
+//     tzdata, so a zoned "now" is `ZonedDateTime.now()`.
 //   - No DateTimeFormatter, no parsing, no ChronoUnit/ChronoField, no
 //     TemporalAdjuster. Formatting is toString, which is ISO-8601 in Java too.
 //   - Instants carry milliseconds, not nanoseconds: the clock the runtime reads
@@ -191,7 +194,8 @@ class LocalDate implements Comparable<LocalDate> {
     return new LocalDate(c[0], (int) c[1], (int) c[2], epochDay)
   }
 
-  // now reads the system clock as UTC -- see the file header for why.
+  // now reads the system clock as UTC -- see the file header; ZonedDateTime.now()
+  // in lib/46_timezone.teyru is the one that uses the default zone.
   public static LocalDate now() {
     return ofEpochDay(Math.floorDiv(System.currentTimeMillis(), TimeMath.MILLIS_PER_DAY))
   }
@@ -297,7 +301,7 @@ class LocalTime implements Comparable<LocalTime> {
     return new LocalTime((int) (s / 3600), (int) ((s % 3600) / 60), (int) (s % 60), 0)
   }
 
-  // now reads the system clock as UTC, like LocalDate.now.
+  // now reads the system clock as UTC, like LocalDate.now; see the file header.
   public static LocalTime now() {
     long millis = Math.floorMod(System.currentTimeMillis(), TimeMath.MILLIS_PER_DAY)
     long s = millis / 1000
