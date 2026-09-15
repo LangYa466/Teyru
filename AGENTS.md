@@ -115,6 +115,12 @@ source → lexer → parser → ast → sema → codegen
 
 ## 6. 測試規範
 
+- **計時要量「跑起來」的那支程式，不是 `teyru run`**：`teyru run` 會先編譯再執行，`/usr/bin/time -v`
+  看到的 user／sys 幾乎全是編譯（clang＋LTO），一支「整支程式只有 `Thread.sleep(4000)`」的程式把該行刪
+  掉後兩者一樣約 1.9 s／0.2 s，而編譯好的執行檔是 user 0.00／sys 0.00、wall 4.00 s、1 次 voluntary
+  context switch。要量時間就 `teyru build` 一次再量那支執行檔（`sh scripts/bench.sh` 即如此做）。
+  另一個同類陷阱：**shell 自己的 `time` 關鍵字報的是外層 job 的 CPU，不是程式的**——同一個執行檔，
+  shell 的 `time` 說 user 14.3／sys 37.6，`/usr/bin/time -v` 說 0.00／sys 0.00。要數字就別用 shell 的。
 - **端到端**：在 `tests/programs/` 放 `xxx.teyru` 與 `xxx.expected`。
   需要命令列參數時另外放 `xxx.args`（每行一個）。`go test` 會自動編譯並比對輸出。
   `tests/` 是 `teyru-lang/tests` 的 submodule：改測試要在**那個**倉庫提交，這裡只會
