@@ -92,6 +92,12 @@ typedef struct tychunk {
      were an object traces a garbage class pointer -- and writes the mark bit
      into a live object's payload. */
   uint8_t *starts;
+  /* Set by the collector when it marks an object here: whether anything in the
+     slab is still live, which is what decides between walking the slab and
+     handing the whole thing back to the system. The mark phase is where that is
+     known, so the sweep below reads it instead of walking the blocks to find
+     out. */
+  uint8_t live_any;
 } tychunk;
 
 /* The slabs no thread is bumping in: a thread hands its slab here when the slab
@@ -237,7 +243,10 @@ static int obj_in_chunk(tychunk *c, char *p) {
   return sz >= TY_HDR;
 }
 
-static int valid_obj(char *p) {
+/* `slab`, when not NULL, receives the slab the answer came from: the collector
+   charges the object to it. It is written only when the answer is 1, so a caller
+   that reads it has a real object in hand. */
+static int valid_obj(char *p, tychunk **slab) {
   if (((uintptr_t)p) & (TY_ALIGN - 1)) return 0;
   /* Outside the range the slabs cover: no slab can hold this word, so the walk
      below would answer 0 for it anyway. Most of what a conservative scan reads
@@ -253,6 +262,7 @@ static int valid_obj(char *p) {
      it points at. */
   if (valid_obj_last) {
     int r = obj_in_chunk(valid_obj_last, p);
+    if (r > 0 && slab) *slab = valid_obj_last;
     if (r >= 0) return r;
   }
   for (size_t i = 0; i < gc_nslabs; i++) {
@@ -261,6 +271,7 @@ static int valid_obj(char *p) {
     int r = obj_in_chunk(c, p);
     if (r >= 0) {
       valid_obj_last = c;
+      if (r > 0 && slab) *slab = c;
       return r;
     }
   }
@@ -296,10 +307,19 @@ static void trace_object(void *obj);
 
 static void mark_value(void *p) {
   if (!p) return;
-  if (!valid_obj((char *)p)) return;
+  tychunk *slab = NULL;
+  if (!valid_obj((char *)p, &slab)) return;
   uint64_t *h = hdr_of(p);
   if (h[1] & TY_MARK_BIT) return;
   h[1] |= TY_MARK_BIT;
+  /* The collector's own bookkeeping, kept where the one pass that sees every
+     live object is: which slabs hold something live -- what decides whether a
+     slab is walked or handed back -- and how many bytes are live, which is what
+     the next collection's budget is derived from. Deriving the same two answers
+     from the heap afterwards means walking every block of every slab a second
+     time. */
+  slab->live_any = 1;
+  live_bytes += (int64_t)(h[0] & TY_SIZE_MASK);
   if (mark_sp < (1 << 20)) mark_stack[mark_sp++] = p;
 }
 
@@ -358,6 +378,10 @@ static void collect_slabs(void) {
   char *lo = NULL, *hi = NULL;
   for (size_t i = 0; i < gc_nslabs; i++) {
     tychunk *c = gc_slabs[i];
+    /* Nothing is marked in any slab yet. The sweep of the previous collection
+       cleared the mark bits, and this is what stands in for them while this one
+       runs. */
+    c->live_any = 0;
     if (!lo || c->mem < lo) lo = c->mem;
     if (!hi || c->mem + c->cap > hi) hi = c->mem + c->cap;
   }
@@ -402,6 +426,9 @@ void ty_gc_locked(void) {
   collect_slabs();
   build_block_starts();
   mark_sp = 0;
+  /* Counted by mark_value, the one place that sees every live object exactly
+     once. */
+  live_bytes = 0;
   /* roots: every thread's shadow stack, and its stack and registers */
   for (tythread *t = ty_thread_list(); t; t = t->next) {
     if (t->state == TY_TH_DONE) continue; /* its stack is going away with it */
@@ -434,26 +461,20 @@ void ty_gc_locked(void) {
      reclaimed chunk can never be handed out again. A chunk with no live object
      is returned to the system instead of being walked on every later cycle;
      this keeps the cost of a collection proportional to live data rather than
-     to everything ever allocated.
+     to everything ever allocated. Which chunks those are was settled while
+     marking -- the mark bit and the chunk's own flag are set together -- so this
+     pass reads one flag per chunk and never walks a chunk it is going to
+     release.
      A thread's private slab is walked like any other, but never released: the
      thread is still bumping through it, and it will hand it back itself once it
      has filled it. */
   for (int i = 0; i < TY_NCLASS; i++) freelist[i] = NULL;
   bigfree = NULL;
-  live_bytes = 0;
   for (size_t si = 0; si < gc_nslabs; si++) {
     tychunk *c = gc_slabs[si];
     /* the first gc_nshared entries are the shared list (collect_slabs) */
     int32_t shared = si < gc_nshared;
-    int64_t live = 0;
-    for (char *p = c->mem; p < c->mem + c->used;) {
-      uint64_t raw = *(uint64_t *)p;
-      int64_t sz = (int64_t)(raw & TY_SIZE_MASK);
-      if (sz < (int64_t)TY_HDR) break; /* never walk off a damaged chunk */
-      if (!(raw & TY_FREE_BIT) && (*(uint64_t *)(p + 8) & TY_MARK_BIT)) live += sz;
-      p += sz;
-    }
-    if (shared && live == 0 && c->used > 0) {
+    if (shared && !c->live_any && c->used > 0) {
       for (tychunk **pp = &chunks; *pp; pp = &(*pp)->next) {
         if (*pp == c) {
           *pp = c->next;
@@ -485,7 +506,6 @@ void ty_gc_locked(void) {
       }
       p += sz;
     }
-    live_bytes += live;
   }
   valid_obj_forget();
   /* Every thread's budget starts again: nothing allocated before this point is
@@ -566,6 +586,7 @@ static tychunk *chunk_new(size_t total) {
     c->cap = cap;
     c->used = 0;
   c->next = NULL;
+  c->live_any = 0;
   if (!c->mem || !c->starts) abort();
   return c;
 }
@@ -1167,18 +1188,46 @@ void *ty_arr_ref(tyarr *a, int64_t i) { return *(void **)ty_arr_slot_ref(a, i); 
 
 /* ------------------------------------------------------------------ boxing */
 
-/* A box is a wrapper object with one field, and the wrapper classes build their
-   own (lib/04_boxing.teyru): `Integer.valueOf(5)` is `new Integer(5)` in Teyru,
-   which the compiler lowers to ty_alloc and a store, and `intValue()` reads the
-   field. The helpers that used to be here -- ty_box_int and its seven siblings,
-   the eight unboxing readers, and the sixty-odd functions over their payloads
-   -- are methods of those classes now.
+#define DEFBOX(NAME, IDX, CT, JT, CONV)                                     \
+  typedef struct NAME##Box { tyobj obj; JT v; } NAME##Box;             \
+  void *ty_box_##NAME(JT v) {                                          \
+    NAME##Box *b = (NAME##Box *)ty_alloc(sizeof(NAME##Box));           \
+    b->obj.cls = TY_BOX[IDX];                                          \
+    b->v = v;                                                          \
+    return b;                                                          \
+  }                                                                    \
+  JT ty_unbox_##NAME(void *o) {                                        \
+    if (!o) ty_npe();                                                  \
+    return ((NAME##Box *)o)->v;                                        \
+  }
 
-   What is left of the box in C is the memory: the tyintbox..tyshortbox structs
-   in tyrt.h, which the reflection path opens through a raw pointer
-   (tyrt_reflect.c) and ty_prim_match reads by kind. The compiler asserts that
-   the struct it emits for each wrapper has the same size and field offset as
-   the runtime's view of it (emit.go's structOf), so the two cannot drift. */
+DEFBOX(int, 5, tyint, int32_t, )
+DEFBOX(long, 6, tylong, int64_t, )
+DEFBOX(short, 3, tyshort, int16_t, )
+DEFBOX(byte, 2, tybyte, int8_t, )
+DEFBOX(char, 4, tychar, uint16_t, )
+DEFBOX(bool, 1, tybool, int32_t, )
+
+void *ty_box_double(double v) {
+  tydoublebox *b = (tydoublebox *)ty_alloc(sizeof(tydoublebox));
+  b->obj.cls = TY_BOX[8];
+  b->v = v;
+  return b;
+}
+double ty_unbox_double(void *o) {
+  if (!o) ty_npe();
+  return ((tydoublebox *)o)->v;
+}
+void *ty_box_float(float v) {
+  tyfloatbox *b = (tyfloatbox *)ty_alloc(sizeof(tyfloatbox));
+  b->obj.cls = TY_BOX[7];
+  b->v = v;
+  return b;
+}
+float ty_unbox_float(void *o) {
+  if (!o) ty_npe();
+  return ((tyfloatbox *)o)->v;
+}
 
 /* ------------------------------------------------------------------ output */
 
@@ -1496,6 +1545,9 @@ int32_t ty_is_upper_case(uint16_t c) { return TY_ASCII_UPPER(c); }
 int32_t ty_is_lower_case(uint16_t c) { return TY_ASCII_LOWER(c); }
 int32_t ty_char_upper(uint16_t c) { return TY_ASCII_LOWER(c) ? c - 32 : c; }
 int32_t ty_char_lower(uint16_t c) { return TY_ASCII_UPPER(c) ? c + 32 : c; }
+int32_t ty_char_compare(uint16_t a, uint16_t b) { return a < b ? -1 : (a > b ? 1 : 0); }
+tystr *ty_char_tostr_val(uint16_t c) { return ty_str_of_char(c); }
+int32_t ty_char_hash_val(uint16_t c) { return (int32_t)c; }
 
 /* Java's getNumericValue answers the value of a digit in any radix up to 36,
    -1 for a character that is not one, and -2 for a character that has a
@@ -1517,13 +1569,26 @@ int32_t ty_char_digit(uint16_t c, int32_t radix) {
 
 /* ---------------------------------------------------- the wrappers' values */
 
-/* The wrappers' hashes and text forms are the classes' own methods now
-   (lib/04_boxing.teyru): Integer.hashCode(int) is its value, Long's is the two
-   halves folded together, Boolean's is 1231 or 1237, and the toString forms are
-   the String.valueOf conversions that follow. The radix formatting below, and
-   the String.valueOf helpers it and the wrappers both use, stay: those are the
-   text conversions, a group of their own. */
+int32_t ty_byte_hash_val(int32_t v) { return v; }
+int32_t ty_short_hash_val(int32_t v) { return v; }
+int32_t ty_int_hash_val(int32_t v) { return v; }
+/* Long.hashCode(long) is the two halves folded together, and Double's is the
+   same fold over the bits -- Java defines both that way so that a map keyed by
+   the box and a map keyed by the primitive agree. */
+int32_t ty_long_hash_val(int64_t v) { return (int32_t)(v ^ (int64_t)((uint64_t)v >> 32)); }
+int32_t ty_double_hash_val(double v) {
+  int64_t b = bits_of_double(v);
+  return (int32_t)(b ^ (int64_t)((uint64_t)b >> 32));
+}
+int32_t ty_bool_hash_val(int32_t v) { return v ? 1231 : 1237; }
+/* Boolean.hashCode() is that same class hash and not the raw value the
+   unboxing helper answers with; a Boolean's %h used to print 1. */
+int32_t ty_bool_hash_box(void *o) { return ty_unbox_bool(o) ? 1231 : 1237; }
 int32_t ty_identity_hash(void *o) { return ty_obj_hash(o); }
+
+tystr *ty_byte_tostr_val(int32_t v) { return ty_str_of_int(v); }
+tystr *ty_short_tostr_val(int32_t v) { return ty_str_of_int(v); }
+tystr *ty_float_tostr_val(float v) { return ty_str_of_float(v); }
 
 /* Radix formatting. The digits come out least significant first into a buffer
    that is filled from the end, so no reversal is needed. A radix outside 2..36
@@ -1672,11 +1737,48 @@ float ty_bits_float(int32_t b) {
   memcpy(&v, &b, sizeof v);
   return v;
 }
-/* Boolean.compare (`x == y ? 0 : (x ? 1 : -1)`) and every wrapper's equals are
-   the wrapper classes' own methods now: `o instanceof Integer && value ==
-   ((Integer) o).value`, which the class test keeps from being true across two
-   wrappers, and which the classes being final makes exactly the class test
-   ty_box_equals used to run over the two boxes' tyclass pointers. */
+/* Boolean.compare is `x == y ? 0 : (x ? 1 : -1)`, not a subtraction: the two
+   values are 0 and 1 and Java orders false first, which a subtraction of the
+   raw ints would also give -- but writing the rule down keeps it from
+   depending on that. */
+int32_t ty_bool_compare(int32_t a, int32_t b) {
+  if (a == b) return 0;
+  return a ? 1 : -1;
+}
+/* Every wrapper's equals, and the one place the class of the argument matters.
+   Java's contract is `o instanceof Integer && value == ((Integer)o).intValue()`
+   -- the class first, the value second -- so an Integer never equals a Long,
+   and Boolean.TRUE never equals an Integer holding 1. tyrt2.c's helpers
+   (ty_int_equals and its siblings) compare the values alone, which made every
+   numeric wrapper equal every other one carrying the same number; Byte and
+   Short had no helper at all and their equals compiled to a constant false.
+   One function serves all eight wrappers because the receiver's class says
+   which wrapper this is: if the two classes differ the answer is already no,
+   and if they agree the payload decides. */
+int32_t ty_box_equals(void *a, void *b) {
+  tyclass *ca, *cb;
+  int32_t i;
+  if (!a) ty_npe();
+  if (!b) return 0;
+  ca = ((tyobj *)a)->cls;
+  cb = ((tyobj *)b)->cls;
+  if (ca != cb) return 0;
+  for (i = 1; i <= 8; i++)
+    if (ca == TY_BOX[i]) break;
+  switch (i) {
+  case 1: return ((tyboolbox *)a)->v == ((tyboolbox *)b)->v;
+  case 2: return ((tybytebox *)a)->v == ((tybytebox *)b)->v;
+  case 3: return ((tyshortbox *)a)->v == ((tyshortbox *)b)->v;
+  case 4: return ((tycharbox *)a)->v == ((tycharbox *)b)->v;
+  case 5: return ((tyintbox *)a)->v == ((tyintbox *)b)->v;
+  case 6: return ((tylongbox *)a)->v == ((tylongbox *)b)->v;
+  /* the two floating types compare through floatToIntBits, so NaN equals NaN
+     and 0.0f is not -0.0f -- the same collapse ty_float_bits and ty_double_bits
+     already give hashCode and compare */
+  case 7: return ty_float_bits(((tyfloatbox *)a)->v) == ty_float_bits(((tyfloatbox *)b)->v);
+  default: return ty_double_bits(((tydoublebox *)a)->v) == ty_double_bits(((tydoublebox *)b)->v);
+  }
+}
 
 /* -------------------------------------------------------------- parsing */
 
