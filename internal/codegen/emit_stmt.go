@@ -415,6 +415,20 @@ func (e *Emitter) localVar(v *ast.LocalVar) {
 		}
 		ct := e.ctype(vd.Sym.Type)
 		name := e.localName(vd.Sym)
+		if e.fnTry {
+			// See the comment where fnTry is set: a value that has to survive a
+			// longjmp is indeterminate unless it is volatile, and a stack
+			// allocation cannot be qualified at all, so in a function that
+			// catches, locals are ordinary volatile C variables.
+			if vd.Init == nil {
+				e.line("%s volatile %s = %s;\n", ct, name, zeroOf(ct))
+				continue
+			}
+			e.hoistPatterns(vd.Init)
+			e.line("%s volatile %s = %s;\n", ct, name, e.coerce(e.expr(vd.Init), vd.Init.GetType(), vd.Sym.Type))
+			e.clearPatterns()
+			continue
+		}
 		if vd.Init == nil {
 			e.line("%s %s = %s;\n", ct, name, zeroOf(ct))
 			continue

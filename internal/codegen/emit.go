@@ -25,6 +25,7 @@ type Emitter struct {
 	meta        strings.Builder  // member tables, shipped only if reflection is used
 	metaInit    []string         // the assignments that attach them at startup
 	reflectUsed bool             // whether any call site asks for reflection
+	fnTry       bool             // whether the function being emitted contains a try statement
 	strings     map[string]int
 	strOrder    []string
 	mainCls     *ast.Class
@@ -437,6 +438,44 @@ func (e *Emitter) emitClassMeta(cl *ast.Class) {
 	if len(offs) == 0 {
 		offs = []string{"0"}
 	}
+	// The offsets above are computed here, by util.FieldLayout; the layout they
+	// describe is computed by the C compiler, from the struct written a few
+	// hundred lines up. Two calculations, one layout, and a disagreement between
+	// them is not a wrong answer a test would catch -- the collector walks these
+	// offsets and would mark the wrong word, which frees a live object. So the
+	// two are tied together where neither can drift without the build saying so,
+	// the same way the primitive wrappers' layout is tied to the runtime's
+	// struct. It costs nothing at run time: the assert is compiled away.
+	// The two classes that are typedefs of runtime types have no struct here;
+	// their layout is the runtime's, and the collector's offsets for them come
+	// from the same place the runtime's own code gets them.
+	if cl.Special != "String" && cl.Special != "sb" {
+		i := 0
+		for _, f := range cl.InstFields {
+			if !ast.IsRef(f.Type) {
+				continue
+			}
+			if i >= len(refOffsets) {
+				break
+			}
+			fmt.Fprintf(&e.data, "_Static_assert(offsetof(struct %s, f_%s) == %d, \"%s.%s is not where the collector looks for it\");\n",
+				cname(cl), mangle(f.Name), refOffsets[i], cl.Full, f.Name)
+			i++
+		}
+		for _, v := range e.prog.CapturedVars(cl) {
+			if !ast.IsRef(v.Type) {
+				continue
+			}
+			if i >= len(refOffsets) {
+				break
+			}
+			fmt.Fprintf(&e.data, "_Static_assert(offsetof(struct %s, cap_%s) == %d, \"%s captures %s somewhere else than the collector looks\");\n",
+				cname(cl), mangle(v.Name), refOffsets[i], cl.Full, v.Name)
+			i++
+		}
+		fmt.Fprintf(&e.data, "_Static_assert(sizeof(struct %s) == %d, \"%s is not the size the allocator gives it\");\n",
+			cname(cl), isize, cl.Full)
+	}
 	fmt.Fprintf(&e.data, "static int32_t refs_%s[] = {%s};\n", mangle(cl.Full), strings.Join(offs, ", "))
 	clinit := "NULL"
 	if cl.ClInit != nil {
@@ -559,6 +598,56 @@ func bodyOf(m *ast.Method) *ast.Block {
 	return nil
 }
 
+// blockHasTry reports whether a statement block contains a try, at any depth.
+//
+// It walks statements and never expressions, which is what keeps a lambda inside
+// one from counting: a lambda's body is a function of its own, emitted
+// separately, and its try statements say nothing about where this function's
+// locals have to live.
+func blockHasTry(b *ast.Block) bool {
+	if b == nil {
+		return false
+	}
+	var stmt func(ast.Stmt) bool
+	stmt = func(s ast.Stmt) bool {
+		switch v := s.(type) {
+		case *ast.Try:
+			return true
+		case *ast.Block:
+			for _, s2 := range v.Stmts {
+				if stmt(s2) {
+					return true
+				}
+			}
+		case *ast.If:
+			return stmt(v.Then) || stmt(v.Else)
+		case *ast.While:
+			return stmt(v.Body)
+		case *ast.DoWhile:
+			return stmt(v.Body)
+		case *ast.For:
+			return stmt(v.Body)
+		case *ast.ForEach:
+			return stmt(v.Body)
+		case *ast.Switch:
+			for _, c := range v.Cases {
+				for _, s2 := range c.Body {
+					if stmt(s2) {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+	for _, s := range b.Stmts {
+		if stmt(s) {
+			return true
+		}
+	}
+	return false
+}
+
 // signature renders the C declaration of a method.
 func (e *Emitter) signature(m *ast.Method) string {
 	ret := e.ctype(m.Result)
@@ -570,6 +659,19 @@ func (e *Emitter) signature(m *ast.Method) string {
 		params = append(params, cname(m.Owner)+"* this")
 	}
 	for i, p := range m.Params {
+		// A parameter is a C parameter here, so it is an automatic object of the
+		// function that contains the setjmp -- and if the program assigns to it
+		// inside a try and reads it in the catch, the C standard makes its value
+		// after the longjmp indeterminate. It has to be volatile, and the
+		// qualifier has to sit after the type: `volatile T*` is a pointer to a
+		// volatile T, which would qualify the pointee and not the variable, and
+		// it also disagrees with the forward declaration. Top-level qualifiers on
+		// a parameter are ignored by the C compiler, so the prototype stays
+		// plain and the two still agree.
+		if e.fnTry {
+			params = append(params, fmt.Sprintf("%s volatile a%d", e.ctype(p), i))
+			continue
+		}
 		params = append(params, fmt.Sprintf("%s a%d", e.ctype(p), i))
 	}
 	// A constructor of a class that captures the enclosing method's variables
@@ -618,6 +720,15 @@ func (e *Emitter) emitMethod(cl *ast.Class, m *ast.Method, idx int) {
 		return
 	}
 	e.indent = 0
+	// A local assigned inside a try and read in its catch or finally has to
+	// survive a longjmp, and the C standard calls such a value indeterminate
+	// unless it is volatile. So every local (and parameter) of a function that
+	// contains a try at all is emitted volatile: the rule is conservative in the
+	// safe direction -- a local cannot be proved safe by its position, because
+	// the emitter's own scope walks are many -- and it costs only the functions
+	// that catch, which the hot loops are not.
+	prevTry := e.fnTry
+	e.fnTry = blockHasTry(body)
 	fmt.Fprintf(e.code, "static %s {\n", e.signature(m))
 	e.indent++
 	prevClass, prevRet := e.curClass, e.retType
@@ -629,6 +740,7 @@ func (e *Emitter) emitMethod(cl *ast.Class, m *ast.Method, idx int) {
 	defer func() {
 		e.curClass, e.retType = prevClass, prevRet
 		e.stackLocals = prevStack
+		e.fnTry = prevTry
 		restore()
 	}()
 	for i, pv := range m.ParamVars {
