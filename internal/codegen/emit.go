@@ -102,7 +102,10 @@ func Emit(p *sema.Program) string {
 	}
 	out.WriteString(e.code.String())
 	out.WriteString(e.entry())
-	return out.String()
+	// The last step is the one piece of reachability this back end decides for
+	// itself: a vtable holds the address of every method its class declares, and
+	// an address is what link-time optimisation cannot drop (see prune.go).
+	return pruneVtables(out.String())
 }
 
 func (e *Emitter) run() {
