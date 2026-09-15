@@ -503,6 +503,18 @@ class HttpResponse {
   // is what a body of unknown length needs.
   public boolean chunkedBody = false
 
+  /* gzipBody asks the connection loop to send this body compressed, and it is
+     off unless a handler turns it on. It is honoured only when the request
+     offered gzip in Accept-Encoding and the body is worth what gzip costs; a
+     request that did not offer it, and a response that did not ask for it, both
+     go on the wire exactly as the handler wrote them. */
+  public boolean gzipBody = false
+
+  /* Below this a body is not compressed whatever it holds. gzip's own header
+     and trailer are eighteen bytes, and a body that is already one packet is
+     not made better by being one packet and a header. */
+  public static final int MIN_GZIP_BYTES = 1024
+
   public HttpResponse header(String name, String value) {
     headerNames.add(name)
     headerValues.add(value)
@@ -566,6 +578,59 @@ class HttpResponse {
       return b.toString() + chunked(body)
     }
     return b.toString() + body
+  }
+
+  /* applyGzip is what the connection loop calls on its way out, and it is
+     public because a caller that renders a response itself -- a test, a
+     proxy -- has to make the same decision the loop makes. */
+  public void applyGzip(String acceptEncoding) {
+    if (gzipBody == false) {
+      return
+    }
+    /* From here on the answer depends on a request header, so it says so: a
+       cache that kept one answer for both kinds of request would hand a gzip
+       body to a client that never said it could decode one. Vary is written
+       whether or not this particular request got the compressed form. */
+    header("Vary", "Accept-Encoding")
+    if (acceptsGzip(acceptEncoding) == false || body.length() < MIN_GZIP_BYTES) {
+      return
+    }
+    String packed = Gzip.compress(body)
+    if (packed.length() >= body.length()) {
+      return
+    }
+    header("Content-Encoding", "gzip")
+    body = packed
+  }
+
+  /* acceptsGzip reads an Accept-Encoding header. The header is a comma
+     separated list of codings, each optionally followed by a ";q=" weight
+     between nothing and one, and a weight of zero is a refusal rather than an
+     offer. That last part is the one a server that knows a single coding has to
+     read: "gzip;q=0" is a client saying it would rather have anything else. */
+  public static boolean acceptsGzip(String header) {
+    if (header == null || header.length() == 0) {
+      return false
+    }
+    String[] parts = header.split(",")
+    for (int i = 0 : i < parts.length : i++) {
+      String p = parts[i].trim().toLowerCase()
+      int semi = p.indexOf(';')
+      String name = semi < 0 ? p : p.substring(0, semi).trim()
+      if (name.equals("gzip") == false && name.equals("*") == false) {
+        continue
+      }
+      int q = p.indexOf("q=")
+      if (q < 0) {
+        return true
+      }
+      String v = p.substring(q + 2).trim()
+      if (v.equals("0") || v.equals("0.0") || v.equals("0.00") || v.equals("0.000")) {
+        continue
+      }
+      return true
+    }
+    return false
   }
 
   // chunked renders a body as the chunks a client reads until the one of length
@@ -1423,6 +1488,9 @@ class HttpServer {
     // The CORS headers go on the answer that is actually sent: a route builds
     // its own response, so headers set on the one above would be dropped.
     applyCors(req, out)
+    // And so does the compressed body, for the same reason: the response the
+    // handler built is the one whose flag is read and whose body is packed.
+    out.applyGzip(req.header("Accept-Encoding"))
     return out
   }
 
