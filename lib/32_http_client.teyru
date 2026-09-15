@@ -100,6 +100,14 @@ class HttpClientRequest {
     return header("Content-Type", type)
   }
 
+  /* acceptGzip asks the server for a compressed body. It is off unless a caller
+     asks for it, because Accept-Encoding is the request saying what it can
+     decode: a client that adds it without being told is a client that gets
+     bytes it did not ask for. */
+  public HttpClientRequest acceptGzip() {
+    return header("Accept-Encoding", "gzip")
+  }
+
   // timeout is the socket timeout a send uses, in milliseconds. Java's
   // HttpClientRequest.timeout takes a Duration; this language's clock is milliseconds
   // in the places that matter, so it is an int.
@@ -215,7 +223,36 @@ class HttpClientResponse {
 // the reading half of the client, and it is separate from it so that it can be
 // tested without a socket.
 class ClientResponseParser {
+  /* parse reads one response and expands a body the answer declared as
+     compressed. The headers are left as they arrived, Content-Length among
+     them: that length is what was on the wire, and the body a caller reads is
+     what it said. */
   public static HttpClientResponse parse(SocketInputStream in) {
+    HttpClientResponse res = parseRaw(in)
+    if (res != null) {
+      decodeBody(res)
+    }
+    return res
+  }
+
+  /* of is parse for a response that is already in hand, whole. */
+  public static HttpClientResponse of(String raw) {
+    HttpClientResponse res = ofRaw(raw)
+    decodeBody(res)
+    return res
+  }
+
+  /* decodeBody expands a body the answer said was gzip, and does nothing to
+     one it did not. */
+  public static void decodeBody(HttpClientResponse res) {
+    String enc = res.header("Content-Encoding")
+    if (enc.length() == 0 || enc.toLowerCase().indexOf("gzip") < 0) {
+      return
+    }
+    res.body = Gzip.decompress(res.body)
+  }
+
+  private static HttpClientResponse parseRaw(SocketInputStream in) {
     String statusLine = in.readLine()
     if (statusLine == null) {
       return null
@@ -247,7 +284,7 @@ class ClientResponseParser {
     // a 1xx is an interim answer and the real one follows; 204 and 304 have no
     // body whatever their headers say
     if (res.status >= 100 && res.status < 200) {
-      return parse(in)
+      return parseRaw(in)
     }
     if (chunked) {
       res.body = readChunks(in)
@@ -279,7 +316,7 @@ class ClientResponseParser {
   // as parse does, for a caller that has the text rather than a stream -- a
   // test, a proxy, a cached answer -- and it is here rather than in the test so
   // that the two readings cannot drift apart.
-  public static HttpClientResponse of(String raw) {
+  private static HttpClientResponse ofRaw(String raw) {
     int headEnd = raw.indexOf("\r\n\r\n")
     String head = headEnd < 0 ? raw : raw.substring(0, headEnd)
     String body = headEnd < 0 ? "" : raw.substring(headEnd + 4)
